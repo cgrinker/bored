@@ -58,7 +58,7 @@ This document tracks the remaining work required to take the current page manage
 The `AsyncIo` abstraction now routes work through a portable thread-pool backend while platform adapters are being implemented.
 
 1. **Unified Interface**
-   - ✅ Design an `AsyncIo` abstraction that submits reads/writes and flushes via futures/promises (thread-pool fallback in place).
+   - ✅ Design an `AsyncIo` abstraction that submits reads/writes and flushes via futures/promises (thread-pool fallback in place) with explicit `AsyncIoBackend` selection.
    - ☐ Provide platform adapters: `IoRingDispatcher` for Windows IORing, `IoUringDispatcher` for Linux io_uring.
 
 2. **Dispatcher Runtime**

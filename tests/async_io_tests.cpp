@@ -4,12 +4,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <string_view>
 #include <system_error>
 
 using bored::storage::AsyncIo;
 using bored::storage::AsyncIoConfig;
+using bored::storage::AsyncIoBackend;
 using bored::storage::FileClass;
 using bored::storage::IoFlag;
 using bored::storage::ReadRequest;
@@ -29,7 +31,12 @@ std::filesystem::path temp_file_path()
 TEST_CASE("Thread pool async IO writes and reads data")
 {
     const auto path = temp_file_path();
-    auto io = bored::storage::create_async_io(AsyncIoConfig{.worker_threads = 2U, .queue_depth = 8U});
+    AsyncIoConfig config{};
+    config.worker_threads = 2U;
+    config.queue_depth = 8U;
+    config.shutdown_timeout = std::chrono::milliseconds{1000};
+    config.backend = AsyncIoBackend::ThreadPool;
+    auto io = bored::storage::create_async_io(config);
 
     constexpr std::string_view payload = "async-io";
     std::array<std::byte, payload.size()> write_buffer{};
@@ -71,7 +78,9 @@ TEST_CASE("Thread pool async IO writes and reads data")
 
 TEST_CASE("Async IO returns error when file missing")
 {
-    auto io = bored::storage::create_async_io();
+    AsyncIoConfig config{};
+    config.backend = AsyncIoBackend::ThreadPool;
+    auto io = bored::storage::create_async_io(config);
     ReadRequest request{};
     request.path = std::filesystem::temp_directory_path() / "bored_async_io_missing.bin";
     request.offset = 0U;

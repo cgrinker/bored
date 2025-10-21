@@ -59,10 +59,18 @@ struct IoResult {
 	std::error_code status{};
 };
 
+enum class AsyncIoBackend : std::uint8_t {
+	Auto,
+	ThreadPool,
+	WindowsIoRing,
+	LinuxIoUring
+};
+
 struct AsyncIoConfig {
 	std::size_t worker_threads = 4U;
 	std::size_t queue_depth = 128U;
 	std::chrono::milliseconds shutdown_timeout{1000};
+	AsyncIoBackend backend = AsyncIoBackend::Auto;
 };
 
 class AsyncIo {

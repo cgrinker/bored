@@ -59,7 +59,7 @@ This document captures the first pass at the on-disk layout for the experimental
   struct WriteRequest : IoDescriptor {
     const std::byte* data;
     std::size_t size;
-    IoFlags flags;
+    IoFlag flags;
   };
 
   struct IoResult {
@@ -76,7 +76,7 @@ This document captures the first pass at the on-disk layout for the experimental
   };
   ```
   Concrete `IoRingDispatcher` (Windows) and `IoUringDispatcher` (Linux) implementations translate descriptors into native SQE submissions and monitor CQEs to fulfil the returned futures/promises.
-- **Factory selection:** `create_async_io()` attempts to build the best available backend (IoRing/io_uring when present) and otherwise returns the thread-pool dispatcher, ensuring the storage layer remains asynchronous across platforms today.
+- **Factory selection:** `create_async_io()` inspects the `AsyncIoBackend` hint in `AsyncIoConfig` (`Auto`, `ThreadPool`, `WindowsIoRing`, `LinuxIoUring`). It instantiates the requested backend when available, otherwise falls back to the portable thread-pool implementation so the storage layer stays asynchronous on every platform today.
 - **Threading model:** A dedicated dispatcher thread owns the submission/completion queues. Storage components (buffer manager, WAL writer, checkpoint worker) run on separate threads and await their futures. This enables non-blocking prefetching, batched WAL writes, and overlapping flushes.
 - **Scheduling policy:**
   - Buffer manager issues asynchronous reads ahead of demand and tracks outstanding futures to maintain pin counts.
