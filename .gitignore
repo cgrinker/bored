@@ -1,0 +1,12 @@
+# CMake build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.vcxproj*
+*.sln
+
+# Presets and user-specific configuration
+CMakeUserPresets.json
+CMakePresets.json.user
