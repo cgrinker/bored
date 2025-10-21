@@ -1,5 +1,7 @@
 #include "bored/storage/page_operations.hpp"
 
+#include "bored/storage/free_space_map.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -77,7 +79,11 @@ std::span<const SlotPointer> slot_directory(std::span<const std::byte> page)
     return {end - static_cast<std::ptrdiff_t>(count), count};
 }
 
-bool initialize_page(std::span<std::byte> page, PageType type, std::uint32_t page_id, std::uint64_t lsn)
+bool initialize_page(std::span<std::byte> page,
+                     PageType type,
+                     std::uint32_t page_id,
+                     std::uint64_t lsn,
+                     FreeSpaceMap* fsm)
 {
     if (page.size() != kPageSize) {
         return false;
@@ -97,12 +103,17 @@ bool initialize_page(std::span<std::byte> page, PageType type, std::uint32_t pag
     header.fragment_count = 0U;
     header.flags = static_cast<std::uint16_t>(PageFlag::Dirty);
 
+    if (fsm != nullptr) {
+        sync_free_space(*fsm, page);
+    }
+
     return true;
 }
 
 std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
                                       std::span<const std::byte> payload,
-                                      std::uint64_t lsn)
+                                      std::uint64_t lsn,
+                                      FreeSpaceMap* fsm)
 {
     if (page.size() != kPageSize) {
         return std::nullopt;
@@ -138,6 +149,11 @@ std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
         if (header.fragment_count > 0U) {
             --header.fragment_count;
         }
+
+        if (fsm != nullptr) {
+            sync_free_space(*fsm, page);
+        }
+
         return TupleSlot{to_u16(*reusable), write_offset, payload_length};
     }
 
@@ -149,10 +165,17 @@ std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
     const std::uint16_t slot_index = header.tuple_count;
     ++header.tuple_count;
 
+    if (fsm != nullptr) {
+        sync_free_space(*fsm, page);
+    }
+
     return TupleSlot{slot_index, write_offset, payload_length};
 }
 
-bool delete_tuple(std::span<std::byte> page, std::uint16_t slot_index, std::uint64_t lsn)
+bool delete_tuple(std::span<std::byte> page,
+                  std::uint16_t slot_index,
+                  std::uint64_t lsn,
+                  FreeSpaceMap* fsm)
 {
     if (page.size() != kPageSize) {
         return false;
@@ -172,6 +195,10 @@ bool delete_tuple(std::span<std::byte> page, std::uint16_t slot_index, std::uint
     ++header.fragment_count;
     mark_dirty(header);
     header.lsn = lsn;
+
+    if (fsm != nullptr) {
+        sync_free_space(*fsm, page);
+    }
 
     return true;
 }
@@ -193,6 +220,54 @@ std::span<const std::byte> read_tuple(std::span<const std::byte> page, std::uint
     }
 
     return {page.data() + slot->offset, slot->length};
+}
+
+bool compact_page(std::span<std::byte> page,
+                  std::uint64_t lsn,
+                  FreeSpaceMap* fsm)
+{
+    if (page.size() != kPageSize) {
+        return false;
+    }
+
+    auto& header = page_header(page);
+    if (!is_valid(header)) {
+        return false;
+    }
+
+    std::uint16_t write_cursor = static_cast<std::uint16_t>(sizeof(PageHeader));
+    for (std::size_t index = 0; index < header.tuple_count; ++index) {
+        auto* slot = locate_slot(header, page, index);
+        if (slot == nullptr || slot->length == 0U) {
+            continue;
+        }
+
+        if (slot->offset != write_cursor) {
+            std::memmove(page.data() + write_cursor, page.data() + slot->offset, slot->length);
+        }
+
+        slot->offset = write_cursor;
+        write_cursor = static_cast<std::uint16_t>(write_cursor + slot->length);
+    }
+
+    header.free_start = write_cursor;
+    header.fragment_count = 0U;
+    mark_dirty(header);
+    header.lsn = lsn;
+
+    if (fsm != nullptr) {
+        sync_free_space(*fsm, page);
+    }
+
+    return true;
+}
+
+void sync_free_space(FreeSpaceMap& fsm, std::span<const std::byte> page)
+{
+    const auto& header = page_header(page);
+    fsm.record_page(header.page_id,
+                    static_cast<std::uint16_t>(compute_free_bytes(header)),
+                    header.fragment_count);
 }
 
 }  // namespace bored::storage

@@ -1,0 +1,121 @@
+#include "bored/storage/wal_payloads.hpp"
+
+#include <cstring>
+
+namespace bored::storage {
+
+namespace {
+
+bool fits(std::span<const std::byte> buffer, std::size_t required)
+{
+    return buffer.size() >= required;
+}
+
+bool fits(std::span<std::byte> buffer, std::size_t required)
+{
+    return buffer.size() >= required;
+}
+
+}  // namespace
+
+bool encode_wal_tuple_insert(std::span<std::byte> buffer,
+                             const WalTupleMeta& meta,
+                             std::span<const std::byte> tuple_data)
+{
+    if (meta.tuple_length != tuple_data.size()) {
+        return false;
+    }
+
+    const auto required = wal_tuple_insert_payload_size(meta.tuple_length);
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &meta, sizeof(WalTupleMeta));
+    std::memcpy(buffer.data() + sizeof(WalTupleMeta), tuple_data.data(), tuple_data.size());
+    return true;
+}
+
+bool encode_wal_tuple_delete(std::span<std::byte> buffer, const WalTupleMeta& meta)
+{
+    if (meta.tuple_length != 0U) {
+        return false;
+    }
+
+    if (!fits(buffer, wal_tuple_delete_payload_size())) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &meta, sizeof(WalTupleMeta));
+    return true;
+}
+
+bool encode_wal_tuple_update(std::span<std::byte> buffer,
+                             const WalTupleUpdateMeta& meta,
+                             std::span<const std::byte> new_tuple_data)
+{
+    if (meta.base.tuple_length != new_tuple_data.size()) {
+        return false;
+    }
+
+    const auto required = wal_tuple_update_payload_size(meta.base.tuple_length);
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &meta, sizeof(WalTupleUpdateMeta));
+    std::memcpy(buffer.data() + sizeof(WalTupleUpdateMeta), new_tuple_data.data(), new_tuple_data.size());
+    return true;
+}
+
+std::optional<WalTupleMeta> decode_wal_tuple_meta(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalTupleMeta))) {
+        return std::nullopt;
+    }
+
+    WalTupleMeta meta{};
+    std::memcpy(&meta, buffer.data(), sizeof(WalTupleMeta));
+    return meta;
+}
+
+std::optional<WalTupleUpdateMeta> decode_wal_tuple_update_meta(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalTupleUpdateMeta))) {
+        return std::nullopt;
+    }
+
+    WalTupleUpdateMeta meta{};
+    std::memcpy(&meta, buffer.data(), sizeof(WalTupleUpdateMeta));
+    return meta;
+}
+
+std::span<const std::byte> wal_tuple_payload(std::span<const std::byte> buffer, const WalTupleMeta& meta)
+{
+    const auto header_size = sizeof(WalTupleMeta);
+    if (meta.tuple_length == 0U) {
+        return {};
+    }
+
+    if (!fits(buffer, header_size + meta.tuple_length)) {
+        return {};
+    }
+
+    return buffer.subspan(header_size, meta.tuple_length);
+}
+
+std::span<const std::byte> wal_tuple_update_payload(std::span<const std::byte> buffer, const WalTupleUpdateMeta& meta)
+{
+    const auto header_size = sizeof(WalTupleUpdateMeta);
+    if (meta.base.tuple_length == 0U) {
+        return {};
+    }
+
+    if (!fits(buffer, header_size + meta.base.tuple_length)) {
+        return {};
+    }
+
+    return buffer.subspan(header_size, meta.base.tuple_length);
+}
+
+}  // namespace bored::storage

@@ -9,7 +9,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(${PROJECT_NAME}_lib
     src/greeter.cpp
+    src/storage/checksum.cpp
     src/storage/page_operations.cpp
+    src/storage/free_space_map.cpp
+    src/storage/wal_payloads.cpp
 )
 
 target_include_directories(${PROJECT_NAME}_lib

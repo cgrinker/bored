@@ -38,3 +38,6 @@ ctest --test-dir build --config Release
 - Add new headers under `include/` and implementation files under `src/`. Register additional sources in `CMakeLists.txt` as needed.
 - Tests live in `tests/` and are discovered automatically via `catch_discover_tests`.
 - Storage-layer design notes live in `docs/storage.md`; expand this document as the database grows.
+- CRC32C helpers for pages and WAL records live in `include/bored/storage/checksum.hpp` and are exercised in `tests/storage_format_tests.cpp`.
+- Tuple-level WAL payload helpers are in `include/bored/storage/wal_payloads.hpp` for constructing insert/update/delete records.
+- Free space tracking and page compaction utilities reside in `include/bored/storage/free_space_map.hpp` and `include/bored/storage/page_operations.hpp` (`compact_page`), with coverage in `tests/storage_format_tests.cpp`.

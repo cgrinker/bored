@@ -45,7 +45,7 @@ struct alignas(8) PageHeader final {
     std::uint8_t reserved = 0U;
     std::uint32_t page_id = 0U;
     std::uint64_t lsn = 0U;
-    std::uint16_t checksum = 0U;
+    std::uint32_t checksum = 0U;
     std::uint16_t flags = 0U;
     std::uint16_t free_start = static_cast<std::uint16_t>(sizeof(PageHeader));
     std::uint16_t free_end = static_cast<std::uint16_t>(kPageSize);

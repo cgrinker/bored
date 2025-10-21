@@ -4,7 +4,7 @@
 
  - [x] Scaffold the Project (generated CMake/vcpkg layout manually after project setup query)
 
- - [x] Customize the Project (core greeter library plus storage page/WAL design scaffolding)
+ - [x] Customize the Project (core greeter library plus storage page/WAL design scaffolding, CRC32C + tuple WAL payload helpers)
 
  - [x] Install Required Extensions (no extensions recommended)
 

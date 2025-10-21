@@ -14,7 +14,10 @@ enum class WalRecordType : std::uint16_t {
     PageDelta = 1,
     Commit = 2,
     Abort = 3,
-    Checkpoint = 4
+    Checkpoint = 4,
+    TupleInsert = 5,
+    TupleDelete = 6,
+    TupleUpdate = 7
 };
 
 enum class WalRecordFlag : std::uint16_t {
@@ -64,7 +67,7 @@ constexpr bool is_valid_segment_header(const WalSegmentHeader& header)
 
 constexpr bool is_valid_record_header(const WalRecordHeader& header)
 {
-    return header.total_length >= sizeof(WalRecordHeader) && header.type <= static_cast<std::uint16_t>(WalRecordType::Checkpoint);
+    return header.total_length >= sizeof(WalRecordHeader) && header.type <= static_cast<std::uint16_t>(WalRecordType::TupleUpdate);
 }
 
 static_assert(sizeof(WalSegmentHeader) == 32, "WalSegmentHeader expected to be 32 bytes");
