@@ -89,3 +89,9 @@ This document captures the first pass at the on-disk layout for the experimental
 - Extend page compaction to emit slot relocation metadata for indexes, integrate with WAL archival / recycling processes, and communicate flushes through `AsyncIo`.
 - Implement on-disk free-space map management to speed page allocation decisions and route reads/writes through the async dispatcher.
 - Design index logging payloads (B-Tree page splits/merges) using the same WAL infrastructure and schedule their persistence via `AsyncIo` implementations.
+- **Deferred: Linux io_uring backend roadmap**
+  - Target liburing 2.x to mirror the Windows IoRing dispatcher with queue-depth aware submission, per-file-class backpressure, and dsync-aware flush handling.
+  - Translate Linux `io_uring_cqe::res` results into `std::error_code` values using `std::system_category()` while preserving errno semantics.
+  - Provide runtime detection and a configuration guard (`AsyncIoBackend::LinuxIoUring`) so tests and production builds can opt-in explicitly.
+  - Stub integration tests that are skipped unless the backend is available; this keeps CI green while the implementation is deferred.
+  - Status: planning documented here; implementation intentionally deferred while the Windows IoRing backend stabilises.

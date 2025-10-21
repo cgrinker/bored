@@ -59,7 +59,8 @@ The `AsyncIo` abstraction now routes work through a portable thread-pool backend
 
 1. **Unified Interface**
    - ✅ Design an `AsyncIo` abstraction that submits reads/writes and flushes via futures/promises (thread-pool fallback in place) with explicit `AsyncIoBackend` selection.
-   - ☐ Provide platform adapters: `IoRingDispatcher` for Windows IORing, `IoUringDispatcher` for Linux io_uring.
+   - ✅ Ship the Windows `IoRingDispatcher` with queue-depth aware backpressure, dsync flushing, and graceful shutdown semantics.
+   - ☐ *(Deferred)* Build the Linux `IoUringDispatcher` once the pending plan in `docs/storage.md` is ready to execute.
 
 2. **Dispatcher Runtime**
    - ✅ Run submission/completion processing on dedicated threads; integrate with buffer manager, WAL writer, and checkpoint workers.

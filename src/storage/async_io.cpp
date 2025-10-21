@@ -2,19 +2,20 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <mutex>
+#include <string>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
-#include <string>
-#include <limits>
-#include <type_traits>
 
 #if defined(_WIN32)
 #    ifndef NOMINMAX
@@ -240,8 +241,9 @@ class IoRingDispatcher final : public AsyncIo {
 public:
     explicit IoRingDispatcher(const AsyncIoConfig& config)
         : config_{config}
+        , queue_capacity_{std::max<std::size_t>(1U, std::min<std::size_t>(config.queue_depth, static_cast<std::size_t>(std::numeric_limits<ULONG>::max())))}
     {
-        const ULONG queue_depth = static_cast<ULONG>(std::max<std::size_t>(1U, config_.queue_depth));
+        const ULONG queue_depth = static_cast<ULONG>(queue_capacity_);
         IORING_CREATE_FLAGS flags{};
         const auto hr = CreateIoRing(IORING_VERSION_3, flags, queue_depth, queue_depth, &ring_);
         if (FAILED(hr)) {
@@ -274,20 +276,21 @@ public:
     std::future<IoResult> flush(FileClass file_class) override
     {
         return std::async(std::launch::async, [this, file_class]() {
-            (void)file_class;
-            for (;;) {
-                {
-                    std::scoped_lock lock(operation_mutex_);
-                    if (operations_.empty()) {
-                        break;
-                    }
-                }
-                SubmitIoRing(ring_, 0, 1, nullptr);
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            submit_ring();
+            std::unique_lock lock(operation_mutex_);
+            const auto index = class_index(file_class);
+            if (index >= inflight_by_class_.size()) {
+                return IoResult{};
             }
 
+            operation_cv_.wait(lock, [this, index]() {
+                return inflight_by_class_[index] == 0U || !running_.load(std::memory_order_acquire);
+            });
+
             IoResult result{};
-            result.status.clear();
+            if (!running_.load(std::memory_order_acquire) && inflight_by_class_[index] != 0U) {
+                result.status = std::make_error_code(std::errc::operation_canceled);
+            }
             return result;
         });
     }
@@ -299,7 +302,9 @@ public:
             return;
         }
 
-        SubmitIoRing(ring_, 0, 0, nullptr);
+        operation_cv_.notify_all();
+        submit_ring();
+
         if (completion_thread_.joinable()) {
             completion_thread_.join();
         }
@@ -308,10 +313,12 @@ public:
         {
             std::scoped_lock lock(operation_mutex_);
             remaining.swap(operations_);
+            inflight_by_class_.fill(0U);
         }
+        operation_cv_.notify_all();
 
-        for (auto& [key, operation] : remaining) {
-            (void)key;
+        for (auto& [token, operation] : remaining) {
+            (void)token;
             if (operation->file != INVALID_HANDLE_VALUE) {
                 CancelIoEx(operation->file, nullptr);
                 CloseHandle(operation->file);
@@ -326,7 +333,6 @@ private:
     struct Operation {
         std::promise<IoResult> promise{};
         HANDLE file = INVALID_HANDLE_VALUE;
-        std::filesystem::path path{};
         std::uint64_t offset = 0U;
         FileClass file_class = FileClass::Data;
         IoFlag flags = IoFlag::None;
@@ -337,86 +343,105 @@ private:
         ULONG_PTR token = 0U;
     };
 
+    static constexpr std::size_t kFileClassCount = static_cast<std::size_t>(FileClass::WriteAheadLog) + 1U;
+    static_assert(kFileClassCount >= 2U, "Unexpected FileClass enumeration ordering");
+
     template <typename Request>
     std::future<IoResult> submit_operation(Request request)
     {
         static_assert(std::is_same_v<Request, ReadRequest> || std::is_same_v<Request, WriteRequest>, "Unsupported request type");
 
+        if (!running_.load(std::memory_order_acquire)) {
+            return cancelled_future();
+        }
+
         if constexpr (std::is_same_v<Request, ReadRequest>) {
             if (request.data == nullptr || request.size == 0U) {
-                std::promise<IoResult> promise;
-                auto future = promise.get_future();
-                promise.set_value(IoResult{0U, std::make_error_code(std::errc::invalid_argument)});
-                return future;
+                return invalid_argument_future();
             }
         } else {
             if (request.data == nullptr || request.size == 0U) {
-                std::promise<IoResult> promise;
-                auto future = promise.get_future();
-                promise.set_value(IoResult{0U, std::make_error_code(std::errc::invalid_argument)});
-                return future;
+                return invalid_argument_future();
             }
         }
 
         const auto handle = open_file(request);
         if (handle == INVALID_HANDLE_VALUE) {
             const auto error = GetLastError();
-            std::promise<IoResult> promise;
-            auto future = promise.get_future();
-            promise.set_value(IoResult{0U, std::error_code(static_cast<int>(error), std::system_category())});
-            return future;
+            return error_future(std::error_code(static_cast<int>(error), std::system_category()));
         }
 
         auto operation = std::make_unique<Operation>();
         operation->file = handle;
-        operation->path = request.path;
         operation->offset = request.offset;
         operation->file_class = request.file_class;
-        operation->token = reinterpret_cast<ULONG_PTR>(operation.get());
+        operation->is_write = std::is_same_v<Request, WriteRequest>;
+        operation->size = request.size;
 
         if constexpr (std::is_same_v<Request, ReadRequest>) {
-            operation->is_write = false;
             operation->read_buffer = request.data;
-            operation->size = request.size;
             operation->flags = IoFlag::None;
         } else {
-            operation->is_write = true;
             operation->write_buffer = request.data;
-            operation->size = request.size;
             operation->flags = request.flags;
         }
 
         auto future = operation->promise.get_future();
-        const auto token = operation->token;
 
-        {
-            std::scoped_lock lock(operation_mutex_);
-            operations_.emplace(token, std::move(operation));
-        }
+        std::unique_lock lock(operation_mutex_);
+        operation_cv_.wait(lock, [this]() {
+            return operations_.size() < queue_capacity_ || !running_.load(std::memory_order_acquire);
+        });
 
-        HRESULT hr = submit_to_ring(token);
-        if (FAILED(hr)) {
-            std::unique_ptr<Operation> cleanup;
-            {
-                std::scoped_lock lock(operation_mutex_);
-                auto iter = operations_.find(token);
-                if (iter != operations_.end()) {
-                    cleanup = std::move(iter->second);
-                    operations_.erase(iter);
-                }
-            }
-            if (cleanup) {
-                if (cleanup->file != INVALID_HANDLE_VALUE) {
-                    CloseHandle(cleanup->file);
-                }
-                IoResult result{};
-                result.status = std::error_code(static_cast<int>(HRESULT_CODE(hr)), std::system_category());
-                cleanup->promise.set_value(result);
-            }
+        if (!running_.load(std::memory_order_acquire)) {
+            lock.unlock();
+            CloseHandle(handle);
+            operation->promise.set_value(IoResult{0U, std::make_error_code(std::errc::operation_canceled)});
             return future;
         }
 
-        SubmitIoRing(ring_, 0, 0, nullptr);
+        const auto token = next_token_.fetch_add(1U, std::memory_order_relaxed);
+        operation->token = token;
+
+        const auto index = class_index(operation->file_class);
+        if (index < inflight_by_class_.size()) {
+            ++inflight_by_class_[index];
+        }
+
+        operations_.emplace(token, std::move(operation));
+        lock.unlock();
+
+        const auto hr = submit_to_ring(token);
+        if (FAILED(hr)) {
+            complete_with_error(token, hr);
+        } else {
+            submit_ring();
+        }
+
+        return future;
+    }
+
+    static std::future<IoResult> invalid_argument_future()
+    {
+        std::promise<IoResult> promise;
+        auto future = promise.get_future();
+        promise.set_value(IoResult{0U, std::make_error_code(std::errc::invalid_argument)});
+        return future;
+    }
+
+    static std::future<IoResult> cancelled_future()
+    {
+        std::promise<IoResult> promise;
+        auto future = promise.get_future();
+        promise.set_value(IoResult{0U, std::make_error_code(std::errc::operation_canceled)});
+        return future;
+    }
+
+    static std::future<IoResult> error_future(std::error_code error)
+    {
+        std::promise<IoResult> promise;
+        auto future = promise.get_future();
+        promise.set_value(IoResult{0U, error});
         return future;
     }
 
@@ -436,37 +461,97 @@ private:
 
     HRESULT submit_to_ring(ULONG_PTR token)
     {
-        std::scoped_lock lock(operation_mutex_);
-        auto iter = operations_.find(token);
-        if (iter == operations_.end()) {
-            return E_FAIL;
+        Operation* operation = nullptr;
+        {
+            std::scoped_lock lock(operation_mutex_);
+            auto iter = operations_.find(token);
+            if (iter == operations_.end()) {
+                return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+            }
+            operation = iter->second.get();
         }
 
-        auto* operation = iter->second.get();
-        const auto handle_ref = IoRingHandleRefFromHandle(operation->file);
         if (operation->size > std::numeric_limits<ULONG>::max()) {
             return HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
         }
 
+        const auto handle_ref = IoRingHandleRefFromHandle(operation->file);
         const auto length = static_cast<ULONG>(operation->size);
+
+        HRESULT hr = S_OK;
+
         if (operation->is_write) {
             auto buffer_ref = IoRingBufferRefFromPointer(const_cast<std::byte*>(operation->write_buffer));
             const auto write_flags = any(operation->flags & IoFlag::Dsync) ? FILE_WRITE_FLAGS_WRITE_THROUGH : FILE_WRITE_FLAGS_NONE;
-            return BuildIoRingWriteFile(ring_, handle_ref, buffer_ref, length, operation->offset, write_flags, operation->token, IOSQE_FLAGS_NONE);
+            hr = BuildIoRingWriteFile(ring_, handle_ref, buffer_ref, length, operation->offset, write_flags, operation->token, IOSQE_FLAGS_NONE);
+        } else {
+            auto buffer_ref = IoRingBufferRefFromPointer(operation->read_buffer);
+            hr = BuildIoRingReadFile(ring_, handle_ref, buffer_ref, length, operation->offset, operation->token, IOSQE_FLAGS_NONE);
         }
 
-        auto buffer_ref = IoRingBufferRefFromPointer(operation->read_buffer);
-        return BuildIoRingReadFile(ring_, handle_ref, buffer_ref, length, operation->offset, operation->token, IOSQE_FLAGS_NONE);
+#if defined(IORING_E_SUBMISSION_QUEUE_FULL) || defined(IORING_E_COMPLETION_QUEUE_FULL)
+    if (
+#    if defined(IORING_E_SUBMISSION_QUEUE_FULL)
+        hr == IORING_E_SUBMISSION_QUEUE_FULL
+#    endif
+#    if defined(IORING_E_SUBMISSION_QUEUE_FULL) && defined(IORING_E_COMPLETION_QUEUE_FULL)
+        ||
+#    endif
+#    if defined(IORING_E_COMPLETION_QUEUE_FULL)
+        hr == IORING_E_COMPLETION_QUEUE_FULL
+#    endif
+    ) {
+            submit_ring();
+            std::this_thread::yield();
+            if (operation->is_write) {
+                auto buffer_ref = IoRingBufferRefFromPointer(const_cast<std::byte*>(operation->write_buffer));
+                const auto write_flags = any(operation->flags & IoFlag::Dsync) ? FILE_WRITE_FLAGS_WRITE_THROUGH : FILE_WRITE_FLAGS_NONE;
+                hr = BuildIoRingWriteFile(ring_, handle_ref, buffer_ref, length, operation->offset, write_flags, operation->token, IOSQE_FLAGS_NONE);
+            } else {
+                auto buffer_ref = IoRingBufferRefFromPointer(operation->read_buffer);
+                hr = BuildIoRingReadFile(ring_, handle_ref, buffer_ref, length, operation->offset, operation->token, IOSQE_FLAGS_NONE);
+            }
+        }
+#endif
+
+        return hr;
+    }
+
+    void complete_with_error(ULONG_PTR token, HRESULT hr)
+    {
+        std::unique_ptr<Operation> cleanup;
+        {
+            std::scoped_lock lock(operation_mutex_);
+            auto iter = operations_.find(token);
+            if (iter != operations_.end()) {
+                cleanup = std::move(iter->second);
+                decrement_inflight_locked(cleanup->file_class);
+                operations_.erase(iter);
+            }
+        }
+        operation_cv_.notify_all();
+
+        if (!cleanup) {
+            return;
+        }
+
+        if (cleanup->file != INVALID_HANDLE_VALUE) {
+            CloseHandle(cleanup->file);
+        }
+
+        IoResult result{};
+        result.status = std::error_code(static_cast<int>(HRESULT_CODE(hr)), std::system_category());
+        cleanup->promise.set_value(result);
     }
 
     void completion_loop()
     {
         while (running_.load(std::memory_order_acquire)) {
-            SubmitIoRing(ring_, 0, 1, nullptr);
+            submit_ring();
             drain_completions();
         }
 
-        SubmitIoRing(ring_, 0, 0, nullptr);
+        submit_ring();
         drain_completions();
     }
 
@@ -486,6 +571,7 @@ private:
             auto iter = operations_.find(completion.UserData);
             if (iter != operations_.end()) {
                 operation = std::move(iter->second);
+                decrement_inflight_locked(operation->file_class);
                 operations_.erase(iter);
             }
         }
@@ -500,7 +586,9 @@ private:
         } else {
             result.bytes_transferred = static_cast<std::size_t>(completion.Information);
             if (operation->is_write && any(operation->flags & IoFlag::Dsync)) {
-                FlushFileBuffers(operation->file);
+                if (!FlushFileBuffers(operation->file)) {
+                    result.status = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+                }
             }
         }
 
@@ -509,15 +597,41 @@ private:
         }
 
         operation->promise.set_value(result);
+        operation_cv_.notify_all();
+    }
+
+    void submit_ring()
+    {
+        (void)SubmitIoRing(ring_, 0, 0, nullptr);
+    }
+
+    static constexpr std::size_t class_index(FileClass file_class)
+    {
+        return static_cast<std::size_t>(file_class);
+    }
+
+    void decrement_inflight_locked(FileClass file_class)
+    {
+        const auto index = class_index(file_class);
+        if (index < inflight_by_class_.size()) {
+            auto& counter = inflight_by_class_[index];
+            if (counter > 0U) {
+                --counter;
+            }
+        }
     }
 
     AsyncIoConfig config_{};
+    const std::size_t queue_capacity_;
     HIORING ring_ = nullptr;
     std::atomic<bool> running_{false};
     std::thread completion_thread_{};
+    std::atomic<ULONG_PTR> next_token_{1U};
 
     std::mutex operation_mutex_{};
+    std::condition_variable operation_cv_{};
     std::unordered_map<ULONG_PTR, std::unique_ptr<Operation>> operations_{};
+    std::array<std::size_t, kFileClassCount> inflight_by_class_{};
 };
 
 #endif  // BORED_STORAGE_HAVE_IORING
