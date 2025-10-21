@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(${PROJECT_NAME}_lib
     src/greeter.cpp
     src/storage/checksum.cpp
+    src/storage/async_io.cpp
     src/storage/page_operations.cpp
     src/storage/free_space_map.cpp
     src/storage/wal_payloads.cpp
@@ -44,6 +45,7 @@ if(BORED_ENABLE_TESTS)
     add_executable(${PROJECT_NAME}_tests
         tests/main.cpp
         tests/storage_format_tests.cpp
+        tests/async_io_tests.cpp
     )
 
     target_link_libraries(${PROJECT_NAME}_tests

@@ -20,7 +20,7 @@ This document captures the first pass at the on-disk layout for the experimental
 - **Slot directory:** `SlotPointer` entries contain an offset/length pair. Offsets always reference the start of a tuple payload counted from the beginning of the page, enabling relocations without rewriting referencing indices.
 - **Max tuples:** With the default sizing, a page can host up to 2,038 slots before either free space or the slot array is exhausted.
 - **Validation helpers:** Inline helpers (`is_valid`, `compute_free_bytes`, etc.) provide lightweight sanity checks without forcing an allocator implementation.
-- **Mutable helpers:** `page_operations.hpp` offers routines to initialise a page buffer, append tuples, reclaim slots, and read payloads while tracking the header metadata.
+- **Mutable helpers:** `page_operations.hpp` offers routines to initialise a page buffer, append tuples, reclaim slots, and read payloads while tracking the header metadata. These helpers will become latch-aware so concurrent readers and mutators can coordinate via lightweight locks.
 - **Free space map:** `FreeSpaceMap` maintains bucketed page candidates keyed by contiguous free bytes and prefers unfragmented buffers during allocation.
 - **Page compaction:** `compact_page` rewrites surviving tuples to eliminate gaps, resets contiguous free space, drops `fragment_count`, and pushes the refreshed measurements back into the free-space map.
 
@@ -39,9 +39,53 @@ This document captures the first pass at the on-disk layout for the experimental
 - **Alignment:** `align_up_to_block` rounds record lengths to the 4 KiB boundary so records never straddle pages unexpectedly.
 - **Validation helpers:** `is_valid_segment_header` and `is_valid_record_header` allow quick filtering of corrupt or stale WAL data before deeper parsing.
 - **Tuple payloads:** `wal_payloads.hpp` defines aligned layouts for tuple inserts, deletes, and updates to simplify serialisation/deserialisation when building records.
+- **Async persistence abstraction:** The `AsyncIo` interface hides platform-specific queues (Windows IORing, Linux io_uring) behind a unified submission/completion API for page and WAL traffic, with a portable thread-pool fallback selected by `create_async_io()` today.
+
+## Asynchronous I/O Architecture
+
+- **Interface skeleton:**
+  ```cpp
+  struct IoDescriptor {
+    NativeHandle handle;
+    std::uint64_t offset;
+    FileClass file_class;
+  };
+
+  struct ReadRequest : IoDescriptor {
+    std::byte* data;
+    std::size_t size;
+  };
+
+  struct WriteRequest : IoDescriptor {
+    const std::byte* data;
+    std::size_t size;
+    IoFlags flags;
+  };
+
+  struct IoResult {
+    std::size_t bytes_transferred;
+    std::error_code status;
+  };
+
+  class AsyncIo {
+  public:
+    virtual ~AsyncIo() = default;
+    virtual std::future<IoResult> submit_read(ReadRequest request) = 0;
+    virtual std::future<IoResult> submit_write(WriteRequest request) = 0;
+    virtual std::future<IoResult> flush(FileClass target) = 0;  // fsync-equivalent for WAL/data files
+  };
+  ```
+  Concrete `IoRingDispatcher` (Windows) and `IoUringDispatcher` (Linux) implementations translate descriptors into native SQE submissions and monitor CQEs to fulfil the returned futures/promises.
+- **Factory selection:** `create_async_io()` attempts to build the best available backend (IoRing/io_uring when present) and otherwise returns the thread-pool dispatcher, ensuring the storage layer remains asynchronous across platforms today.
+- **Threading model:** A dedicated dispatcher thread owns the submission/completion queues. Storage components (buffer manager, WAL writer, checkpoint worker) run on separate threads and await their futures. This enables non-blocking prefetching, batched WAL writes, and overlapping flushes.
+- **Scheduling policy:**
+  - Buffer manager issues asynchronous reads ahead of demand and tracks outstanding futures to maintain pin counts.
+  - WAL writer coalesces sequential writes, requests durability after commit batches, and lets the dispatcher handle fsync semantics per `flush` calls.
+  - Checkpointer and background cleaners enqueue page flushes without monopolising submission slots by respecting dispatcher-issued backpressure tokens.
+- **Error propagation:** All completions map platform-specific status codes into `std::error_code`. Fatal errors surface through the associated futures, allowing higher layers to trigger crash-recovery sequences while ensuring the dispatcher drains outstanding I/O safely.
 
 ## Next Steps
 
-- Extend page compaction to emit slot relocation metadata for indexes and integrate with WAL archival / recycling processes.
-- Implement on-disk free-space map management to speed page allocation decisions.
-- Design index logging payloads (B-Tree page splits/merges) using the same WAL infrastructure.
+- Extend page compaction to emit slot relocation metadata for indexes, integrate with WAL archival / recycling processes, and communicate flushes through `AsyncIo`.
+- Implement on-disk free-space map management to speed page allocation decisions and route reads/writes through the async dispatcher.
+- Design index logging payloads (B-Tree page splits/merges) using the same WAL infrastructure and schedule their persistence via `AsyncIo` implementations.
