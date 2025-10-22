@@ -3,6 +3,7 @@
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/wal_format.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -22,6 +23,9 @@ struct WalWriterConfig final {
     std::uint64_t start_lsn = 0U;
     std::size_t buffer_size = 4U * kWalBlockSize;
     std::size_t segment_size = kWalSegmentSize;
+    std::size_t size_flush_threshold = 0U;
+    std::chrono::milliseconds time_flush_interval{0};
+    bool flush_on_commit = true;
 };
 
 struct WalRecordDescriptor final {
@@ -52,6 +56,7 @@ public:
     [[nodiscard]] std::error_code append_record(const WalRecordDescriptor& descriptor, WalAppendResult& out_result);
     [[nodiscard]] std::error_code flush();
     [[nodiscard]] std::error_code close();
+    [[nodiscard]] std::error_code notify_commit();
 
     [[nodiscard]] bool is_closed() const noexcept;
     [[nodiscard]] std::uint64_t next_lsn() const noexcept;
@@ -63,6 +68,7 @@ private:
     [[nodiscard]] std::error_code ensure_capacity(std::size_t aligned_length);
     [[nodiscard]] std::error_code flush_buffer();
     [[nodiscard]] std::error_code write_segment_header(bool dsync);
+    [[nodiscard]] std::error_code maybe_flush_after_append();
 
     [[nodiscard]] std::filesystem::path make_segment_path(std::uint64_t segment_id) const;
 
@@ -85,6 +91,9 @@ private:
     std::uint64_t last_lsn_ = 0U;
     bool have_last_lsn_ = false;
     bool closed_ = false;
+
+    std::size_t bytes_since_last_flush_ = 0U;
+    std::chrono::steady_clock::time_point last_flush_time_{};
 };
 
 }  // namespace bored::storage

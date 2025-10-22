@@ -48,7 +48,7 @@ std::filesystem::path make_temp_dir(const std::string& prefix)
 {
     auto root = std::filesystem::temp_directory_path();
     auto dir = root / (prefix + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    std::filesystem::remove_all(dir);
+    (void)std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     return dir;
 }
@@ -132,7 +132,7 @@ TEST_CASE("PageManager insert tuple logs WAL record")
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
-    std::filesystem::remove_all(wal_dir);
+    (void)std::filesystem::remove_all(wal_dir);
 }
 
 TEST_CASE("PageManager delete tuple logs WAL record")
@@ -189,7 +189,7 @@ TEST_CASE("PageManager delete tuple logs WAL record")
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
-    std::filesystem::remove_all(wal_dir);
+    (void)std::filesystem::remove_all(wal_dir);
 }
 
 TEST_CASE("PageManager update tuple logs WAL record")
@@ -255,5 +255,5 @@ TEST_CASE("PageManager update tuple logs WAL record")
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
-    std::filesystem::remove_all(wal_dir);
+    (void)std::filesystem::remove_all(wal_dir);
 }

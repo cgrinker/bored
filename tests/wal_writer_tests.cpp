@@ -11,6 +11,7 @@
 #include <memory>
 #include <span>
 #include <vector>
+#include <thread>
 
 using bored::storage::AsyncIo;
 using bored::storage::AsyncIoBackend;
@@ -40,7 +41,7 @@ std::filesystem::path make_temp_dir(const std::string& name)
 {
     auto root = std::filesystem::temp_directory_path();
     auto dir = root / (name + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    std::filesystem::remove_all(dir);
+    (void)std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     return dir;
 }
@@ -120,7 +121,7 @@ TEST_CASE("WalWriter writes aligned record and updates headers")
     REQUIRE(bored::storage::verify_wal_checksum(record_header, payload_span));
 
     io->shutdown();
-    std::filesystem::remove_all(dir);
+    (void)std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("WalWriter rotates segments when full")
@@ -177,7 +178,7 @@ TEST_CASE("WalWriter rotates segments when full")
     REQUIRE(second_record_header.prev_lsn == first.lsn);
 
     io->shutdown();
-    std::filesystem::remove_all(dir);
+    (void)std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("WalWriter grows buffer for large records")
@@ -214,5 +215,139 @@ TEST_CASE("WalWriter grows buffer for large records")
     REQUIRE(bytes.size() == bored::storage::kWalBlockSize + result.written_bytes);
 
     io->shutdown();
-    std::filesystem::remove_all(dir);
+    (void)std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("WalWriter flushes when size threshold reached")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_flush_size_");
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.size_flush_threshold = bored::storage::kWalBlockSize;
+    config.flush_on_commit = false;
+
+    WalWriter writer{io, config};
+
+    std::array<std::byte, bored::storage::kWalBlockSize> payload{};
+    payload.fill(std::byte{0xCC});
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::TupleInsert;
+    descriptor.page_id = 222U;
+    descriptor.payload = payload;
+
+    WalAppendResult result{};
+    auto ec = writer.append_record(descriptor, result);
+    REQUIRE_FALSE(ec);
+
+    auto segment = writer.segment_path(0U);
+    REQUIRE(std::filesystem::exists(segment));
+
+    auto bytes = read_file_bytes(segment);
+    const auto* segment_header = reinterpret_cast<const WalSegmentHeader*>(bytes.data());
+    REQUIRE(segment_header->end_lsn == result.lsn + result.written_bytes);
+
+    auto close_ec = writer.close();
+    REQUIRE_FALSE(close_ec);
+    io->shutdown();
+    (void)std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("WalWriter flushes on time interval")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_flush_time_");
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.size_flush_threshold = 0U;
+    config.time_flush_interval = std::chrono::milliseconds{5};
+    config.flush_on_commit = false;
+
+    WalWriter writer{io, config};
+
+    std::array<std::byte, 64> payload{};
+    payload.fill(std::byte{0x11});
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::TupleInsert;
+    descriptor.page_id = 333U;
+    descriptor.payload = payload;
+
+    WalAppendResult first{};
+    auto ec = writer.append_record(descriptor, first);
+    REQUIRE_FALSE(ec);
+
+    auto segment = writer.segment_path(0U);
+    REQUIRE(std::filesystem::exists(segment));
+    auto bytes_before = read_file_bytes(segment);
+    const auto* header_before = reinterpret_cast<const WalSegmentHeader*>(bytes_before.data());
+    REQUIRE(header_before->end_lsn == config.start_lsn);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+
+    WalAppendResult second{};
+    ec = writer.append_record(descriptor, second);
+    REQUIRE_FALSE(ec);
+
+    auto bytes_after = read_file_bytes(segment);
+    const auto* header_after = reinterpret_cast<const WalSegmentHeader*>(bytes_after.data());
+    REQUIRE(header_after->end_lsn == second.lsn + second.written_bytes);
+
+    auto close_ec = writer.close();
+    REQUIRE_FALSE(close_ec);
+    io->shutdown();
+    (void)std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("WalWriter commit hook flushes conditionally")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_commit_flush_");
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.size_flush_threshold = 0U;
+    config.time_flush_interval = std::chrono::milliseconds{0};
+    config.flush_on_commit = true;
+
+    WalWriter writer{io, config};
+
+    std::array<std::byte, 32> payload{};
+    payload.fill(std::byte{0x42});
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::TupleInsert;
+    descriptor.page_id = 444U;
+    descriptor.payload = payload;
+
+    WalAppendResult result{};
+    auto ec = writer.append_record(descriptor, result);
+    REQUIRE_FALSE(ec);
+
+    auto segment = writer.segment_path(0U);
+    REQUIRE(std::filesystem::exists(segment));
+    auto bytes_before = read_file_bytes(segment);
+    const auto* header_before = reinterpret_cast<const WalSegmentHeader*>(bytes_before.data());
+    REQUIRE(header_before->end_lsn == config.start_lsn);
+
+    ec = writer.notify_commit();
+    REQUIRE_FALSE(ec);
+
+    auto bytes_after = read_file_bytes(segment);
+    const auto* header_after = reinterpret_cast<const WalSegmentHeader*>(bytes_after.data());
+    REQUIRE(header_after->end_lsn == result.lsn + result.written_bytes);
+
+    auto close_ec = writer.close();
+    REQUIRE_FALSE(close_ec);
+    io->shutdown();
+    (void)std::filesystem::remove_all(dir);
 }

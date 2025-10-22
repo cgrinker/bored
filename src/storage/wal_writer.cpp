@@ -3,6 +3,7 @@
 #include "bored/storage/checksum.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <limits>
@@ -46,6 +47,7 @@ WalWriter::WalWriter(std::shared_ptr<AsyncIo> io, WalWriterConfig config)
         throw std::invalid_argument{"WalWriter segment size must be block aligned"};
     }
     config_.buffer_size = buffer_.size();
+    last_flush_time_ = std::chrono::steady_clock::now();
 }
 
 WalWriter::~WalWriter()
@@ -266,12 +268,17 @@ std::error_code WalWriter::append_record(const WalRecordDescriptor& descriptor, 
     next_lsn_ += aligned_length;
     segment_header_.end_lsn = next_lsn_;
     segment_header_dirty_ = true;
+    bytes_since_last_flush_ += aligned_length;
 
     out_result.lsn = header.lsn;
     out_result.prev_lsn = header.prev_lsn;
     out_result.segment_id = current_segment_id_;
     out_result.total_length = total_length;
     out_result.written_bytes = aligned_length;
+
+    if (auto ec = maybe_flush_after_append(); ec) {
+        return ec;
+    }
 
     return {};
 }
@@ -291,6 +298,10 @@ std::error_code WalWriter::flush()
     }
 
     auto result = io_->flush(FileClass::WriteAheadLog).get();
+    if (!result.status) {
+        last_flush_time_ = std::chrono::steady_clock::now();
+        bytes_since_last_flush_ = 0U;
+    }
     return result.status;
 }
 
@@ -322,6 +333,29 @@ std::uint64_t WalWriter::next_lsn() const noexcept
 std::filesystem::path WalWriter::segment_path(std::uint64_t segment_id) const
 {
     return make_segment_path(segment_id);
+}
+
+std::error_code WalWriter::notify_commit()
+{
+    if (!config_.flush_on_commit) {
+        return {};
+    }
+    return flush();
+}
+
+std::error_code WalWriter::maybe_flush_after_append()
+{
+    const bool size_trigger = config_.size_flush_threshold > 0U
+        && bytes_since_last_flush_ >= config_.size_flush_threshold;
+
+    const bool time_trigger = config_.time_flush_interval.count() > 0
+        && (std::chrono::steady_clock::now() - last_flush_time_) >= config_.time_flush_interval;
+
+    if (!size_trigger && !time_trigger) {
+        return {};
+    }
+
+    return flush();
 }
 
 }  // namespace bored::storage

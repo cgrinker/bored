@@ -33,7 +33,7 @@ This document tracks the remaining work required to take the current page manage
 
 1. **Log Sequencing & Buffers**
    - ✅ Maintain an in-memory log buffer with LSN allocation and latency-aware batching (`WalWriter`).
-   - Implement flush policy hooks (interval, commit-driven, size-based) and feed durable writes through `AsyncIo`.
+   - ✅ Implement flush policy hooks (interval, commit-driven, size-based) and feed durable writes through `AsyncIo::flush`.
 
 2. **Physical Page Records**
    - Finalise the `PageImage` and `PageDelta` record payloads.
