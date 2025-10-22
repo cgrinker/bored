@@ -64,6 +64,46 @@ const PageHeader& page_header(std::span<const std::byte> page)
     return *reinterpret_cast<const PageHeader*>(page.data());
 }
 
+bool is_overflow_tuple(std::span<const std::byte> tuple)
+{
+    if (tuple.size() < overflow_tuple_header_size()) {
+        return false;
+    }
+
+    const auto* header = reinterpret_cast<const OverflowTupleHeader*>(tuple.data());
+    return header->magic == kOverflowTupleMagic;
+}
+
+std::optional<OverflowTupleHeader> parse_overflow_tuple(std::span<const std::byte> tuple)
+{
+    if (!is_overflow_tuple(tuple)) {
+        return std::nullopt;
+    }
+
+    const auto* header = reinterpret_cast<const OverflowTupleHeader*>(tuple.data());
+    OverflowTupleHeader result = *header;
+
+    if (result.inline_length > tuple.size() - overflow_tuple_header_size()) {
+        return std::nullopt;
+    }
+
+    return result;
+}
+
+std::span<const std::byte> overflow_tuple_inline_payload(std::span<const std::byte> tuple,
+                                                         const OverflowTupleHeader& header)
+{
+    if (tuple.size() < overflow_tuple_header_size()) {
+        return {};
+    }
+
+    if (header.inline_length > tuple.size() - overflow_tuple_header_size()) {
+        return {};
+    }
+
+    return tuple.subspan(overflow_tuple_header_size(), header.inline_length);
+}
+
 std::span<SlotPointer> slot_directory(std::span<std::byte> page)
 {
     auto& header = page_header(page);

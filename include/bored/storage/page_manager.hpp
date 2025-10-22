@@ -7,14 +7,24 @@
 #include <filesystem>
 #include <memory>
 #include <system_error>
+#include <vector>
 
 namespace bored::storage {
 
 class PageManager final {
 public:
+    struct Config final {
+        std::uint32_t overflow_page_start = 1U << 20;  // default high range to reduce collisions
+        std::size_t overflow_inline_prefix = 256U;
+    };
+
     struct TupleInsertResult final {
         TupleSlot slot{};
         WalAppendResult wal{};
+        bool used_overflow = false;
+        std::size_t logical_length = 0U;
+        std::size_t inline_length = 0U;
+        std::vector<std::uint32_t> overflow_page_ids{};
     };
 
     struct TupleDeleteResult final {
@@ -25,9 +35,13 @@ public:
         TupleSlot slot{};
         WalAppendResult wal{};
         std::uint16_t old_length = 0U;
+        bool used_overflow = false;
+        std::size_t logical_length = 0U;
+        std::size_t inline_length = 0U;
+        std::vector<std::uint32_t> overflow_page_ids{};
     };
 
-    PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer);
+    PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer, Config config = {});
 
     PageManager(const PageManager&) = delete;
     PageManager& operator=(const PageManager&) = delete;
@@ -66,6 +80,10 @@ public:
 private:
     FreeSpaceMap* fsm_ = nullptr;
     std::shared_ptr<WalWriter> wal_writer_{};
+    Config config_{};
+    mutable std::uint32_t next_overflow_page_id_ = 0U;
+
+    [[nodiscard]] std::uint32_t allocate_overflow_page_id() const;
 };
 
 }  // namespace bored::storage

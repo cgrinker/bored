@@ -12,6 +12,27 @@ namespace bored::storage {
 struct WalOverflowChunkMeta;
 struct WalOverflowTruncateMeta;
 
+constexpr std::uint32_t kOverflowTupleMagic = 0x4F564552;  // 'OVER'
+
+struct OverflowTupleHeader final {
+    std::uint32_t magic = kOverflowTupleMagic;
+    std::uint32_t logical_length = 0U;
+    std::uint32_t first_overflow_page_id = 0U;
+    std::uint32_t inline_length = 0U;
+    std::uint16_t chunk_count = 0U;
+    std::uint16_t flags = 0U;
+};
+
+constexpr std::size_t overflow_tuple_header_size()
+{
+    return sizeof(OverflowTupleHeader);
+}
+
+bool is_overflow_tuple(std::span<const std::byte> tuple);
+std::optional<OverflowTupleHeader> parse_overflow_tuple(std::span<const std::byte> tuple);
+std::span<const std::byte> overflow_tuple_inline_payload(std::span<const std::byte> tuple,
+                                                         const OverflowTupleHeader& header);
+
 
 struct TupleSlot final {
     std::uint16_t index = 0U;
