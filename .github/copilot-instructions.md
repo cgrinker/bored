@@ -18,3 +18,15 @@
 - Work through each checklist item systematically.
 - Keep communication concise and focused.
 - Follow development best practices.
+
+## Current State (Oct 21, 2025)
+- `WalWriter` provides aligned WAL buffering, segment rotation, and flush/close hooks; endian-stable headers verified by tests.
+- `PageManager` plans tuple inserts/deletes, emits WAL records ahead of page mutations, and keeps page headers/free-space map LSNs consistent.
+- Catch2 suites (`wal_writer_tests.cpp`, `page_manager_tests.cpp`) parse emitted segments to confirm header chaining, payload encoding, and delete linkages.
+- Docs updated (`docs/storage.md`, `docs/page_wal_design.md`) to reflect completed WAL sequencing milestones and new TODOs.
+
+## Next Tasks
+1. Implement tuple update logging: encode `WalTupleUpdateMeta`, emit WAL before applying updates, add coverage.
+2. Flesh out WAL flush policy hooks (size/time/commit driven) leveraging `WalWriter::flush`.
+3. Design WAL reader/recovery scaffolding: segment iterator, checksum validation, REDO/UNDO pass outline.
+4. Extend docs with redo/undo state diagrams and WAL retention/archival policies.
