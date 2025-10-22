@@ -30,6 +30,7 @@ using bored::storage::WalRecordHeader;
 using bored::storage::WalRecordType;
 using bored::storage::WalSegmentHeader;
 using bored::storage::WalTupleMeta;
+using bored::storage::WalTupleUpdateMeta;
 
 namespace {
 
@@ -185,6 +186,72 @@ TEST_CASE("PageManager delete tuple logs WAL record")
     REQUIRE(bored::storage::read_tuple(std::span<const std::byte>(page_span.data(), page_span.size()),
                                        insert_result.slot.index)
                 .empty());
+
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager update tuple logs WAL record")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_update_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    auto init_ec = manager.initialize_page(page_span, PageType::Table, 501U);
+    REQUIRE_FALSE(init_ec);
+
+    const std::array<std::byte, 4> original{std::byte{'d'}, std::byte{'a'}, std::byte{'t'}, std::byte{'a'}};
+    PageManager::TupleInsertResult insert_result{};
+    auto insert_ec = manager.insert_tuple(page_span, original, 6000U, insert_result);
+    REQUIRE_FALSE(insert_ec);
+
+    const std::array<std::byte, 9> updated{std::byte{'u'}, std::byte{'p'}, std::byte{'d'}, std::byte{'a'}, std::byte{'t'}, std::byte{'e'}, std::byte{'d'}, std::byte{'!'}, std::byte{'!'}};
+    PageManager::TupleUpdateResult update_result{};
+    auto update_ec = manager.update_tuple(page_span, insert_result.slot.index, updated, 6000U, update_result);
+    REQUIRE_FALSE(update_ec);
+    REQUIRE(update_result.slot.index == insert_result.slot.index);
+    REQUIRE(update_result.slot.length == updated.size());
+    REQUIRE(update_result.old_length == original.size());
+
+    auto tuple_view = bored::storage::read_tuple(std::span<const std::byte>(page_span.data(), page_span.size()), update_result.slot.index);
+    REQUIRE(tuple_view.size() == updated.size());
+    REQUIRE(std::equal(tuple_view.begin(), tuple_view.end(), updated.begin(), updated.end()));
+
+    REQUIRE_FALSE(manager.flush_wal());
+
+    auto segment_path = wal_writer->segment_path(0U);
+    auto bytes = read_file_bytes(segment_path);
+
+    const auto* first_header = reinterpret_cast<const WalRecordHeader*>(bytes.data() + bored::storage::kWalBlockSize);
+    auto first_aligned = align_up_to_block(first_header->total_length);
+
+    const auto* second_header = reinterpret_cast<const WalRecordHeader*>(bytes.data() + bored::storage::kWalBlockSize + first_aligned);
+    REQUIRE(static_cast<WalRecordType>(second_header->type) == WalRecordType::TupleUpdate);
+    REQUIRE(second_header->prev_lsn == first_header->lsn);
+    REQUIRE(second_header->page_id == 501U);
+
+    auto payload = wal_payload_view(*second_header, bytes.data() + bored::storage::kWalBlockSize + first_aligned);
+    auto meta = bored::storage::decode_wal_tuple_update_meta(payload);
+    REQUIRE(meta);
+    REQUIRE(meta->base.page_id == 501U);
+    REQUIRE(meta->base.slot_index == insert_result.slot.index);
+    REQUIRE(meta->base.tuple_length == updated.size());
+    REQUIRE(meta->old_length == original.size());
+
+    auto payload_bytes = bored::storage::wal_tuple_update_payload(payload, *meta);
+    REQUIRE(payload_bytes.size() == updated.size());
+    REQUIRE(std::equal(payload_bytes.begin(), payload_bytes.end(), updated.begin(), updated.end()));
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();

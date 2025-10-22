@@ -42,7 +42,7 @@ This document tracks the remaining work required to take the current page manage
 
 3. **Logical Tuple Records**
    - ✅ Integrate tuple insert/delete payloads via `PageManager` so WAL commits precede page mutations.
-   - Integrate tuple update payloads into the WAL writer and manager path.
+   - ✅ Integrate tuple update payloads into the WAL writer and manager path.
    - Specify redo/undo semantics so logical operations can reproduce page changes.
 
 4. **Checkpointing**

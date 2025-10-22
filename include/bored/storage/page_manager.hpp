@@ -20,6 +20,12 @@ public:
         WalAppendResult wal{};
     };
 
+    struct TupleUpdateResult final {
+        TupleSlot slot{};
+        WalAppendResult wal{};
+        std::uint16_t old_length = 0U;
+    };
+
     PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer);
 
     PageManager(const PageManager&) = delete;
@@ -41,6 +47,12 @@ public:
                                                std::uint16_t slot_index,
                                                std::uint64_t row_id,
                                                TupleDeleteResult& out_result) const;
+
+    [[nodiscard]] std::error_code update_tuple(std::span<std::byte> page,
+                                               std::uint16_t slot_index,
+                                               std::span<const std::byte> new_payload,
+                                               std::uint64_t row_id,
+                                               TupleUpdateResult& out_result) const;
 
     [[nodiscard]] std::error_code flush_wal() const;
     [[nodiscard]] std::error_code close_wal() const;
