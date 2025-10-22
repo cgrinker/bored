@@ -28,7 +28,8 @@ bool page_already_applied(std::span<const std::byte> page, const WalRecordHeader
 std::error_code apply_tuple_insert(std::span<std::byte> page,
                                    const WalRecordHeader& header,
                                    const WalTupleMeta& meta,
-                                   std::span<const std::byte> payload)
+                                   std::span<const std::byte> payload,
+                                   FreeSpaceMap* fsm)
 {
     if (page_header(page).page_id != meta.page_id) {
         return std::make_error_code(std::errc::invalid_argument);
@@ -38,7 +39,7 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
         return {};
     }
 
-    auto appended = append_tuple(page, payload, header.lsn, nullptr);
+    auto appended = append_tuple(page, payload, header.lsn, fsm);
     if (!appended) {
         return std::make_error_code(std::errc::io_error);
     }
@@ -56,7 +57,8 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
 
 std::error_code apply_tuple_delete(std::span<std::byte> page,
                                    const WalRecordHeader& header,
-                                   const WalTupleMeta& meta)
+                                   const WalTupleMeta& meta,
+                                   FreeSpaceMap* fsm)
 {
     if (page_header(page).page_id != meta.page_id) {
         return std::make_error_code(std::errc::invalid_argument);
@@ -66,7 +68,7 @@ std::error_code apply_tuple_delete(std::span<std::byte> page,
         return {};
     }
 
-    if (!delete_tuple(page, meta.slot_index, header.lsn, nullptr)) {
+    if (!delete_tuple(page, meta.slot_index, header.lsn, fsm)) {
         return std::make_error_code(std::errc::io_error);
     }
 
@@ -76,7 +78,8 @@ std::error_code apply_tuple_delete(std::span<std::byte> page,
 std::error_code apply_tuple_update(std::span<std::byte> page,
                                    const WalRecordHeader& header,
                                    const WalTupleUpdateMeta& meta,
-                                   std::span<const std::byte> payload)
+                                   std::span<const std::byte> payload,
+                                   FreeSpaceMap* fsm)
 {
     if (page_header(page).page_id != meta.base.page_id) {
         return std::make_error_code(std::errc::invalid_argument);
@@ -86,11 +89,11 @@ std::error_code apply_tuple_update(std::span<std::byte> page,
         return {};
     }
 
-    if (!delete_tuple(page, meta.base.slot_index, header.lsn, nullptr)) {
+    if (!delete_tuple(page, meta.base.slot_index, header.lsn, fsm)) {
         return std::make_error_code(std::errc::io_error);
     }
 
-    auto appended = append_tuple(page, payload, header.lsn, nullptr);
+    auto appended = append_tuple(page, payload, header.lsn, fsm);
     if (!appended) {
         return std::make_error_code(std::errc::io_error);
     }
@@ -108,8 +111,9 @@ std::error_code apply_tuple_update(std::span<std::byte> page,
 
 }  // namespace
 
-WalReplayContext::WalReplayContext(PageType default_page_type)
+WalReplayContext::WalReplayContext(PageType default_page_type, FreeSpaceMap* fsm)
     : default_page_type_{default_page_type}
+    , free_space_map_{fsm}
 {
 }
 
@@ -120,6 +124,9 @@ void WalReplayContext::set_page(std::uint32_t page_id, std::span<const std::byte
     }
     auto& slot = pages_[page_id];
     std::copy(image.begin(), image.end(), slot.begin());
+    if (free_space_map_) {
+        sync_free_space(*free_space_map_, std::span<const std::byte>(slot.data(), slot.size()));
+    }
 }
 
 std::span<std::byte> WalReplayContext::get_page(std::uint32_t page_id)
@@ -128,12 +135,25 @@ std::span<std::byte> WalReplayContext::get_page(std::uint32_t page_id)
     if (inserted) {
         std::fill(it->second.begin(), it->second.end(), std::byte{0});
         auto span = std::span<std::byte>(it->second.data(), it->second.size());
-        if (!initialize_page(span, default_page_type_, page_id, 0U, nullptr)) {
+        if (!initialize_page(span, default_page_type_, page_id, 0U, free_space_map_)) {
             throw std::runtime_error{"Failed to initialise replay page"};
         }
         return span;
     }
+    if (free_space_map_) {
+        sync_free_space(*free_space_map_, std::span<const std::byte>(it->second.data(), it->second.size()));
+    }
     return {it->second.data(), it->second.size()};
+}
+
+void WalReplayContext::set_free_space_map(FreeSpaceMap* fsm) noexcept
+{
+    free_space_map_ = fsm;
+}
+
+FreeSpaceMap* WalReplayContext::free_space_map() const noexcept
+{
+    return free_space_map_;
 }
 
 WalReplayer::WalReplayer(WalReplayContext& context)
@@ -164,6 +184,7 @@ std::error_code WalReplayer::apply_undo(const WalRecoveryPlan& plan)
 std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
 {
     auto page = ensure_page(context_, record.header.page_id);
+    auto fsm = context_.free_space_map();
     auto payload = std::span<const std::byte>(record.payload.data(), record.payload.size());
 
     switch (static_cast<WalRecordType>(record.header.type)) {
@@ -176,14 +197,22 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (tuple_payload.size() != meta->tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        return apply_tuple_insert(page, record.header, *meta, tuple_payload);
+        auto ec = apply_tuple_insert(page, record.header, *meta, tuple_payload, fsm);
+        if (!ec && fsm) {
+            sync_free_space(*fsm, std::span<const std::byte>(page.data(), page.size()));
+        }
+        return ec;
     }
     case WalRecordType::TupleDelete: {
         auto meta = decode_wal_tuple_meta(payload);
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        return apply_tuple_delete(page, record.header, *meta);
+    auto ec = apply_tuple_delete(page, record.header, *meta, fsm);
+        if (!ec && fsm) {
+            sync_free_space(*fsm, std::span<const std::byte>(page.data(), page.size()));
+        }
+        return ec;
     }
     case WalRecordType::TupleUpdate: {
         auto meta = decode_wal_tuple_update_meta(payload);
@@ -194,7 +223,11 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (tuple_payload.size() != meta->base.tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        return apply_tuple_update(page, record.header, *meta, tuple_payload);
+    auto ec = apply_tuple_update(page, record.header, *meta, tuple_payload, fsm);
+        if (!ec && fsm) {
+            sync_free_space(*fsm, std::span<const std::byte>(page.data(), page.size()));
+        }
+        return ec;
     }
     default:
         return std::make_error_code(std::errc::not_supported);
@@ -204,6 +237,7 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
 std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
 {
     auto page = ensure_page(context_, record.header.page_id);
+    auto fsm = context_.free_space_map();
     auto payload = std::span<const std::byte>(record.payload.data(), record.payload.size());
 
     switch (static_cast<WalRecordType>(record.header.type)) {
@@ -212,7 +246,11 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        return apply_tuple_delete(page, record.header, *meta);
+    auto ec = apply_tuple_delete(page, record.header, *meta, fsm);
+        if (!ec && fsm) {
+            sync_free_space(*fsm, std::span<const std::byte>(page.data(), page.size()));
+        }
+        return ec;
     }
     default:
         return std::make_error_code(std::errc::not_supported);

@@ -3,7 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -13,6 +15,12 @@ class FreeSpaceMap final {
 public:
     static constexpr std::uint16_t kBucketSize = 128U;
     static constexpr std::size_t kBucketCount = (8192U / kBucketSize) + 1U;  // final bucket for overflow pages.
+
+    struct SnapshotEntry final {
+        std::uint32_t page_id = 0U;
+        std::uint16_t free_bytes = 0U;
+        std::uint16_t fragment_count = 0U;
+    };
 
     FreeSpaceMap();
 
@@ -24,6 +32,9 @@ public:
     [[nodiscard]] std::uint16_t current_fragment_count(std::uint32_t page_id) const;
 
     void clear();
+
+    void rebuild_from_snapshot(std::span<const SnapshotEntry> entries);
+    void for_each(const std::function<void(const SnapshotEntry&)>& visitor) const;
 
 private:
     struct PageInfo {

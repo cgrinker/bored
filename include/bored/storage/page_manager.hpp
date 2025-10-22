@@ -4,6 +4,7 @@
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_writer.hpp"
 
+#include <filesystem>
 #include <memory>
 #include <system_error>
 
@@ -56,6 +57,9 @@ public:
 
     [[nodiscard]] std::error_code flush_wal() const;
     [[nodiscard]] std::error_code close_wal() const;
+
+    [[nodiscard]] std::error_code persist_free_space_map(const std::filesystem::path& path) const;
+    [[nodiscard]] std::error_code load_free_space_map(const std::filesystem::path& path) const;
 
     [[nodiscard]] std::shared_ptr<WalWriter> wal_writer() const noexcept;
 

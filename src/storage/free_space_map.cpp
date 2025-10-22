@@ -125,4 +125,22 @@ void FreeSpaceMap::clear()
     pages_.clear();
 }
 
+void FreeSpaceMap::rebuild_from_snapshot(std::span<const SnapshotEntry> entries)
+{
+    clear();
+    for (const auto& entry : entries) {
+        record_page(entry.page_id, entry.free_bytes, entry.fragment_count);
+    }
+}
+
+void FreeSpaceMap::for_each(const std::function<void(const SnapshotEntry&)>& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+    for (const auto& [page_id, info] : pages_) {
+        visitor(SnapshotEntry{page_id, info.free_bytes, info.fragment_count});
+    }
+}
+
 }  // namespace bored::storage

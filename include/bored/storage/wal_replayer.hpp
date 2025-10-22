@@ -11,16 +11,21 @@
 
 namespace bored::storage {
 
+class FreeSpaceMap;
+
 class WalReplayContext final {
 public:
-    explicit WalReplayContext(PageType default_page_type = PageType::Table);
+    explicit WalReplayContext(PageType default_page_type = PageType::Table, FreeSpaceMap* fsm = nullptr);
 
     void set_page(std::uint32_t page_id, std::span<const std::byte> image);
     [[nodiscard]] std::span<std::byte> get_page(std::uint32_t page_id);
+    void set_free_space_map(FreeSpaceMap* fsm) noexcept;
+    [[nodiscard]] FreeSpaceMap* free_space_map() const noexcept;
 
 private:
     PageType default_page_type_;
     std::unordered_map<std::uint32_t, std::array<std::byte, kPageSize>> pages_;
+    FreeSpaceMap* free_space_map_ = nullptr;
 };
 
 class WalReplayer final {

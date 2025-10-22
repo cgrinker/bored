@@ -5,6 +5,7 @@
 #include "bored/storage/page_operations.hpp"
 #include "bored/storage/page_manager.hpp"
 #include "bored/storage/free_space_map.hpp"
+#include "bored/storage/free_space_map_persistence.hpp"
 #include "bored/storage/async_io.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -19,6 +20,7 @@ using bored::storage::AsyncIo;
 using bored::storage::AsyncIoBackend;
 using bored::storage::AsyncIoConfig;
 using bored::storage::FreeSpaceMap;
+using bored::storage::FreeSpaceMapPersistence;
 using bored::storage::PageManager;
 using bored::storage::PageType;
 using bored::storage::WalRecoveryDriver;
@@ -93,6 +95,9 @@ TEST_CASE("WalReplayer replays committed tuple changes")
 
     const auto page_after = page_buffer;
 
+    auto fsm_snapshot_path = wal_dir / "fsm.snapshot";
+    REQUIRE_FALSE(FreeSpaceMapPersistence::write_snapshot(fsm, fsm_snapshot_path));
+
     REQUIRE_FALSE(wal_writer->flush());
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
@@ -121,7 +126,10 @@ TEST_CASE("WalReplayer replays committed tuple changes")
     CAPTURE(meta->base.tuple_length);
     }
 
-    WalReplayContext context;
+    FreeSpaceMap restored_fsm;
+    REQUIRE_FALSE(FreeSpaceMapPersistence::load_snapshot(fsm_snapshot_path, restored_fsm));
+
+    WalReplayContext context(PageType::Table, &restored_fsm);
     context.set_page(page_id, std::span<const std::byte>(disk_image_before.data(), disk_image_before.size()));
 
     WalReplayer replayer{context};
@@ -152,5 +160,9 @@ TEST_CASE("WalReplayer replays committed tuple changes")
 
     REQUIRE(std::equal(replayed_page.begin(), replayed_page.end(), expected_page.begin(), expected_page.end()));
 
+    CHECK(restored_fsm.current_free_bytes(page_id) == bored::storage::compute_free_bytes(bored::storage::page_header(expected_page)));
+    CHECK(restored_fsm.current_fragment_count(page_id) == bored::storage::page_header(expected_page).fragment_count);
+
+    std::filesystem::remove(fsm_snapshot_path);
     (void)std::filesystem::remove_all(wal_dir);
 }

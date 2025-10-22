@@ -7,7 +7,7 @@ This document tracks the remaining work required to take the current page manage
 1. **Free Space Map (FSM)**
    - ✅ Track free space at the page granularity (per relation) with bucketed lookups.
    - ✅ Provide O(1) lookup for pages with sufficient contiguous bytes while preferring unfragmented candidates.
-   - ☐ Persist the FSM to disk and ensure it survives crash recovery.
+   - ✅ Persist the FSM to disk and ensure it survives crash recovery via `FreeSpaceMapPersistence` snapshots.
    - ☐ Record WAL metadata for FSM updates so crash recovery can rebuild hints.
 
 2. **Page Compaction / Defragmentation**
@@ -55,7 +55,7 @@ This document tracks the remaining work required to take the current page manage
 
 6. **Recovery Workflow**
    - ✅ Outline REDO/UNDO passes using `WalRecoveryDriver` plan generation with provisional transaction grouping.
-   - ☐ Implement page replay primitives that consume `WalRecoveryPlan` redo entries, hook them into PageManager, and validate crash/restart scenarios.
+   - ✅ Implement page replay primitives that consume `WalRecoveryPlan` redo entries, hook them into PageManager, and validate crash/restart scenarios with refreshed FSM hints.
    - ☐ Build UNDO walkers for in-flight transactions that restore pages and reclaim slots on restart.
    - ✅ Deliver a WAL replayer utility that hydrates page images from redo plans with idempotent tuple insert/update/delete support.
    - ✅ Introduce a WAL reader utility to iterate segment files and validate checksums before replay.

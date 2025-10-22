@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "bored/storage/free_space_map_persistence.hpp"
+
 namespace bored::storage {
 
 namespace {
@@ -226,6 +228,26 @@ std::error_code PageManager::close_wal() const
         return ec;
     }
     return {};
+}
+
+std::error_code PageManager::persist_free_space_map(const std::filesystem::path& path) const
+{
+    if (!fsm_) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+    return FreeSpaceMapPersistence::write_snapshot(*fsm_, path);
+}
+
+std::error_code PageManager::load_free_space_map(const std::filesystem::path& path) const
+{
+    if (!fsm_) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+    auto ec = FreeSpaceMapPersistence::load_snapshot(path, *fsm_);
+    if (ec == std::make_error_code(std::errc::no_such_file_or_directory)) {
+        return {};
+    }
+    return ec;
 }
 
 std::shared_ptr<WalWriter> PageManager::wal_writer() const noexcept

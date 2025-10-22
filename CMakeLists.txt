@@ -15,6 +15,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/free_space_map.cpp
     src/storage/wal_payloads.cpp
     src/storage/page_manager.cpp
+    src/storage/free_space_map_persistence.cpp
     src/storage/wal_writer.cpp
     src/storage/wal_reader.cpp
     src/storage/wal_recovery.cpp
@@ -55,11 +56,12 @@ if(BORED_ENABLE_TESTS)
         tests/async_io_tests.cpp
         tests/async_io_ioring_tests.cpp
         tests/page_manager_tests.cpp
+        tests/free_space_map_tests.cpp
         tests/wal_writer_tests.cpp
         tests/wal_reader_tests.cpp
         tests/wal_recovery_tests.cpp
         tests/wal_replay_tests.cpp
-    tests/wal_telemetry_tests.cpp
+        tests/wal_telemetry_tests.cpp
     )
 
     target_link_libraries(${PROJECT_NAME}_tests
