@@ -99,6 +99,29 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
 
     const auto& header = page_header(as_const_span(page));
 
+    WalTupleMeta before_meta{};
+    before_meta.page_id = header.page_id;
+    before_meta.slot_index = slot_index;
+    before_meta.tuple_length = static_cast<std::uint16_t>(tuple_view.size());
+    before_meta.row_id = row_id;
+
+    std::vector<std::byte> before_buffer(wal_tuple_insert_payload_size(before_meta.tuple_length));
+    auto before_span = std::span<std::byte>(before_buffer.data(), before_buffer.size());
+    if (!encode_wal_tuple_insert(before_span, before_meta, tuple_view)) {
+        return std::make_error_code(std::errc::io_error);
+    }
+
+    WalRecordDescriptor before_descriptor{};
+    before_descriptor.type = WalRecordType::TupleBeforeImage;
+    before_descriptor.page_id = header.page_id;
+    before_descriptor.flags = WalRecordFlag::None;
+    before_descriptor.payload = std::span<const std::byte>(before_span.data(), before_span.size());
+
+    WalAppendResult before_result{};
+    if (auto before_ec = wal_writer_->append_record(before_descriptor, before_result); before_ec) {
+        return before_ec;
+    }
+
     WalTupleMeta meta{};
     meta.page_id = header.page_id;
     meta.slot_index = slot_index;
@@ -160,6 +183,29 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
         if (free_bytes < extra_required) {
             return std::make_error_code(std::errc::no_buffer_space);
         }
+    }
+
+    WalTupleMeta before_meta{};
+    before_meta.page_id = header.page_id;
+    before_meta.slot_index = slot_index;
+    before_meta.tuple_length = old_length;
+    before_meta.row_id = row_id;
+
+    std::vector<std::byte> before_buffer(wal_tuple_insert_payload_size(before_meta.tuple_length));
+    auto before_span = std::span<std::byte>(before_buffer.data(), before_buffer.size());
+    if (!encode_wal_tuple_insert(before_span, before_meta, current_tuple)) {
+        return std::make_error_code(std::errc::io_error);
+    }
+
+    WalRecordDescriptor before_descriptor{};
+    before_descriptor.type = WalRecordType::TupleBeforeImage;
+    before_descriptor.page_id = header.page_id;
+    before_descriptor.flags = WalRecordFlag::None;
+    before_descriptor.payload = std::span<const std::byte>(before_span.data(), before_span.size());
+
+    WalAppendResult before_result{};
+    if (auto before_ec = wal_writer_->append_record(before_descriptor, before_result); before_ec) {
+        return before_ec;
     }
 
     WalTupleUpdateMeta meta{};

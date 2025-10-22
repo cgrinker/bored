@@ -172,12 +172,29 @@ TEST_CASE("PageManager delete tuple logs WAL record")
     auto first_aligned = align_up_to_block(first_header->total_length);
 
     const auto* second_header = reinterpret_cast<const WalRecordHeader*>(bytes.data() + bored::storage::kWalBlockSize + first_aligned);
-    REQUIRE(static_cast<WalRecordType>(second_header->type) == WalRecordType::TupleDelete);
-    REQUIRE(second_header->lsn == delete_result.wal.lsn);
-    REQUIRE(second_header->prev_lsn == insert_result.wal.lsn);
+    REQUIRE(static_cast<WalRecordType>(second_header->type) == WalRecordType::TupleBeforeImage);
+    REQUIRE(second_header->prev_lsn == first_header->lsn);
 
-    auto payload = wal_payload_view(*second_header,
-                                    bytes.data() + bored::storage::kWalBlockSize + first_aligned);
+    auto second_payload = wal_payload_view(*second_header,
+                                           bytes.data() + bored::storage::kWalBlockSize + first_aligned);
+    auto before_meta = bored::storage::decode_wal_tuple_meta(second_payload);
+    REQUIRE(before_meta);
+    REQUIRE(before_meta->slot_index == insert_result.slot.index);
+    REQUIRE(before_meta->page_id == 77U);
+    auto before_payload = bored::storage::wal_tuple_payload(second_payload, *before_meta);
+    REQUIRE(before_payload.size() == tuple.size());
+    REQUIRE(std::equal(before_payload.begin(), before_payload.end(), tuple.begin(), tuple.end()));
+
+    auto second_aligned = align_up_to_block(second_header->total_length);
+
+    const auto* third_header = reinterpret_cast<const WalRecordHeader*>(
+        bytes.data() + bored::storage::kWalBlockSize + first_aligned + second_aligned);
+    REQUIRE(static_cast<WalRecordType>(third_header->type) == WalRecordType::TupleDelete);
+    REQUIRE(third_header->lsn == delete_result.wal.lsn);
+    REQUIRE(third_header->prev_lsn == second_header->lsn);
+
+    auto payload = wal_payload_view(*third_header,
+                                    bytes.data() + bored::storage::kWalBlockSize + first_aligned + second_aligned);
     auto meta = bored::storage::decode_wal_tuple_meta(payload);
     REQUIRE(meta);
     REQUIRE(meta->slot_index == insert_result.slot.index);
@@ -237,11 +254,30 @@ TEST_CASE("PageManager update tuple logs WAL record")
     auto first_aligned = align_up_to_block(first_header->total_length);
 
     const auto* second_header = reinterpret_cast<const WalRecordHeader*>(bytes.data() + bored::storage::kWalBlockSize + first_aligned);
-    REQUIRE(static_cast<WalRecordType>(second_header->type) == WalRecordType::TupleUpdate);
+    REQUIRE(static_cast<WalRecordType>(second_header->type) == WalRecordType::TupleBeforeImage);
     REQUIRE(second_header->prev_lsn == first_header->lsn);
     REQUIRE(second_header->page_id == 501U);
 
-    auto payload = wal_payload_view(*second_header, bytes.data() + bored::storage::kWalBlockSize + first_aligned);
+    auto second_payload = wal_payload_view(*second_header, bytes.data() + bored::storage::kWalBlockSize + first_aligned);
+    auto before_meta = bored::storage::decode_wal_tuple_meta(second_payload);
+    REQUIRE(before_meta);
+    REQUIRE(before_meta->slot_index == insert_result.slot.index);
+    REQUIRE(before_meta->page_id == 501U);
+    REQUIRE(before_meta->tuple_length == original.size());
+    auto before_payload = bored::storage::wal_tuple_payload(second_payload, *before_meta);
+    REQUIRE(before_payload.size() == original.size());
+    REQUIRE(std::equal(before_payload.begin(), before_payload.end(), original.begin(), original.end()));
+
+    auto second_aligned = align_up_to_block(second_header->total_length);
+
+    const auto* third_header = reinterpret_cast<const WalRecordHeader*>(
+        bytes.data() + bored::storage::kWalBlockSize + first_aligned + second_aligned);
+    REQUIRE(static_cast<WalRecordType>(third_header->type) == WalRecordType::TupleUpdate);
+    REQUIRE(third_header->prev_lsn == second_header->lsn);
+    REQUIRE(third_header->page_id == 501U);
+
+    auto payload = wal_payload_view(*third_header,
+                                    bytes.data() + bored::storage::kWalBlockSize + first_aligned + second_aligned);
     auto meta = bored::storage::decode_wal_tuple_update_meta(payload);
     REQUIRE(meta);
     REQUIRE(meta->base.page_id == 501U);

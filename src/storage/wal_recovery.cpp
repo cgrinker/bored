@@ -76,7 +76,13 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 auto it = transactions.find(txn_id);
                 if (it != transactions.end()) {
                     auto& prepared = it->second.records;
-                    plan.redo.insert(plan.redo.end(), prepared.begin(), prepared.end());
+                    for (const auto& record : prepared) {
+                        const auto record_type = static_cast<WalRecordType>(record.header.type);
+                        if (record_type == WalRecordType::TupleBeforeImage) {
+                            continue;
+                        }
+                        plan.redo.push_back(record);
+                    }
                     transactions.erase(it);
                 }
                 break;

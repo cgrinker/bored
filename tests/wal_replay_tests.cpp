@@ -166,3 +166,80 @@ TEST_CASE("WalReplayer replays committed tuple changes")
     std::filesystem::remove(fsm_snapshot_path);
     (void)std::filesystem::remove_all(wal_dir);
 }
+
+TEST_CASE("WalReplayer undoes uncommitted update using before image")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_replay_undo_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = 7777U;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+    std::array<std::byte, 24> insert_payload{};
+    insert_payload.fill(std::byte{0x55});
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, insert_payload, 9001U, insert_result));
+
+    WalRecordDescriptor commit{};
+    commit.type = WalRecordType::Commit;
+    commit.page_id = page_id;
+    commit.flags = bored::storage::WalRecordFlag::None;
+    commit.payload = {};
+    bored::storage::WalAppendResult commit_result{};
+    REQUIRE_FALSE(wal_writer->append_record(commit, commit_result));
+
+    const auto baseline_page = page_buffer;
+    const auto baseline_free_bytes = fsm.current_free_bytes(page_id);
+
+    std::array<std::byte, 32> updated_payload{};
+    updated_payload.fill(std::byte{0xA7});
+    PageManager::TupleUpdateResult update_result{};
+    REQUIRE_FALSE(manager.update_tuple(page_span, insert_result.slot.index, updated_payload, 9001U, update_result));
+
+    REQUIRE_FALSE(wal_writer->flush());
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    REQUIRE(plan.redo.size() == 1U);  // committed insert only
+    REQUIRE(plan.undo.size() == 2U);
+    REQUIRE(static_cast<WalRecordType>(plan.undo[0].header.type) == WalRecordType::TupleUpdate);
+    REQUIRE(static_cast<WalRecordType>(plan.undo[1].header.type) == WalRecordType::TupleBeforeImage);
+
+    FreeSpaceMap restored_fsm;
+    WalReplayContext context{PageType::Table, &restored_fsm};
+    context.set_page(page_id, std::span<const std::byte>(baseline_page.data(), baseline_page.size()));
+
+    WalReplayer replayer{context};
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    auto replayed_page = context.get_page(page_id);
+    const auto replayed_header = bored::storage::page_header(
+        std::span<const std::byte>(replayed_page.data(), replayed_page.size()));
+    REQUIRE(replayed_header.page_id == page_id);
+    REQUIRE(replayed_header.tuple_count == 1U);
+
+    auto restored_tuple = bored::storage::read_tuple(std::span<const std::byte>(replayed_page.data(), replayed_page.size()), insert_result.slot.index);
+    REQUIRE(restored_tuple.size() == insert_payload.size());
+    REQUIRE(std::equal(restored_tuple.begin(), restored_tuple.end(), insert_payload.begin()));
+
+    CHECK(restored_fsm.current_free_bytes(page_id) == baseline_free_bytes);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
