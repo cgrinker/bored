@@ -46,6 +46,7 @@ if(BORED_ENABLE_TESTS)
         tests/main.cpp
         tests/storage_format_tests.cpp
         tests/async_io_tests.cpp
+        tests/async_io_ioring_tests.cpp
     )
 
     target_link_libraries(${PROJECT_NAME}_tests
