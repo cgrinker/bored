@@ -42,6 +42,7 @@ This document captures the first pass at the on-disk layout for the experimental
 - **Async persistence abstraction:** The `AsyncIo` interface hides platform-specific queues (Windows IORing, Linux io_uring) behind a unified submission/completion API for page and WAL traffic, with a portable thread-pool fallback selected by `create_async_io()` today.
 - **WAL writer runtime:** `WalWriter` maintains an aligned in-memory buffer, allocates monotonically increasing LSNs, rotates 16 MiB segments when full, and persists segment headers + records through the shared `AsyncIo` dispatchers. Exposes size/time/commit-driven flush hooks layered on `flush()` for commit coordination.
 - **WAL reader runtime:** `WalReader` enumerates segment files, validates CRC32C checksums, and streams records across segment boundaries for recovery and tooling consumers while honouring on-disk alignment rules.
+- **Recovery planning:** `WalRecoveryDriver` consumes `WalReader` streams, groups records by provisional transaction identifier, emits REDO/UNDO plans, and flags truncated tails so replay can halt cleanly on partial segments.
 - **Page manager integration:** `PageManager` plans tuple inserts/deletes/updates, emits the corresponding WAL records first, then applies the in-memory mutation so LSNs stay chained, free-space tracking stays coherent, and page headers capture the latest LSN.
 
 ## Asynchronous I/O Architecture
@@ -92,7 +93,31 @@ This document captures the first pass at the on-disk layout for the experimental
 - Extend page compaction to emit slot relocation metadata for indexes, integrate with WAL archival / recycling processes, and communicate flushes through `AsyncIo`.
 - Implement on-disk free-space map management to speed page allocation decisions and route reads/writes through the async dispatcher.
 - Design index logging payloads (B-Tree page splits/merges) using the same WAL infrastructure and schedule their persistence via `AsyncIo` implementations.
-- Prototype REDO/UNDO recovery drivers on top of `WalReader`, including truncated-tail handling and reapplication ordering semantics.
+- Integrate the `WalRecoveryDriver` plan outputs with page replay primitives and build crash/restart integration coverage.
+- Flesh out checkpoint/archival tooling, crash-safe FSM persistence, overflow tuple handling, and recovery telemetry to reach feature completeness.
+- See roadmap below for the detailed completion plan covering WAL, storage, recovery, and observability milestones.
+
+### Roadmap to 100 % Feature Completeness
+
+1. **Redo/Undo Integration**
+  - Implement page replay primitives that consume `WalRecoveryPlan` redo entries and apply physical/logical updates.
+  - Build UNDO walkers for in-flight transactions, ensuring slot reclamation and tuple visibility rules hold.
+  - Add crash/restart integration tests that boot from WAL-only state and validate page images.
+2. **Checkpointing & Retention**
+  - Define checkpoint record payloads (dirty page table, active txn table) and emit them on schedule.
+  - Wire checkpoint completion to WAL archival/retention policies and add CLI/tooling hooks for archive management.
+3. **FSM & Overflow Durability**
+  - Persist free-space map structures, replay WAL hints at startup, and verify crash consistency via tests.
+  - Add overflow tuple/page chain logging, redo/undo handlers, and PageManager coverage.
+4. **Index & Compaction Metadata**
+  - Log compaction slot relocations and index maintenance payloads (B-Tree split/merge/delete).
+  - Extend PageManager + WAL payload helpers to encode/decode these flows with tests.
+5. **Observability & Telemetry**
+  - Capture WAL append latency, flush durations, and FSM hint journaling metrics.
+  - Expose counters via diagnostics API and baseline with microbenchmarks.
+6. **Documentation & Tooling**
+  - Produce redo/undo state diagrams, WAL retention policies, and plantuml/mermaid overviews of record formats.
+  - Document operational runbooks for recovery, checkpointing, and archival rotation.
 - **Deferred: Linux io_uring backend roadmap**
   - Target liburing 2.x to mirror the Windows IoRing dispatcher with queue-depth aware submission, per-file-class backpressure, and dsync-aware flush handling.
   - Translate Linux `io_uring_cqe::res` results into `std::error_code` values using `std::system_category()` while preserving errno semantics.

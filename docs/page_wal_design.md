@@ -54,8 +54,9 @@ This document tracks the remaining work required to take the current page manage
    - Add archival/deletion policies plus retention knobs.
 
 6. **Recovery Workflow**
-   - Outline REDO/UNDO passes using the log records defined above.
-   - Prototype a recovery driver that replays committed transactions and rolls back incomplete ones while coordinating asynchronous reads/writes.
+   - ✅ Outline REDO/UNDO passes using `WalRecoveryDriver` plan generation with provisional transaction grouping.
+   - ☐ Implement page replay primitives that consume `WalRecoveryPlan` redo entries, hook them into PageManager, and validate crash/restart scenarios.
+   - ☐ Build UNDO walkers for in-flight transactions that restore pages and reclaim slots on restart.
    - ✅ Introduce a WAL reader utility to iterate segment files and validate checksums before replay.
 
 ## Asynchronous I/O Layer
@@ -92,3 +93,4 @@ The `AsyncIo` abstraction now routes work through a portable thread-pool backend
 4. **Documentation & Tooling**
    - ☐ Expand `docs/storage.md` with concrete record diagrams and state transition flows.
    - ☐ Generate schema diagrams for WAL record types using plantuml/mermaid for quick reference.
+   - ☐ Publish a checklist to drive WAL archival hygiene, recovery drills, and operational telemetry setup.
