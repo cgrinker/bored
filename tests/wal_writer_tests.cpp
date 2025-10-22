@@ -443,3 +443,92 @@ TEST_CASE("WalWriter auto-registers telemetry sampler when configured")
     io->shutdown();
     (void)std::filesystem::remove_all(dir);
 }
+
+TEST_CASE("WalWriter retention enforces segment limit")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_retention_segments_");
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 2U * bored::storage::kWalBlockSize;
+    config.buffer_size = bored::storage::kWalBlockSize;
+    config.flush_on_commit = false;
+    config.retention.retention_segments = 1U;
+
+    WalWriter writer{io, config};
+
+    std::array<std::byte, 128> payload{};
+    payload.fill(std::byte{0xA5});
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::TupleInsert;
+    descriptor.page_id = 900U;
+    descriptor.payload = payload;
+
+    for (int index = 0; index < 3; ++index) {
+        WalAppendResult result{};
+        REQUIRE_FALSE(writer.append_record(descriptor, result));
+        REQUIRE_FALSE(writer.flush());
+    }
+
+    REQUIRE_FALSE(writer.close());
+
+    auto segment0 = writer.segment_path(0U);
+    auto segment1 = writer.segment_path(1U);
+    auto segment2 = writer.segment_path(2U);
+
+    REQUIRE_FALSE(std::filesystem::exists(segment0));
+    REQUIRE(std::filesystem::exists(segment1));
+    REQUIRE(std::filesystem::exists(segment2));
+
+    io->shutdown();
+    (void)std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("WalWriter retention archives pruned segments when configured")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_retention_archive_");
+    auto archive = dir / "archive";
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 2U * bored::storage::kWalBlockSize;
+    config.buffer_size = bored::storage::kWalBlockSize;
+    config.flush_on_commit = false;
+    config.retention.retention_segments = 1U;
+    config.retention.archive_path = archive;
+
+    WalWriter writer{io, config};
+
+    std::array<std::byte, 128> payload{};
+    payload.fill(std::byte{0x5D});
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::TupleInsert;
+    descriptor.page_id = 901U;
+    descriptor.payload = payload;
+
+    for (int index = 0; index < 3; ++index) {
+        WalAppendResult result{};
+        REQUIRE_FALSE(writer.append_record(descriptor, result));
+        REQUIRE_FALSE(writer.flush());
+    }
+
+    REQUIRE_FALSE(writer.close());
+
+    auto segment0 = writer.segment_path(0U);
+    auto segment1 = writer.segment_path(1U);
+    auto segment2 = writer.segment_path(2U);
+
+    REQUIRE_FALSE(std::filesystem::exists(segment0));
+    REQUIRE(std::filesystem::exists(segment1));
+    REQUIRE(std::filesystem::exists(segment2));
+
+    auto archived0 = archive / segment0.filename();
+    REQUIRE(std::filesystem::exists(archived0));
+
+    io->shutdown();
+    (void)std::filesystem::remove_all(dir);
+}

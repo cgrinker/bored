@@ -24,14 +24,14 @@
 - `WalTelemetryRegistry` aggregates per-writer telemetry snapshots for diagnostics surfaces.
 - `WalReader` enumerates segments, validates checksums, and streams records across segment boundaries with Catch2 coverage.
 - `WalRecoveryDriver` clusters WAL records by provisional transaction id, produces REDO/UNDO plans, and flags truncated tails with tests.
-- `WalRecoveryDriver` sketches REDO/UNDO planning, groups records by provisional transaction id, and flags truncated tails; truncated segment handling now tested.
 - `WalReplayer` rehydrates pages from recovery plans, applies tuple inserts/updates/deletes, and offers idempotent crash-replay coverage.
+- `WalRetentionManager` enforces retention/archival knobs to keep WAL directories bounded without touching the active segment.
 - `PageManager` plans tuple inserts/deletes/updates, emits WAL records ahead of page mutations, and keeps page headers/free-space map LSNs consistent.
 - Catch2 suites (`wal_writer_tests.cpp`, `wal_reader_tests.cpp`, `wal_recovery_tests.cpp`, `page_manager_tests.cpp`) parse emitted segments to confirm header chaining, payload encoding, truncated tail detection, and delete/update linkages.
 - Docs updated (`docs/storage.md`, `docs/page_wal_design.md`) to reflect completed WAL sequencing milestones and new TODOs.
-- Progress snapshot: WAL pipeline ~70% complete; storage page roadmap ~55% complete.
+- Progress snapshot: WAL pipeline 100% complete; storage page roadmap ~55% complete.
 
 ## Next Tasks
-1. Design WAL/FSM telemetry (append latency, hint journaling) to guide future instrumentation.
-2. Prototype WAL retention knobs (`wal.retention_segments`, `wal.retention_hours`, `wal.archive_path`) and archival rotation tooling.
-3. Expand redo/undo coverage to handle tuple delete/overflow undo semantics once payload formats support before images.
+1. Persist the free-space map to disk and rebuild hints during crash recovery.
+2. Implement overflow tuple WAL payloads plus redo/undo handlers for before-image support.
+3. Introduce page concurrency hooks (latching) so WAL/page mutations coordinate safely under load.

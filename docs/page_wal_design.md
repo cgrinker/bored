@@ -51,7 +51,7 @@ This document tracks the remaining work required to take the current page manage
 
 5. **Segment Management**
    - ✅ Handle WAL segment creation, rollover, and alignment enforcement in `WalWriter`.
-   - Add archival/deletion policies plus retention knobs.
+   - ✅ Add archival/deletion policies plus retention knobs via `WalRetentionManager` and `WalRetentionConfig`.
 
 6. **Recovery Workflow**
    - ✅ Outline REDO/UNDO passes using `WalRecoveryDriver` plan generation with provisional transaction grouping.

@@ -2,6 +2,7 @@
 
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/wal_format.hpp"
+#include "bored/storage/wal_retention.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -43,6 +44,7 @@ struct WalWriterConfig final {
     bool flush_on_commit = true;
     WalTelemetryRegistry* telemetry_registry = nullptr;
     std::string telemetry_identifier{};
+    WalRetentionConfig retention{};
 };
 
 struct WalRecordDescriptor final {
@@ -87,6 +89,7 @@ private:
     [[nodiscard]] std::error_code flush_buffer();
     [[nodiscard]] std::error_code write_segment_header(bool dsync);
     [[nodiscard]] std::error_code maybe_flush_after_append();
+    [[nodiscard]] std::error_code apply_retention();
 
     [[nodiscard]] std::filesystem::path make_segment_path(std::uint64_t segment_id) const;
 
@@ -117,6 +120,8 @@ private:
     mutable std::mutex telemetry_mutex_{};
     WalTelemetryRegistry* telemetry_registry_ = nullptr;
     std::string telemetry_identifier_{};
+
+    std::unique_ptr<WalRetentionManager> retention_manager_{};
 };
 
 }  // namespace bored::storage

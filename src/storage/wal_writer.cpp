@@ -1,6 +1,7 @@
 #include "bored/storage/wal_writer.hpp"
 
 #include "bored/storage/checksum.hpp"
+#include "bored/storage/wal_retention.hpp"
 #include "bored/storage/wal_telemetry_registry.hpp"
 
 #include <algorithm>
@@ -57,6 +58,13 @@ WalWriter::WalWriter(std::shared_ptr<AsyncIo> io, WalWriterConfig config)
         telemetry_registry_->register_sampler(telemetry_identifier_, [this] {
             return this->telemetry_snapshot();
         });
+    }
+
+    const bool retention_enabled = config_.retention.retention_segments > 0U
+        || config_.retention.retention_hours.count() > 0
+        || !config_.retention.archive_path.empty();
+    if (retention_enabled) {
+        retention_manager_ = std::make_unique<WalRetentionManager>(config_.directory, config_.file_prefix, config_.file_extension);
     }
 }
 
@@ -341,7 +349,15 @@ std::error_code WalWriter::flush()
         telemetry_.last_flush_duration_ns = duration_ns;
         telemetry_.total_flush_duration_ns += duration_ns;
     }
-    return result.status;
+    if (result.status) {
+        return result.status;
+    }
+
+    if (auto retention_ec = apply_retention(); retention_ec) {
+        return retention_ec;
+    }
+
+    return {};
 }
 
 std::error_code WalWriter::close()
@@ -401,6 +417,14 @@ std::error_code WalWriter::maybe_flush_after_append()
     }
 
     return flush();
+}
+
+std::error_code WalWriter::apply_retention()
+{
+    if (!retention_manager_) {
+        return {};
+    }
+    return retention_manager_->apply(config_.retention, current_segment_id_);
 }
 
 }  // namespace bored::storage

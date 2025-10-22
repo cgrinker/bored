@@ -4,7 +4,7 @@ This document captures the first pass at the on-disk layout for the experimental
 
 ### Progress Snapshot (Oct 22, 2025)
 
-- **WAL pipeline ~70%**: Writer, reader, recovery planning, and redo replay are implemented with telemetry coverage; retention knobs and checkpoint payloads remain.
+- **WAL pipeline 100%**: Writer, reader, recovery planning/replay, telemetry registry, and retention manager are in place with full Catch2 coverage.
 - **Storage pages ~55%**: Core page operations, compaction, and free-space tracking are live; overflow handling, FSM persistence, and concurrency hooks are still in flight.
 
 ## Page Format
@@ -47,6 +47,7 @@ This document captures the first pass at the on-disk layout for the experimental
 - **Async persistence abstraction:** The `AsyncIo` interface hides platform-specific queues (Windows IORing, Linux io_uring) behind a unified submission/completion API for page and WAL traffic, with a portable thread-pool fallback selected by `create_async_io()` today.
 - **WAL writer runtime:** `WalWriter` maintains an aligned in-memory buffer, allocates monotonically increasing LSNs, rotates 16 MiB segments when full, and persists segment headers + records through the shared `AsyncIo` dispatchers. Exposes size/time/commit-driven flush hooks layered on `flush()` for commit coordination.
 - **Telemetry registry:** `WalTelemetryRegistry` collects `WalWriterTelemetrySnapshot` samplers so admin tooling and diagnostics endpoints can surface append/flush metrics without coupling to writer internals. Configure `WalWriterConfig::telemetry_registry` + `telemetry_identifier` to auto-register writers and tear them down safely.
+- **Retention manager:** `WalRetentionManager` enforces `WalRetentionConfig` knobs (`retention_segments`, `retention_hours`, `archive_path`) after durable flushes, pruning or archiving old segments without ever touching the active writer segment.
 - **WAL reader runtime:** `WalReader` enumerates segment files, validates CRC32C checksums, and streams records across segment boundaries for recovery and tooling consumers while honouring on-disk alignment rules.
 - **Recovery planning:** `WalRecoveryDriver` consumes `WalReader` streams, groups records by provisional transaction identifier, emits REDO/UNDO plans, and flags truncated tails so replay can halt cleanly on partial segments.
 - **Recovery replay:** `WalReplayer` hydrates page images from `WalRecoveryPlan` redo entries, applies tuple inserts/updates/deletes idempotently, and prepares the buffer cache for crash restart simulations.
@@ -79,7 +80,7 @@ Redo records always run in log order to rebuild page images, while undo records 
 - **Checkpoint-based pruning:** After each checkpoint, retain all WAL segments newer than the persisted dirty-page table and the oldest active transaction.
 - **Segment archival tiers:** Configure an archival directory for immutable segments; rotate files older than the retention window while keeping a sliding time-based cache onsite.
 - **Crash drill cadence:** Schedule periodic recovery exercises that replay archived WAL onto a snapshot to validate retention assumptions and detect corrupt segments early.
-- **Retention configuration:** Expose `wal.retention_segments`, `wal.retention_hours`, and `wal.archive_path` knobs (planned) to tune how aggressively segments are recycled.
+- **Retention configuration:** `WalRetentionConfig` exposes `retention_segments`, `retention_hours`, and `archive_path` knobs so retention or archival behaviour is opt-in and automated after each flush.
 
 ## Asynchronous I/O Architecture
 
