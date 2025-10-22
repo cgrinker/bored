@@ -1,6 +1,7 @@
 #include "bored/storage/page_operations.hpp"
 
 #include "bored/storage/free_space_map.hpp"
+#include "bored/storage/wal_payloads.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -298,6 +299,115 @@ void sync_free_space(FreeSpaceMap& fsm, std::span<const std::byte> page)
     fsm.record_page(header.page_id,
                     static_cast<std::uint16_t>(compute_free_bytes(header)),
                     header.fragment_count);
+}
+
+bool clear_overflow_page(std::span<std::byte> page,
+                         std::uint32_t page_id,
+                         std::uint64_t lsn,
+                         FreeSpaceMap* fsm)
+{
+    if (page.size() != kPageSize) {
+        return false;
+    }
+
+    if (!initialize_page(page, PageType::Overflow, page_id, lsn, fsm)) {
+        return false;
+    }
+
+    auto& header = page_header(page);
+    header.flags = static_cast<std::uint16_t>(PageFlag::Dirty);
+    return true;
+}
+
+bool write_overflow_chunk(std::span<std::byte> page,
+                          const WalOverflowChunkMeta& meta,
+                          std::span<const std::byte> payload,
+                          std::uint64_t lsn,
+                          FreeSpaceMap* fsm)
+{
+    if (page.size() != kPageSize) {
+        return false;
+    }
+
+    constexpr std::size_t meta_offset = sizeof(PageHeader);
+    constexpr std::size_t meta_size = sizeof(WalOverflowChunkMeta);
+    constexpr std::size_t payload_offset = meta_offset + meta_size;
+    constexpr std::size_t payload_capacity = kPageSize - payload_offset;
+
+    if (meta.overflow_page_id == 0U) {
+        return false;
+    }
+
+    if (meta.chunk_length != payload.size()) {
+        return false;
+    }
+
+    if (meta.chunk_length > payload_capacity) {
+        return false;
+    }
+
+    if (!clear_overflow_page(page, meta.overflow_page_id, lsn, fsm)) {
+        return false;
+    }
+
+    std::memcpy(page.data() + meta_offset, &meta, meta_size);
+    if (!payload.empty()) {
+        std::memcpy(page.data() + payload_offset, payload.data(), payload.size());
+    }
+
+    auto& header = page_header(page);
+    header.free_start = to_u16(payload_offset + payload.size());
+    header.lsn = lsn;
+    header.flags = static_cast<std::uint16_t>(PageFlag::Dirty);
+
+    if (fsm != nullptr) {
+        sync_free_space(*fsm, page);
+    }
+
+    return true;
+}
+
+std::optional<WalOverflowChunkMeta> read_overflow_chunk_meta(std::span<const std::byte> page)
+{
+    if (page.size() != kPageSize) {
+        return std::nullopt;
+    }
+
+    const auto& header = page_header(page);
+    if (!is_valid(header)) {
+        return std::nullopt;
+    }
+
+    if (static_cast<PageType>(header.type) != PageType::Overflow) {
+        return std::nullopt;
+    }
+
+    constexpr std::size_t meta_offset = sizeof(PageHeader);
+    constexpr std::size_t meta_size = sizeof(WalOverflowChunkMeta);
+    if (header.free_start < meta_offset + meta_size) {
+        return std::nullopt;
+    }
+
+    WalOverflowChunkMeta meta{};
+    std::memcpy(&meta, page.data() + meta_offset, meta_size);
+
+    constexpr std::size_t payload_capacity = kPageSize - meta_offset - meta_size;
+    if (meta.chunk_length > payload_capacity) {
+        return std::nullopt;
+    }
+
+    return meta;
+}
+
+std::span<const std::byte> overflow_chunk_payload(std::span<const std::byte> page,
+                                                   const WalOverflowChunkMeta& meta)
+{
+    constexpr std::size_t payload_offset = sizeof(PageHeader) + sizeof(WalOverflowChunkMeta);
+    if (payload_offset + meta.chunk_length > page.size()) {
+        return {};
+    }
+
+    return page.subspan(payload_offset, meta.chunk_length);
 }
 
 }  // namespace bored::storage

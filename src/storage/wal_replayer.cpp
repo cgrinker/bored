@@ -13,9 +13,16 @@ namespace bored::storage {
 
 namespace {
 
-std::span<std::byte> ensure_page(WalReplayContext& context, std::uint32_t page_id)
+std::span<std::byte> ensure_page(WalReplayContext& context, std::uint32_t page_id, PageType type)
 {
-    return context.get_page(page_id);
+    auto page = context.get_page(page_id);
+    auto& header = page_header(page);
+    if (!is_valid(header) || header.page_id != page_id || static_cast<PageType>(header.type) != type) {
+        if (!initialize_page(page, type, page_id, 0U, context.free_space_map())) {
+            throw std::runtime_error{"Failed to initialise replay page"};
+        }
+    }
+    return page;
 }
 
 bool page_already_applied(std::span<const std::byte> page, const WalRecordHeader& header)
@@ -140,6 +147,73 @@ std::error_code apply_tuple_update(std::span<std::byte> page,
     return {};
 }
 
+std::error_code apply_overflow_chunk(WalReplayContext& context,
+                                     const WalRecoveryRecord& record,
+                                     const WalOverflowChunkMeta& meta,
+                                     std::span<const std::byte> payload)
+{
+    if (record.header.page_id != meta.overflow_page_id) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    auto page = ensure_page(context, meta.overflow_page_id, PageType::Overflow);
+    if (page_already_applied(page, record.header)) {
+        return {};
+    }
+
+    if (!write_overflow_chunk(page, meta, payload, record.header.lsn, context.free_space_map())) {
+        return std::make_error_code(std::errc::io_error);
+    }
+
+    return {};
+}
+
+std::error_code apply_overflow_truncate(WalReplayContext& context,
+                                        const WalRecordHeader& header,
+                                        const WalOverflowTruncateMeta& meta)
+{
+    auto fsm = context.free_space_map();
+    auto current_page = meta.first_overflow_page_id;
+
+    for (std::uint32_t released = 0U; released < meta.released_page_count && current_page != 0U; ++released) {
+        auto page = ensure_page(context, current_page, PageType::Overflow);
+        auto existing_meta = read_overflow_chunk_meta(std::span<const std::byte>(page.data(), page.size()));
+        auto next_page = existing_meta ? existing_meta->next_overflow_page_id : 0U;
+
+        if (!page_already_applied(page, header)) {
+            if (!clear_overflow_page(page, current_page, header.lsn, fsm)) {
+                return std::make_error_code(std::errc::io_error);
+            }
+        }
+
+        current_page = next_page;
+    }
+
+    return {};
+}
+
+std::error_code undo_overflow_chunk(WalReplayContext& context,
+                                    const WalRecoveryRecord& record,
+                                    const WalOverflowChunkMeta& meta)
+{
+    if (record.header.page_id != meta.overflow_page_id) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    auto page = ensure_page(context, meta.overflow_page_id, PageType::Overflow);
+    if (!clear_overflow_page(page, meta.overflow_page_id, record.header.lsn, context.free_space_map())) {
+        return std::make_error_code(std::errc::io_error);
+    }
+
+    return {};
+}
+
+std::error_code undo_overflow_truncate(const WalOverflowTruncateMeta&)
+{
+    // Overflow truncates are idempotent for crash undo; redo replays rebuild the chain.
+    return {};
+}
+
 }  // namespace
 
 WalReplayContext::WalReplayContext(PageType default_page_type, FreeSpaceMap* fsm)
@@ -214,7 +288,6 @@ std::error_code WalReplayer::apply_undo(const WalRecoveryPlan& plan)
 
 std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
 {
-    auto page = ensure_page(context_, record.header.page_id);
     auto fsm = context_.free_space_map();
     auto payload = std::span<const std::byte>(record.payload.data(), record.payload.size());
 
@@ -228,13 +301,15 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (tuple_payload.size() != meta->tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    return apply_tuple_insert(page, record.header, *meta, tuple_payload, fsm, false);
+        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+        return apply_tuple_insert(page, record.header, *meta, tuple_payload, fsm, false);
     }
     case WalRecordType::TupleDelete: {
         auto meta = decode_wal_tuple_meta(payload);
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
+        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
         return apply_tuple_delete(page, record.header, *meta, fsm);
     }
     case WalRecordType::TupleUpdate: {
@@ -246,10 +321,29 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (tuple_payload.size() != meta->base.tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
+        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
         return apply_tuple_update(page, record.header, *meta, tuple_payload, fsm);
     }
     case WalRecordType::TupleBeforeImage:
         return {};
+    case WalRecordType::TupleOverflowChunk: {
+        auto meta = decode_wal_overflow_chunk_meta(payload);
+        if (!meta) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        auto chunk_payload = wal_overflow_chunk_payload(payload, *meta);
+        if (chunk_payload.size() != meta->chunk_length) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        return apply_overflow_chunk(context_, record, *meta, chunk_payload);
+    }
+    case WalRecordType::TupleOverflowTruncate: {
+        auto meta = decode_wal_overflow_truncate_meta(payload);
+        if (!meta) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        return apply_overflow_truncate(context_, record.header, *meta);
+    }
     default:
         return std::make_error_code(std::errc::not_supported);
     }
@@ -257,7 +351,6 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
 
 std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
 {
-    auto page = ensure_page(context_, record.header.page_id);
     auto fsm = context_.free_space_map();
     auto payload = std::span<const std::byte>(record.payload.data(), record.payload.size());
 
@@ -267,6 +360,7 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
+        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
         return apply_tuple_delete(page, record.header, *meta, fsm);
     }
     case WalRecordType::TupleUpdate: {
@@ -274,6 +368,7 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
+        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
         return apply_tuple_delete(page, record.header, meta->base, fsm);
     }
     case WalRecordType::TupleBeforeImage: {
@@ -285,10 +380,25 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         if (tuple_payload.size() != meta->tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    return apply_tuple_insert(page, record.header, *meta, tuple_payload, fsm, true);
+        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+        return apply_tuple_insert(page, record.header, *meta, tuple_payload, fsm, true);
     }
     case WalRecordType::TupleDelete:
         return {};
+    case WalRecordType::TupleOverflowChunk: {
+        auto meta = decode_wal_overflow_chunk_meta(payload);
+        if (!meta) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        return undo_overflow_chunk(context_, record, *meta);
+    }
+    case WalRecordType::TupleOverflowTruncate: {
+        auto meta = decode_wal_overflow_truncate_meta(payload);
+        if (!meta) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        return undo_overflow_truncate(*meta);
+    }
     default:
         return std::make_error_code(std::errc::not_supported);
     }

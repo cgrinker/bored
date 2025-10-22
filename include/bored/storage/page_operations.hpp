@@ -9,6 +9,10 @@
 
 namespace bored::storage {
 
+struct WalOverflowChunkMeta;
+struct WalOverflowTruncateMeta;
+
+
 struct TupleSlot final {
     std::uint16_t index = 0U;
     std::uint16_t offset = 0U;
@@ -56,5 +60,21 @@ bool compact_page(std::span<std::byte> page,
                   FreeSpaceMap* fsm = nullptr);
 
 void sync_free_space(FreeSpaceMap& fsm, std::span<const std::byte> page);
+
+bool write_overflow_chunk(std::span<std::byte> page,
+                          const WalOverflowChunkMeta& meta,
+                          std::span<const std::byte> payload,
+                          std::uint64_t lsn,
+                          FreeSpaceMap* fsm = nullptr);
+
+bool clear_overflow_page(std::span<std::byte> page,
+                         std::uint32_t page_id,
+                         std::uint64_t lsn,
+                         FreeSpaceMap* fsm = nullptr);
+
+std::optional<WalOverflowChunkMeta> read_overflow_chunk_meta(std::span<const std::byte> page);
+
+std::span<const std::byte> overflow_chunk_payload(std::span<const std::byte> page,
+                                                   const WalOverflowChunkMeta& meta);
 
 }  // namespace bored::storage

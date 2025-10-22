@@ -15,6 +15,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <vector>
 
 using bored::storage::AsyncIo;
 using bored::storage::AsyncIoBackend;
@@ -25,6 +26,7 @@ using bored::storage::PageManager;
 using bored::storage::PageType;
 using bored::storage::WalRecoveryDriver;
 using bored::storage::WalRecoveryPlan;
+using bored::storage::WalRecoveryRecord;
 using bored::storage::WalRecordDescriptor;
 using bored::storage::WalRecordType;
 using bored::storage::WalReplayContext;
@@ -165,6 +167,171 @@ TEST_CASE("WalReplayer replays committed tuple changes")
 
     std::filesystem::remove(fsm_snapshot_path);
     (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("WalReplayer replays overflow chunk records")
+{
+    FreeSpaceMap fsm;
+    WalReplayContext context{PageType::Table, &fsm};
+    WalReplayer replayer{context};
+
+    bored::storage::WalOverflowChunkMeta chunk_meta{};
+    chunk_meta.owner.page_id = 5123U;
+    chunk_meta.owner.slot_index = 2U;
+    chunk_meta.owner.tuple_length = 48U;
+    chunk_meta.owner.row_id = 42U;
+    chunk_meta.overflow_page_id = 9000U;
+    chunk_meta.next_overflow_page_id = 0U;
+    chunk_meta.chunk_offset = 0U;
+    chunk_meta.chunk_length = 24U;
+    chunk_meta.chunk_index = 0U;
+    chunk_meta.flags = static_cast<std::uint16_t>(bored::storage::WalOverflowChunkFlag::ChainStart |
+                                                  bored::storage::WalOverflowChunkFlag::ChainEnd);
+
+    std::array<std::byte, 24> chunk_payload{};
+    for (std::size_t index = 0; index < chunk_payload.size(); ++index) {
+        chunk_payload[index] = static_cast<std::byte>(index);
+    }
+
+    const auto payload_size = bored::storage::wal_overflow_chunk_payload_size(chunk_payload.size());
+    std::vector<std::byte> wal_payload(payload_size);
+    auto payload_span = std::span<std::byte>(wal_payload.data(), wal_payload.size());
+    REQUIRE(bored::storage::encode_wal_overflow_chunk(payload_span,
+                                                      chunk_meta,
+                                                      std::span<const std::byte>(chunk_payload.data(), chunk_payload.size())));
+
+    WalRecoveryRecord chunk_record{};
+    chunk_record.header.type = static_cast<std::uint16_t>(WalRecordType::TupleOverflowChunk);
+    chunk_record.header.lsn = 0xDEADBEEF;
+    chunk_record.header.page_id = chunk_meta.overflow_page_id;
+    chunk_record.header.total_length = static_cast<std::uint32_t>(sizeof(bored::storage::WalRecordHeader) + wal_payload.size());
+    chunk_record.payload = wal_payload;
+
+    WalRecoveryPlan redo_plan{};
+    redo_plan.redo.push_back(chunk_record);
+    REQUIRE_FALSE(replayer.apply_redo(redo_plan));
+
+    auto page = context.get_page(chunk_meta.overflow_page_id);
+    auto const_page = std::span<const std::byte>(page.data(), page.size());
+    auto stored_meta = bored::storage::read_overflow_chunk_meta(const_page);
+    REQUIRE(stored_meta);
+    CHECK(stored_meta->owner.page_id == chunk_meta.owner.page_id);
+    CHECK(stored_meta->chunk_length == chunk_meta.chunk_length);
+    auto stored_data = bored::storage::overflow_chunk_payload(const_page, *stored_meta);
+    REQUIRE(stored_data.size() == chunk_payload.size());
+    REQUIRE(std::equal(stored_data.begin(), stored_data.end(), chunk_payload.begin(), chunk_payload.end()));
+    CHECK(bored::storage::page_header(const_page).lsn == chunk_record.header.lsn);
+
+    WalRecoveryPlan undo_plan{};
+    undo_plan.undo.push_back(chunk_record);
+    REQUIRE_FALSE(replayer.apply_undo(undo_plan));
+
+    auto cleared_page = std::span<const std::byte>(page.data(), page.size());
+    auto cleared_meta = bored::storage::read_overflow_chunk_meta(cleared_page);
+    CHECK_FALSE(cleared_meta);
+    CHECK(bored::storage::page_header(cleared_page).lsn == chunk_record.header.lsn);
+}
+
+TEST_CASE("WalReplayer truncates overflow chains")
+{
+    FreeSpaceMap fsm;
+    WalReplayContext context{PageType::Table, &fsm};
+    WalReplayer replayer{context};
+
+    bored::storage::WalOverflowChunkMeta first_meta{};
+    first_meta.owner.page_id = 7123U;
+    first_meta.owner.slot_index = 5U;
+    first_meta.owner.tuple_length = 64U;
+    first_meta.owner.row_id = 84U;
+    first_meta.overflow_page_id = 9100U;
+    first_meta.next_overflow_page_id = 9101U;
+    first_meta.chunk_offset = 0U;
+    first_meta.chunk_length = 32U;
+    first_meta.chunk_index = 0U;
+    first_meta.flags = static_cast<std::uint16_t>(bored::storage::WalOverflowChunkFlag::ChainStart);
+
+    bored::storage::WalOverflowChunkMeta second_meta{};
+    second_meta.owner = first_meta.owner;
+    second_meta.overflow_page_id = 9101U;
+    second_meta.next_overflow_page_id = 0U;
+    second_meta.chunk_offset = first_meta.chunk_length;
+    second_meta.chunk_length = 16U;
+    second_meta.chunk_index = 1U;
+    second_meta.flags = static_cast<std::uint16_t>(bored::storage::WalOverflowChunkFlag::ChainEnd);
+
+    std::array<std::byte, 32> first_payload{};
+    for (std::size_t index = 0; index < first_payload.size(); ++index) {
+        first_payload[index] = static_cast<std::byte>(0xA0 + index);
+    }
+
+    std::array<std::byte, 16> second_payload{};
+    for (std::size_t index = 0; index < second_payload.size(); ++index) {
+        second_payload[index] = static_cast<std::byte>(0xF0 + index);
+    }
+
+    auto make_chunk_record = [](const bored::storage::WalOverflowChunkMeta& meta,
+                                std::span<const std::byte> data,
+                                std::uint64_t lsn) {
+        const auto payload_size = bored::storage::wal_overflow_chunk_payload_size(meta.chunk_length);
+        std::vector<std::byte> wal_payload(payload_size);
+        auto payload_span = std::span<std::byte>(wal_payload.data(), wal_payload.size());
+        REQUIRE(bored::storage::encode_wal_overflow_chunk(payload_span, meta, data));
+
+        WalRecoveryRecord record{};
+        record.header.type = static_cast<std::uint16_t>(WalRecordType::TupleOverflowChunk);
+        record.header.lsn = lsn;
+        record.header.page_id = meta.overflow_page_id;
+        record.header.total_length = static_cast<std::uint32_t>(sizeof(bored::storage::WalRecordHeader) + wal_payload.size());
+        record.payload = std::move(wal_payload);
+        return record;
+    };
+
+    auto first_chunk_record = make_chunk_record(first_meta, std::span<const std::byte>(first_payload.data(), first_payload.size()), 0x1000);
+    auto second_chunk_record = make_chunk_record(second_meta, std::span<const std::byte>(second_payload.data(), second_payload.size()), 0x1100);
+
+    WalRecoveryPlan chunk_plan{};
+    chunk_plan.redo.push_back(first_chunk_record);
+    chunk_plan.redo.push_back(second_chunk_record);
+    REQUIRE_FALSE(replayer.apply_redo(chunk_plan));
+
+    auto first_page = context.get_page(first_meta.overflow_page_id);
+    auto second_page = context.get_page(second_meta.overflow_page_id);
+    REQUIRE(bored::storage::read_overflow_chunk_meta(std::span<const std::byte>(first_page.data(), first_page.size())));
+    REQUIRE(bored::storage::read_overflow_chunk_meta(std::span<const std::byte>(second_page.data(), second_page.size())));
+
+    bored::storage::WalOverflowTruncateMeta truncate_meta{};
+    truncate_meta.owner = first_meta.owner;
+    truncate_meta.first_overflow_page_id = first_meta.overflow_page_id;
+    truncate_meta.released_page_count = 2U;
+
+    std::vector<std::byte> truncate_payload(bored::storage::wal_overflow_truncate_payload_size());
+    REQUIRE(bored::storage::encode_wal_overflow_truncate(std::span<std::byte>(truncate_payload.data(), truncate_payload.size()), truncate_meta));
+
+    WalRecoveryRecord truncate_record{};
+    truncate_record.header.type = static_cast<std::uint16_t>(WalRecordType::TupleOverflowTruncate);
+    truncate_record.header.lsn = 0x1200;
+    truncate_record.header.page_id = truncate_meta.first_overflow_page_id;
+    truncate_record.header.total_length = static_cast<std::uint32_t>(sizeof(bored::storage::WalRecordHeader) + truncate_payload.size());
+    truncate_record.payload = truncate_payload;
+
+    WalRecoveryPlan truncate_plan{};
+    truncate_plan.redo.push_back(truncate_record);
+    REQUIRE_FALSE(replayer.apply_redo(truncate_plan));
+
+    auto first_page_after = std::span<const std::byte>(first_page.data(), first_page.size());
+    auto second_page_after = std::span<const std::byte>(second_page.data(), second_page.size());
+    CHECK_FALSE(bored::storage::read_overflow_chunk_meta(first_page_after));
+    CHECK_FALSE(bored::storage::read_overflow_chunk_meta(second_page_after));
+    CHECK(bored::storage::page_header(first_page_after).lsn == truncate_record.header.lsn);
+    CHECK(bored::storage::page_header(second_page_after).lsn == truncate_record.header.lsn);
+
+    REQUIRE_FALSE(replayer.apply_redo(truncate_plan));
+    auto first_page_reapplied = std::span<const std::byte>(first_page.data(), first_page.size());
+    auto second_page_reapplied = std::span<const std::byte>(second_page.data(), second_page.size());
+    CHECK_FALSE(bored::storage::read_overflow_chunk_meta(first_page_reapplied));
+    CHECK_FALSE(bored::storage::read_overflow_chunk_meta(second_page_reapplied));
+    CHECK(bored::storage::page_header(first_page_reapplied).lsn == truncate_record.header.lsn);
+    CHECK(bored::storage::page_header(second_page_reapplied).lsn == truncate_record.header.lsn);
 }
 
 TEST_CASE("WalReplayer undoes uncommitted update using before image")
