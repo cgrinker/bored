@@ -12,8 +12,21 @@
 #include <string>
 #include <system_error>
 #include <vector>
+#include <mutex>
 
 namespace bored::storage {
+
+struct WalWriterTelemetrySnapshot final {
+    std::uint64_t append_calls = 0U;
+    std::uint64_t appended_bytes = 0U;
+    std::uint64_t total_append_duration_ns = 0U;
+    std::uint64_t last_append_duration_ns = 0U;
+    std::uint64_t flush_calls = 0U;
+    std::uint64_t flushed_bytes = 0U;
+    std::uint64_t max_flush_bytes = 0U;
+    std::uint64_t total_flush_duration_ns = 0U;
+    std::uint64_t last_flush_duration_ns = 0U;
+};
 
 struct WalWriterConfig final {
     std::filesystem::path directory{};
@@ -61,6 +74,7 @@ public:
     [[nodiscard]] bool is_closed() const noexcept;
     [[nodiscard]] std::uint64_t next_lsn() const noexcept;
     [[nodiscard]] std::filesystem::path segment_path(std::uint64_t segment_id) const;
+    [[nodiscard]] WalWriterTelemetrySnapshot telemetry_snapshot() const;
 
 private:
     [[nodiscard]] std::error_code ensure_directory();
@@ -94,6 +108,9 @@ private:
 
     std::size_t bytes_since_last_flush_ = 0U;
     std::chrono::steady_clock::time_point last_flush_time_{};
+
+    WalWriterTelemetrySnapshot telemetry_{};
+    mutable std::mutex telemetry_mutex_{};
 };
 
 }  // namespace bored::storage

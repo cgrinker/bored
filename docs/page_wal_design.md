@@ -92,6 +92,6 @@ The `AsyncIo` abstraction now routes work through a portable thread-pool backend
    - ☐ Compare FSM lookup performance against naive linear search as features land.
 
 4. **Documentation & Tooling**
-   - ☐ Expand `docs/storage.md` with concrete record diagrams and state transition flows.
+   - ✅ Expand `docs/storage.md` with concrete record diagrams and state transition flows.
    - ☐ Generate schema diagrams for WAL record types using plantuml/mermaid for quick reference.
    - ☐ Publish a checklist to drive WAL archival hygiene, recovery drills, and operational telemetry setup.

@@ -351,3 +351,46 @@ TEST_CASE("WalWriter commit hook flushes conditionally")
     io->shutdown();
     (void)std::filesystem::remove_all(dir);
 }
+
+TEST_CASE("WalWriter telemetry tracks append and flush activity")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_telemetry_");
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = bored::storage::kWalBlockSize;
+    config.flush_on_commit = false;
+
+    WalWriter writer{io, config};
+
+    std::array<std::byte, 32> payload{};
+    payload.fill(std::byte{0x7A});
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::TupleInsert;
+    descriptor.page_id = 321U;
+    descriptor.payload = payload;
+
+    WalAppendResult first{};
+    REQUIRE_FALSE(writer.append_record(descriptor, first));
+
+    WalAppendResult second{};
+    REQUIRE_FALSE(writer.append_record(descriptor, second));
+
+    REQUIRE_FALSE(writer.flush());
+
+    auto stats = writer.telemetry_snapshot();
+    REQUIRE(stats.append_calls == 2U);
+    REQUIRE(stats.appended_bytes == first.written_bytes + second.written_bytes);
+    REQUIRE(stats.flush_calls >= 1U);
+    REQUIRE(stats.flushed_bytes >= stats.appended_bytes);
+    REQUIRE(stats.max_flush_bytes >= stats.appended_bytes);
+    REQUIRE(stats.total_append_duration_ns >= stats.last_append_duration_ns);
+    REQUIRE(stats.total_flush_duration_ns >= stats.last_flush_duration_ns);
+
+    REQUIRE_FALSE(writer.close());
+    io->shutdown();
+    (void)std::filesystem::remove_all(dir);
+}

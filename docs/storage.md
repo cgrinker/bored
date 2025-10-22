@@ -2,6 +2,11 @@
 
 This document captures the first pass at the on-disk layout for the experimental relational database that lives in this repository. Two foundational building blocks are described: the fixed-size page format used by the main storage engine and the write-ahead log (WAL) format that guarantees durability and supports crash recovery.
 
+### Progress Snapshot (Oct 22, 2025)
+
+- **WAL pipeline ~70%**: Writer, reader, recovery planning, and redo replay are implemented with telemetry coverage; retention knobs and checkpoint payloads remain.
+- **Storage pages ~55%**: Core page operations, compaction, and free-space tracking are live; overflow handling, FSM persistence, and concurrency hooks are still in flight.
+
 ## Page Format
 
 - **Page size:** 8 KiB (`kPageSize`). This size balances I/O efficiency with memory utilisation and aligns with common database implementations.
@@ -45,6 +50,35 @@ This document captures the first pass at the on-disk layout for the experimental
 - **Recovery planning:** `WalRecoveryDriver` consumes `WalReader` streams, groups records by provisional transaction identifier, emits REDO/UNDO plans, and flags truncated tails so replay can halt cleanly on partial segments.
 - **Recovery replay:** `WalReplayer` hydrates page images from `WalRecoveryPlan` redo entries, applies tuple inserts/updates/deletes idempotently, and prepares the buffer cache for crash restart simulations.
 - **Page manager integration:** `PageManager` plans tuple inserts/deletes/updates, emits the corresponding WAL records first, then applies the in-memory mutation so LSNs stay chained, free-space tracking stays coherent, and page headers capture the latest LSN.
+
+### Redo/Undo State Flow
+
+```mermaid
+stateDiagram-v2
+  [*] --> EnumerateSegments
+  EnumerateSegments --> BuildPlan: WalReader -> WalRecoveryDriver
+  BuildPlan -->{TruncatedTail}
+  {TruncatedTail} --> HaltReplay: Flag truncated tail
+  {TruncatedTail} --> ApplyRedo: No truncation detected
+  ApplyRedo --> ApplyRecord: For each redo record
+  ApplyRecord --> ApplyRecord: Next record
+  ApplyRecord --> PrepareUndo: Redo complete
+  PrepareUndo --> ApplyUndo: Active transactions remain
+  PrepareUndo --> Finalize: No undo work
+  ApplyUndo --> ApplyUndo: Next undo record
+  ApplyUndo --> Finalize
+  HaltReplay --> Finalize
+  Finalize --> [*]
+```
+
+Redo records always run in log order to rebuild page images, while undo records (if any) walk surviving transactions in reverse order so partially applied changes are rolled back before restart.
+
+### WAL Retention & Archival Policies
+
+- **Checkpoint-based pruning:** After each checkpoint, retain all WAL segments newer than the persisted dirty-page table and the oldest active transaction.
+- **Segment archival tiers:** Configure an archival directory for immutable segments; rotate files older than the retention window while keeping a sliding time-based cache onsite.
+- **Crash drill cadence:** Schedule periodic recovery exercises that replay archived WAL onto a snapshot to validate retention assumptions and detect corrupt segments early.
+- **Retention configuration:** Expose `wal.retention_segments`, `wal.retention_hours`, and `wal.archive_path` knobs (planned) to tune how aggressively segments are recycled.
 
 ## Asynchronous I/O Architecture
 

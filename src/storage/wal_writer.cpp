@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <iomanip>
+#include <mutex>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -212,6 +213,8 @@ std::error_code WalWriter::append_record(const WalRecordDescriptor& descriptor, 
         return std::make_error_code(std::errc::operation_not_permitted);
     }
 
+    const auto append_start = std::chrono::steady_clock::now();
+
     const auto payload_size = descriptor.payload.size();
     if (payload_size > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) - sizeof(WalRecordHeader)) {
         return std::make_error_code(std::errc::value_too_large);
@@ -280,6 +283,16 @@ std::error_code WalWriter::append_record(const WalRecordDescriptor& descriptor, 
         return ec;
     }
 
+    const auto append_end = std::chrono::steady_clock::now();
+    const auto append_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(append_end - append_start).count();
+    {
+        std::lock_guard guard(telemetry_mutex_);
+        telemetry_.append_calls += 1U;
+        telemetry_.appended_bytes += aligned_length;
+        telemetry_.last_append_duration_ns = static_cast<std::uint64_t>(append_ns >= 0 ? append_ns : 0);
+        telemetry_.total_append_duration_ns += telemetry_.last_append_duration_ns;
+    }
+
     return {};
 }
 
@@ -288,6 +301,9 @@ std::error_code WalWriter::flush()
     if (closed_) {
         return {};
     }
+
+    const auto pending_bytes = bytes_since_last_flush_;
+    const auto flush_start = std::chrono::steady_clock::now();
 
     if (auto ec = flush_buffer(); ec) {
         return ec;
@@ -301,6 +317,17 @@ std::error_code WalWriter::flush()
     if (!result.status) {
         last_flush_time_ = std::chrono::steady_clock::now();
         bytes_since_last_flush_ = 0U;
+
+        const auto flush_end = std::chrono::steady_clock::now();
+        const auto flush_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(flush_end - flush_start).count();
+        const auto duration_ns = static_cast<std::uint64_t>(flush_ns >= 0 ? flush_ns : 0);
+
+        std::lock_guard guard(telemetry_mutex_);
+        telemetry_.flush_calls += 1U;
+        telemetry_.flushed_bytes += pending_bytes;
+        telemetry_.max_flush_bytes = std::max(telemetry_.max_flush_bytes, static_cast<std::uint64_t>(pending_bytes));
+        telemetry_.last_flush_duration_ns = duration_ns;
+        telemetry_.total_flush_duration_ns += duration_ns;
     }
     return result.status;
 }
@@ -333,6 +360,12 @@ std::uint64_t WalWriter::next_lsn() const noexcept
 std::filesystem::path WalWriter::segment_path(std::uint64_t segment_id) const
 {
     return make_segment_path(segment_id);
+}
+
+WalWriterTelemetrySnapshot WalWriter::telemetry_snapshot() const
+{
+    std::lock_guard guard(telemetry_mutex_);
+    return telemetry_;
 }
 
 std::error_code WalWriter::notify_commit()
