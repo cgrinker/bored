@@ -172,6 +172,36 @@ std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
     return TupleSlot{slot_index, write_offset, payload_length};
 }
 
+std::optional<AppendTuplePlan> prepare_append_tuple(std::span<const std::byte> page,
+                                                    std::size_t payload_length)
+{
+    if (page.size() != kPageSize) {
+        return std::nullopt;
+    }
+
+    const auto& header = page_header(page);
+    if (!is_valid(header)) {
+        return std::nullopt;
+    }
+
+    if (payload_length == 0U || payload_length > std::numeric_limits<std::uint16_t>::max()) {
+        return std::nullopt;
+    }
+
+    auto reusable = find_reusable_slot(header, page);
+    const std::size_t slot_overhead = reusable ? 0U : sizeof(SlotPointer);
+    if (compute_free_bytes(header) < payload_length + slot_overhead) {
+        return std::nullopt;
+    }
+
+    AppendTuplePlan plan{};
+    plan.slot_index = reusable ? static_cast<std::uint16_t>(*reusable) : header.tuple_count;
+    plan.write_offset = header.free_start;
+    plan.tuple_length = static_cast<std::uint16_t>(payload_length);
+    plan.reuses_slot = reusable.has_value();
+    return plan;
+}
+
 bool delete_tuple(std::span<std::byte> page,
                   std::uint16_t slot_index,
                   std::uint64_t lsn,

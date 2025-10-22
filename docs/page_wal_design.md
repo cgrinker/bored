@@ -8,6 +8,7 @@ This document tracks the remaining work required to take the current page manage
    - ✅ Track free space at the page granularity (per relation) with bucketed lookups.
    - ✅ Provide O(1) lookup for pages with sufficient contiguous bytes while preferring unfragmented candidates.
    - ☐ Persist the FSM to disk and ensure it survives crash recovery.
+   - ☐ Record WAL metadata for FSM updates so crash recovery can rebuild hints.
 
 2. **Page Compaction / Defragmentation**
    - ✅ Implement vacuum/defragment routines that coalesce free space within a page by rewriting tuples and updating slots via `compact_page`.
@@ -17,6 +18,7 @@ This document tracks the remaining work required to take the current page manage
 3. **Overflow / Large Tuple Handling**
    - Support tuples that exceed a single page by chaining overflow pages.
    - Extend page flags and tuple metadata accordingly.
+   - ☐ Provide WAL formats for overflow chain creation/truncation.
 
 4. **Concurrency Hooks**
    - Define latching protocol for page access (shared/exclusive) compatible with asynchronous I/O completions.
@@ -25,11 +27,12 @@ This document tracks the remaining work required to take the current page manage
 5. **Diagnostic Instrumentation**
    - Add page dump utilities for debugging (hexdump + interpreted view of slots/tuples).
    - Track fragmentation and average free-space utilisation metrics.
+   - ☐ Emit WAL append latency/throughput counters for tuning.
 
 ## Write-Ahead Log
 
 1. **Log Sequencing & Buffers**
-   - Maintain an in-memory log buffer with LSN allocation and latency-aware batching.
+   - ✅ Maintain an in-memory log buffer with LSN allocation and latency-aware batching (`WalWriter`).
    - Implement flush policy hooks (interval, commit-driven, size-based) and feed durable writes through `AsyncIo`.
 
 2. **Physical Page Records**
@@ -38,7 +41,8 @@ This document tracks the remaining work required to take the current page manage
    - Integrate asynchronous write submission paths so redo operations reuse `AsyncIo` dispatchers.
 
 3. **Logical Tuple Records**
-   - Integrate the current tuple insert/delete/update payloads into the WAL writer.
+   - ✅ Integrate tuple insert/delete payloads via `PageManager` so WAL commits precede page mutations.
+   - Integrate tuple update payloads into the WAL writer and manager path.
    - Specify redo/undo semantics so logical operations can reproduce page changes.
 
 4. **Checkpointing**
@@ -46,12 +50,13 @@ This document tracks the remaining work required to take the current page manage
    - Implement a basic checkpoint writer that truncates/compresses WAL segments once durable.
 
 5. **Segment Management**
-   - Handle WAL segment creation, rollover, and archival/deletion policies using async writes and batched fsync calls.
-   - Verify segment headers and enforce alignment when streaming to disk.
+   - ✅ Handle WAL segment creation, rollover, and alignment enforcement in `WalWriter`.
+   - Add archival/deletion policies plus retention knobs.
 
 6. **Recovery Workflow**
    - Outline REDO/UNDO passes using the log records defined above.
    - Prototype a recovery driver that replays committed transactions and rolls back incomplete ones while coordinating asynchronous reads/writes.
+   - Introduce a WAL reader utility to iterate segment files and validate checksums before replay.
 
 ## Asynchronous I/O Layer
 

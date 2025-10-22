@@ -15,6 +15,13 @@ struct TupleSlot final {
     std::uint16_t length = 0U;
 };
 
+struct AppendTuplePlan final {
+    std::uint16_t slot_index = 0U;
+    std::uint16_t write_offset = 0U;
+    std::uint16_t tuple_length = 0U;
+    bool reuses_slot = false;
+};
+
 class FreeSpaceMap;
 
 PageHeader& page_header(std::span<std::byte> page);
@@ -33,6 +40,9 @@ std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
                                       std::span<const std::byte> payload,
                                       std::uint64_t lsn,
                                       FreeSpaceMap* fsm = nullptr);
+
+std::optional<AppendTuplePlan> prepare_append_tuple(std::span<const std::byte> page,
+                                                    std::size_t payload_length);
 
 bool delete_tuple(std::span<std::byte> page,
                   std::uint16_t slot_index,

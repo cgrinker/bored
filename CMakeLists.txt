@@ -14,6 +14,8 @@ add_library(${PROJECT_NAME}_lib
     src/storage/page_operations.cpp
     src/storage/free_space_map.cpp
     src/storage/wal_payloads.cpp
+    src/storage/page_manager.cpp
+    src/storage/wal_writer.cpp
 )
 
 target_include_directories(${PROJECT_NAME}_lib
@@ -47,6 +49,8 @@ if(BORED_ENABLE_TESTS)
         tests/storage_format_tests.cpp
         tests/async_io_tests.cpp
         tests/async_io_ioring_tests.cpp
+    tests/page_manager_tests.cpp
+        tests/wal_writer_tests.cpp
     )
 
     target_link_libraries(${PROJECT_NAME}_tests
