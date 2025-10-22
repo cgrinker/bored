@@ -262,3 +262,75 @@ TEST_CASE("WAL tuple update payload records previous length")
     REQUIRE(payload.size() == kTestPayload.size());
     REQUIRE(std::equal(payload.begin(), payload.end(), kTestPayload.begin(), kTestPayload.end()));
 }
+
+TEST_CASE("WAL overflow chunk payload round-trips")
+{
+    bored::storage::WalOverflowChunkMeta meta{};
+    meta.owner.page_id = 501U;
+    meta.owner.slot_index = 19U;
+    meta.owner.tuple_length = 4096U;
+    meta.owner.row_id = 0xABCD'0123'4567'89EFULL;
+    meta.overflow_page_id = 0xDEADBEEFU;
+    meta.next_overflow_page_id = 0xCAFEBABEU;
+    meta.chunk_offset = 64U;
+    meta.chunk_length = 48U;
+    meta.chunk_index = 2U;
+    meta.flags = static_cast<std::uint16_t>(bored::storage::WalOverflowChunkFlag::ChainEnd);
+
+    std::array<std::byte, 256> buffer{};
+    auto span = std::span<std::byte>(buffer.data(), buffer.size());
+    const auto required = bored::storage::wal_overflow_chunk_payload_size(meta.chunk_length);
+    auto target = span.subspan(0, required);
+
+    std::array<std::byte, 48> chunk{};
+    for (std::size_t index = 0; index < chunk.size(); ++index) {
+        chunk[index] = std::byte{static_cast<unsigned char>(index)};
+    }
+
+    auto chunk_view = std::span<const std::byte>(chunk.data(), chunk.size());
+    REQUIRE(bored::storage::encode_wal_overflow_chunk(target, meta, chunk_view));
+
+    auto decoded_meta = bored::storage::decode_wal_overflow_chunk_meta(target);
+    REQUIRE(decoded_meta);
+    CHECK(decoded_meta->owner.page_id == meta.owner.page_id);
+    CHECK(decoded_meta->owner.slot_index == meta.owner.slot_index);
+    CHECK(decoded_meta->owner.tuple_length == meta.owner.tuple_length);
+    CHECK(decoded_meta->owner.row_id == meta.owner.row_id);
+    CHECK(decoded_meta->overflow_page_id == meta.overflow_page_id);
+    CHECK(decoded_meta->next_overflow_page_id == meta.next_overflow_page_id);
+    CHECK(decoded_meta->chunk_offset == meta.chunk_offset);
+    CHECK(decoded_meta->chunk_length == meta.chunk_length);
+    CHECK(decoded_meta->chunk_index == meta.chunk_index);
+    CHECK(decoded_meta->flags == meta.flags);
+
+    auto payload = bored::storage::wal_overflow_chunk_payload(target, *decoded_meta);
+    REQUIRE(payload.size() == chunk.size());
+    REQUIRE(std::equal(payload.begin(), payload.end(), chunk.begin(), chunk.end()));
+}
+
+TEST_CASE("WAL overflow truncate payload round-trips")
+{
+    bored::storage::WalOverflowTruncateMeta meta{};
+    meta.owner.page_id = 777U;
+    meta.owner.slot_index = 31U;
+    meta.owner.tuple_length = 1024U;
+    meta.owner.row_id = 0x1111'2222'3333'4444ULL;
+    meta.first_overflow_page_id = 0xFEEDC0DEU;
+    meta.released_page_count = 3U;
+
+    std::array<std::byte, 128> buffer{};
+    auto span = std::span<std::byte>(buffer.data(), buffer.size());
+    const auto required = bored::storage::wal_overflow_truncate_payload_size();
+    auto target = span.subspan(0, required);
+
+    REQUIRE(bored::storage::encode_wal_overflow_truncate(target, meta));
+
+    auto decoded = bored::storage::decode_wal_overflow_truncate_meta(target);
+    REQUIRE(decoded);
+    CHECK(decoded->owner.page_id == meta.owner.page_id);
+    CHECK(decoded->owner.slot_index == meta.owner.slot_index);
+    CHECK(decoded->owner.tuple_length == meta.owner.tuple_length);
+    CHECK(decoded->owner.row_id == meta.owner.row_id);
+    CHECK(decoded->first_overflow_page_id == meta.first_overflow_page_id);
+    CHECK(decoded->released_page_count == meta.released_page_count);
+}

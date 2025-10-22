@@ -118,4 +118,79 @@ std::span<const std::byte> wal_tuple_update_payload(std::span<const std::byte> b
     return buffer.subspan(header_size, meta.base.tuple_length);
 }
 
+bool encode_wal_overflow_chunk(std::span<std::byte> buffer,
+                               const WalOverflowChunkMeta& meta,
+                               std::span<const std::byte> chunk_data)
+{
+    if (meta.chunk_length != chunk_data.size()) {
+        return false;
+    }
+
+    if (meta.chunk_length == 0U) {
+        return false;
+    }
+
+    const auto required = wal_overflow_chunk_payload_size(meta.chunk_length);
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &meta, sizeof(WalOverflowChunkMeta));
+    std::memcpy(buffer.data() + sizeof(WalOverflowChunkMeta), chunk_data.data(), chunk_data.size());
+    return true;
+}
+
+bool encode_wal_overflow_truncate(std::span<std::byte> buffer, const WalOverflowTruncateMeta& meta)
+{
+    const auto required = wal_overflow_truncate_payload_size();
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &meta, sizeof(WalOverflowTruncateMeta));
+    return true;
+}
+
+std::optional<WalOverflowChunkMeta> decode_wal_overflow_chunk_meta(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalOverflowChunkMeta))) {
+        return std::nullopt;
+    }
+
+    WalOverflowChunkMeta meta{};
+    std::memcpy(&meta, buffer.data(), sizeof(WalOverflowChunkMeta));
+
+    if (!fits(buffer, sizeof(WalOverflowChunkMeta) + meta.chunk_length)) {
+        return std::nullopt;
+    }
+
+    if (meta.chunk_length == 0U) {
+        return std::nullopt;
+    }
+
+    return meta;
+}
+
+std::optional<WalOverflowTruncateMeta> decode_wal_overflow_truncate_meta(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalOverflowTruncateMeta))) {
+        return std::nullopt;
+    }
+
+    WalOverflowTruncateMeta meta{};
+    std::memcpy(&meta, buffer.data(), sizeof(WalOverflowTruncateMeta));
+    return meta;
+}
+
+std::span<const std::byte> wal_overflow_chunk_payload(std::span<const std::byte> buffer,
+                                                      const WalOverflowChunkMeta& meta)
+{
+    const auto header_size = sizeof(WalOverflowChunkMeta);
+    if (!fits(buffer, header_size + meta.chunk_length)) {
+        return {};
+    }
+
+    return buffer.subspan(header_size, meta.chunk_length);
+}
+
 }  // namespace bored::storage
