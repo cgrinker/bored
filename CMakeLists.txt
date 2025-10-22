@@ -19,6 +19,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/wal_reader.cpp
     src/storage/wal_recovery.cpp
     src/storage/wal_replayer.cpp
+    src/storage/wal_telemetry_registry.cpp
 )
 
 target_include_directories(${PROJECT_NAME}_lib
@@ -57,6 +58,7 @@ if(BORED_ENABLE_TESTS)
         tests/wal_reader_tests.cpp
         tests/wal_recovery_tests.cpp
         tests/wal_replay_tests.cpp
+    tests/wal_telemetry_tests.cpp
     )
 
     target_link_libraries(${PROJECT_NAME}_tests

@@ -1,6 +1,7 @@
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/checksum.hpp"
+#include "bored/storage/wal_telemetry_registry.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -22,6 +23,7 @@ using bored::storage::WalRecordFlag;
 using bored::storage::WalRecordHeader;
 using bored::storage::WalRecordType;
 using bored::storage::WalSegmentHeader;
+using bored::storage::WalTelemetryRegistry;
 using bored::storage::WalWriter;
 using bored::storage::WalWriterConfig;
 
@@ -391,6 +393,53 @@ TEST_CASE("WalWriter telemetry tracks append and flush activity")
     REQUIRE(stats.total_flush_duration_ns >= stats.last_flush_duration_ns);
 
     REQUIRE_FALSE(writer.close());
+    io->shutdown();
+    (void)std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("WalWriter auto-registers telemetry sampler when configured")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_registry_");
+
+    WalTelemetryRegistry registry{};
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = bored::storage::kWalBlockSize;
+    config.flush_on_commit = false;
+    config.telemetry_registry = &registry;
+    config.telemetry_identifier = "writer_registry";
+
+    {
+        WalWriter writer{io, config};
+
+        std::array<std::byte, 32> payload{};
+        payload.fill(std::byte{0x99});
+
+        WalRecordDescriptor descriptor{};
+        descriptor.type = WalRecordType::TupleInsert;
+        descriptor.page_id = 777U;
+        descriptor.payload = payload;
+
+        WalAppendResult result{};
+        REQUIRE_FALSE(writer.append_record(descriptor, result));
+        REQUIRE_FALSE(writer.flush());
+
+        auto snapshot = registry.aggregate();
+        REQUIRE(snapshot.append_calls == 1U);
+        REQUIRE(snapshot.flush_calls >= 1U);
+        REQUIRE(snapshot.appended_bytes == result.written_bytes);
+        REQUIRE(snapshot.flushed_bytes >= snapshot.appended_bytes);
+
+        REQUIRE_FALSE(writer.close());
+    }
+
+    auto after_close = registry.aggregate();
+    REQUIRE(after_close.append_calls == 0U);
+    REQUIRE(after_close.flush_calls == 0U);
+
     io->shutdown();
     (void)std::filesystem::remove_all(dir);
 }

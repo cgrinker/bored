@@ -16,6 +16,8 @@
 
 namespace bored::storage {
 
+class WalTelemetryRegistry;
+
 struct WalWriterTelemetrySnapshot final {
     std::uint64_t append_calls = 0U;
     std::uint64_t appended_bytes = 0U;
@@ -39,6 +41,8 @@ struct WalWriterConfig final {
     std::size_t size_flush_threshold = 0U;
     std::chrono::milliseconds time_flush_interval{0};
     bool flush_on_commit = true;
+    WalTelemetryRegistry* telemetry_registry = nullptr;
+    std::string telemetry_identifier{};
 };
 
 struct WalRecordDescriptor final {
@@ -111,6 +115,8 @@ private:
 
     WalWriterTelemetrySnapshot telemetry_{};
     mutable std::mutex telemetry_mutex_{};
+    WalTelemetryRegistry* telemetry_registry_ = nullptr;
+    std::string telemetry_identifier_{};
 };
 
 }  // namespace bored::storage

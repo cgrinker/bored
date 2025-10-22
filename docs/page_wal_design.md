@@ -27,7 +27,7 @@ This document tracks the remaining work required to take the current page manage
 5. **Diagnostic Instrumentation**
    - Add page dump utilities for debugging (hexdump + interpreted view of slots/tuples).
    - Track fragmentation and average free-space utilisation metrics.
-   - ☐ Emit WAL append latency/throughput counters for tuning.
+   - ✅ Emit WAL append latency/throughput counters for tuning via `WalWriterTelemetrySnapshot` and `WalTelemetryRegistry`.
 
 ## Write-Ahead Log
 

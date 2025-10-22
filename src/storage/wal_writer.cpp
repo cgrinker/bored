@@ -1,6 +1,7 @@
 #include "bored/storage/wal_writer.hpp"
 
 #include "bored/storage/checksum.hpp"
+#include "bored/storage/wal_telemetry_registry.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -49,11 +50,22 @@ WalWriter::WalWriter(std::shared_ptr<AsyncIo> io, WalWriterConfig config)
     }
     config_.buffer_size = buffer_.size();
     last_flush_time_ = std::chrono::steady_clock::now();
+
+    telemetry_registry_ = config_.telemetry_registry;
+    telemetry_identifier_ = config_.telemetry_identifier;
+    if (telemetry_registry_ && !telemetry_identifier_.empty()) {
+        telemetry_registry_->register_sampler(telemetry_identifier_, [this] {
+            return this->telemetry_snapshot();
+        });
+    }
 }
 
 WalWriter::~WalWriter()
 {
     (void)close();
+    if (telemetry_registry_ && !telemetry_identifier_.empty()) {
+        telemetry_registry_->unregister_sampler(telemetry_identifier_);
+    }
 }
 
 std::error_code WalWriter::ensure_directory()

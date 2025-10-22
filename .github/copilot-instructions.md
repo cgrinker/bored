@@ -21,6 +21,7 @@
 
 ## Current State (Oct 22, 2025)
 - `WalWriter` provides aligned WAL buffering, segment rotation, and size/time/commit-driven flush hooks; endian-stable headers verified by tests.
+- `WalTelemetryRegistry` aggregates per-writer telemetry snapshots for diagnostics surfaces.
 - `WalReader` enumerates segments, validates checksums, and streams records across segment boundaries with Catch2 coverage.
 - `WalRecoveryDriver` clusters WAL records by provisional transaction id, produces REDO/UNDO plans, and flags truncated tails with tests.
 - `WalRecoveryDriver` sketches REDO/UNDO planning, groups records by provisional transaction id, and flags truncated tails; truncated segment handling now tested.
