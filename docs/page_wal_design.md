@@ -56,7 +56,7 @@ This document tracks the remaining work required to take the current page manage
 6. **Recovery Workflow**
    - Outline REDO/UNDO passes using the log records defined above.
    - Prototype a recovery driver that replays committed transactions and rolls back incomplete ones while coordinating asynchronous reads/writes.
-   - Introduce a WAL reader utility to iterate segment files and validate checksums before replay.
+   - ✅ Introduce a WAL reader utility to iterate segment files and validate checksums before replay.
 
 ## Asynchronous I/O Layer
 

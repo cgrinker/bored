@@ -21,11 +21,12 @@
 
 ## Current State (Oct 22, 2025)
 - `WalWriter` provides aligned WAL buffering, segment rotation, and size/time/commit-driven flush hooks; endian-stable headers verified by tests.
+- `WalReader` enumerates segments, validates checksums, and streams records across segment boundaries with new Catch2 coverage.
 - `PageManager` plans tuple inserts/deletes/updates, emits WAL records ahead of page mutations, and keeps page headers/free-space map LSNs consistent.
-- Catch2 suites (`wal_writer_tests.cpp`, `page_manager_tests.cpp`) parse emitted segments to confirm header chaining, payload encoding, and delete/update linkages.
+- Catch2 suites (`wal_writer_tests.cpp`, `wal_reader_tests.cpp`, `page_manager_tests.cpp`) parse emitted segments to confirm header chaining, payload encoding, and delete/update linkages.
 - Docs updated (`docs/storage.md`, `docs/page_wal_design.md`) to reflect completed WAL sequencing milestones and new TODOs.
 
 ## Next Tasks
-1. Design WAL reader/recovery scaffolding: segment iterator, checksum validation, REDO/UNDO pass outline.
-2. Extend docs with redo/undo state diagrams and WAL retention/archival policies.
+1. Sketch REDO/UNDO recovery driver using `WalReader`, define replay ordering, and add focused tests around truncated tail handling.
+2. Extend docs with redo/undo state diagrams plus WAL retention/archival policies.
 3. Record WAL append metrics and FSM hint journaling requirements to guide future instrumentation.

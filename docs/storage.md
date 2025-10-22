@@ -41,6 +41,7 @@ This document captures the first pass at the on-disk layout for the experimental
 - **Tuple payloads:** `wal_payloads.hpp` defines aligned layouts for tuple inserts, deletes, and updates to simplify serialisation/deserialisation when building records.
 - **Async persistence abstraction:** The `AsyncIo` interface hides platform-specific queues (Windows IORing, Linux io_uring) behind a unified submission/completion API for page and WAL traffic, with a portable thread-pool fallback selected by `create_async_io()` today.
 - **WAL writer runtime:** `WalWriter` maintains an aligned in-memory buffer, allocates monotonically increasing LSNs, rotates 16 MiB segments when full, and persists segment headers + records through the shared `AsyncIo` dispatchers. Exposes size/time/commit-driven flush hooks layered on `flush()` for commit coordination.
+- **WAL reader runtime:** `WalReader` enumerates segment files, validates CRC32C checksums, and streams records across segment boundaries for recovery and tooling consumers while honouring on-disk alignment rules.
 - **Page manager integration:** `PageManager` plans tuple inserts/deletes/updates, emits the corresponding WAL records first, then applies the in-memory mutation so LSNs stay chained, free-space tracking stays coherent, and page headers capture the latest LSN.
 
 ## Asynchronous I/O Architecture
@@ -91,6 +92,7 @@ This document captures the first pass at the on-disk layout for the experimental
 - Extend page compaction to emit slot relocation metadata for indexes, integrate with WAL archival / recycling processes, and communicate flushes through `AsyncIo`.
 - Implement on-disk free-space map management to speed page allocation decisions and route reads/writes through the async dispatcher.
 - Design index logging payloads (B-Tree page splits/merges) using the same WAL infrastructure and schedule their persistence via `AsyncIo` implementations.
+- Prototype REDO/UNDO recovery drivers on top of `WalReader`, including truncated-tail handling and reapplication ordering semantics.
 - **Deferred: Linux io_uring backend roadmap**
   - Target liburing 2.x to mirror the Windows IoRing dispatcher with queue-depth aware submission, per-file-class backpressure, and dsync-aware flush handling.
   - Translate Linux `io_uring_cqe::res` results into `std::error_code` values using `std::system_category()` while preserving errno semantics.
