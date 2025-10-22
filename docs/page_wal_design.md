@@ -57,6 +57,7 @@ This document tracks the remaining work required to take the current page manage
    - ✅ Outline REDO/UNDO passes using `WalRecoveryDriver` plan generation with provisional transaction grouping.
    - ☐ Implement page replay primitives that consume `WalRecoveryPlan` redo entries, hook them into PageManager, and validate crash/restart scenarios.
    - ☐ Build UNDO walkers for in-flight transactions that restore pages and reclaim slots on restart.
+   - ✅ Deliver a WAL replayer utility that hydrates page images from redo plans with idempotent tuple insert/update/delete support.
    - ✅ Introduce a WAL reader utility to iterate segment files and validate checksums before replay.
 
 ## Asynchronous I/O Layer
