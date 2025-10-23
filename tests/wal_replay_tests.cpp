@@ -799,6 +799,217 @@ TEST_CASE("Wal crash drill restores overflow before image")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
+TEST_CASE("Wal crash drill restores multi-page overflow spans")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_crash_drill_multi_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id_a = 81818U;
+    constexpr std::uint32_t page_id_b = 92929U;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_a_buffer{};
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_b_buffer{};
+    auto page_a_span = std::span<std::byte>(page_a_buffer.data(), page_a_buffer.size());
+    auto page_b_span = std::span<std::byte>(page_b_buffer.data(), page_b_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_a_span, PageType::Table, page_id_a));
+    REQUIRE_FALSE(manager.initialize_page(page_b_span, PageType::Table, page_id_b));
+
+    std::vector<std::byte> payload_a(16384U);
+    for (std::size_t index = 0; index < payload_a.size(); ++index) {
+        payload_a[index] = static_cast<std::byte>((index * 3U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult insert_a{};
+    REQUIRE_FALSE(manager.insert_tuple(page_a_span, payload_a, 0xCAFEULL, insert_a));
+    REQUIRE(insert_a.used_overflow);
+    REQUIRE(insert_a.overflow_page_ids.size() >= 3U);
+
+    std::vector<std::byte> payload_b(9216U);
+    for (std::size_t index = 0; index < payload_b.size(); ++index) {
+        payload_b[index] = static_cast<std::byte>((index * 7U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult insert_b{};
+    REQUIRE_FALSE(manager.insert_tuple(page_b_span, payload_b, 0xFADEULL, insert_b));
+    REQUIRE(insert_b.used_overflow);
+    REQUIRE(insert_b.overflow_page_ids.size() >= 2U);
+
+    WalRecordDescriptor commit_a{};
+    commit_a.type = WalRecordType::Commit;
+    commit_a.page_id = page_id_a;
+    commit_a.flags = bored::storage::WalRecordFlag::None;
+    commit_a.payload = {};
+    bored::storage::WalAppendResult commit_result_a{};
+    REQUIRE_FALSE(wal_writer->append_record(commit_a, commit_result_a));
+
+    WalRecordDescriptor commit_b{};
+    commit_b.type = WalRecordType::Commit;
+    commit_b.page_id = page_id_b;
+    commit_b.flags = bored::storage::WalRecordFlag::None;
+    commit_b.payload = {};
+    bored::storage::WalAppendResult commit_result_b{};
+    REQUIRE_FALSE(wal_writer->append_record(commit_b, commit_result_b));
+
+    const auto baseline_page_a = page_a_buffer;
+    const auto baseline_page_b = page_b_buffer;
+    const auto baseline_free_bytes_a = fsm.current_free_bytes(page_id_a);
+    const auto baseline_free_bytes_b = fsm.current_free_bytes(page_id_b);
+
+    std::array<std::byte, 192> shrink_payload{};
+    shrink_payload.fill(std::byte{0x42});
+    PageManager::TupleUpdateResult update_a{};
+    REQUIRE_FALSE(manager.update_tuple(page_a_span, insert_a.slot.index, shrink_payload, 0xCAFEULL, update_a));
+
+    PageManager::TupleDeleteResult delete_b{};
+    REQUIRE_FALSE(manager.delete_tuple(page_b_span, insert_b.slot.index, 0xFADEULL, delete_b));
+
+    const auto crash_page_a = page_a_buffer;
+    const auto crash_page_b = page_b_buffer;
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    CAPTURE(plan.redo.size());
+    CAPTURE(plan.undo.size());
+    REQUIRE(plan.redo.size() >= 2U);
+    REQUIRE(plan.undo.size() >= 4U);
+
+    WalUndoWalker walker{plan};
+    struct ExpectedSpan final {
+        std::uint32_t owner_page_id = 0U;
+        std::uint16_t slot_index = std::numeric_limits<std::uint16_t>::max();
+        std::vector<std::byte> tuple_payload{};
+        std::vector<bored::storage::WalOverflowChunkMeta> chunk_metas{};
+        std::vector<std::vector<std::byte>> chunk_payloads{};
+        std::vector<std::uint32_t> walker_pages{};
+    };
+
+    std::vector<ExpectedSpan> spans;
+    while (auto work_item = walker.next()) {
+        ExpectedSpan span{};
+        span.owner_page_id = work_item->owner_page_id;
+        span.walker_pages = work_item->overflow_page_ids;
+        std::sort(span.walker_pages.begin(), span.walker_pages.end());
+        span.walker_pages.erase(std::unique(span.walker_pages.begin(), span.walker_pages.end()), span.walker_pages.end());
+
+        for (const auto& record : work_item->records) {
+            const auto type = static_cast<WalRecordType>(record.header.type);
+            auto payload = std::span<const std::byte>(record.payload.data(), record.payload.size());
+            if (type == WalRecordType::TupleBeforeImage) {
+                auto before_view = bored::storage::decode_wal_tuple_before_image(payload);
+                REQUIRE(before_view);
+                span.slot_index = before_view->meta.slot_index;
+                span.tuple_payload.assign(before_view->tuple_payload.begin(), before_view->tuple_payload.end());
+                for (const auto& chunk_view : before_view->overflow_chunks) {
+                    span.chunk_metas.push_back(chunk_view.meta);
+                    span.chunk_payloads.emplace_back(chunk_view.payload.begin(), chunk_view.payload.end());
+                }
+            }
+        }
+
+        REQUIRE(span.slot_index != std::numeric_limits<std::uint16_t>::max());
+        spans.push_back(std::move(span));
+    }
+
+    REQUIRE(spans.size() == 2U);
+    for (auto& span : spans) {
+        std::vector<std::uint32_t> expected_pages;
+        expected_pages.reserve(span.chunk_metas.size() * 2U);
+        for (const auto& meta : span.chunk_metas) {
+            expected_pages.push_back(meta.overflow_page_id);
+            if (meta.next_overflow_page_id != 0U) {
+                expected_pages.push_back(meta.next_overflow_page_id);
+            }
+        }
+        std::sort(expected_pages.begin(), expected_pages.end());
+        expected_pages.erase(std::unique(expected_pages.begin(), expected_pages.end()), expected_pages.end());
+        CHECK(span.walker_pages == expected_pages);
+    }
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Table, &replay_fsm};
+    context.set_page(page_id_a, std::span<const std::byte>(crash_page_a.data(), crash_page_a.size()));
+    context.set_page(page_id_b, std::span<const std::byte>(crash_page_b.data(), crash_page_b.size()));
+    WalReplayer replayer{context};
+
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    auto undo_error = replayer.apply_undo(plan);
+    CAPTURE(replayer.last_undo_type());
+    REQUIRE_FALSE(undo_error);
+
+    auto find_span = [&](std::uint32_t owner) -> const ExpectedSpan& {
+        auto it = std::find_if(spans.begin(), spans.end(), [&](const ExpectedSpan& span) { return span.owner_page_id == owner; });
+        REQUIRE(it != spans.end());
+        return *it;
+    };
+
+    const auto& span_a = find_span(page_id_a);
+    auto replay_page_a = context.get_page(page_id_a);
+    auto tuple_a = bored::storage::read_tuple(std::span<const std::byte>(replay_page_a.data(), replay_page_a.size()), span_a.slot_index);
+    REQUIRE(tuple_a.size() == span_a.tuple_payload.size());
+    REQUIRE(std::equal(tuple_a.begin(), tuple_a.end(), span_a.tuple_payload.begin(), span_a.tuple_payload.end()));
+    CHECK(replay_fsm.current_free_bytes(page_id_a) == baseline_free_bytes_a);
+    for (std::size_t index = 0; index < span_a.chunk_metas.size(); ++index) {
+        const auto& expected_meta = span_a.chunk_metas[index];
+        const auto& expected_payload = span_a.chunk_payloads[index];
+        auto page = context.get_page(expected_meta.overflow_page_id);
+        auto restored_meta = bored::storage::read_overflow_chunk_meta(std::span<const std::byte>(page.data(), page.size()));
+        REQUIRE(restored_meta);
+        CHECK(restored_meta->overflow_page_id == expected_meta.overflow_page_id);
+        CHECK(restored_meta->next_overflow_page_id == expected_meta.next_overflow_page_id);
+        CHECK(restored_meta->chunk_index == expected_meta.chunk_index);
+        CHECK(restored_meta->chunk_length == expected_meta.chunk_length);
+        auto restored_payload = bored::storage::overflow_chunk_payload(std::span<const std::byte>(page.data(), page.size()), *restored_meta);
+        REQUIRE(restored_payload.size() == expected_payload.size());
+        REQUIRE(std::equal(restored_payload.begin(), restored_payload.end(), expected_payload.begin(), expected_payload.end()));
+    }
+
+    const auto& span_b = find_span(page_id_b);
+    auto replay_page_b = context.get_page(page_id_b);
+    auto tuple_b = bored::storage::read_tuple(std::span<const std::byte>(replay_page_b.data(), replay_page_b.size()), span_b.slot_index);
+    REQUIRE(tuple_b.size() == span_b.tuple_payload.size());
+    REQUIRE(std::equal(tuple_b.begin(), tuple_b.end(), span_b.tuple_payload.begin(), span_b.tuple_payload.end()));
+    CHECK(replay_fsm.current_free_bytes(page_id_b) == baseline_free_bytes_b);
+    for (std::size_t index = 0; index < span_b.chunk_metas.size(); ++index) {
+        const auto& expected_meta = span_b.chunk_metas[index];
+        const auto& expected_payload = span_b.chunk_payloads[index];
+        auto page = context.get_page(expected_meta.overflow_page_id);
+        auto restored_meta = bored::storage::read_overflow_chunk_meta(std::span<const std::byte>(page.data(), page.size()));
+        REQUIRE(restored_meta);
+        CHECK(restored_meta->overflow_page_id == expected_meta.overflow_page_id);
+        CHECK(restored_meta->next_overflow_page_id == expected_meta.next_overflow_page_id);
+        CHECK(restored_meta->chunk_index == expected_meta.chunk_index);
+        CHECK(restored_meta->chunk_length == expected_meta.chunk_length);
+        auto restored_payload = bored::storage::overflow_chunk_payload(std::span<const std::byte>(page.data(), page.size()), *restored_meta);
+        REQUIRE(restored_payload.size() == expected_payload.size());
+        REQUIRE(std::equal(restored_payload.begin(), restored_payload.end(), expected_payload.begin(), expected_payload.end()));
+    }
+
+    auto baseline_header_a = bored::storage::page_header(std::span<const std::byte>(baseline_page_a.data(), baseline_page_a.size()));
+    auto replay_header_a = bored::storage::page_header(std::span<const std::byte>(replay_page_a.data(), replay_page_a.size()));
+    CHECK(replay_header_a.tuple_count == baseline_header_a.tuple_count);
+
+    auto baseline_header_b = bored::storage::page_header(std::span<const std::byte>(baseline_page_b.data(), baseline_page_b.size()));
+    auto replay_header_b = bored::storage::page_header(std::span<const std::byte>(replay_page_b.data(), replay_page_b.size()));
+    CHECK(replay_header_b.tuple_count == baseline_header_b.tuple_count);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
 TEST_CASE("WalReplayer replays page compaction")
 {
     auto io = make_async_io();
