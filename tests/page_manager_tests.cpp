@@ -400,6 +400,130 @@ TEST_CASE("PageManager delete overflow tuple logs truncate record")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
+TEST_CASE("PageManager insert overflow tuple logs before-image chunks")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_overflow_insert_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 3131U));
+
+    std::vector<std::byte> big_payload(8192U);
+    for (std::size_t index = 0; index < big_payload.size(); ++index) {
+        big_payload[index] = static_cast<std::byte>((index * 37U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, big_payload, 1212U, insert_result));
+    REQUIRE(insert_result.used_overflow);
+    REQUIRE_FALSE(insert_result.overflow_page_ids.empty());
+
+    REQUIRE_FALSE(manager.flush_wal());
+
+    const WalRecordHeader* before_header = nullptr;
+    bored::storage::WalTupleBeforeImageView before_snapshot{};
+    bool have_before_snapshot = false;
+    std::size_t chunk_records = 0U;
+    bool saw_insert = false;
+    std::vector<int> record_types;
+    std::uint64_t previous_lsn = 0U;
+    bool have_previous_lsn = false;
+
+    for (std::uint32_t segment_id = 0U;; ++segment_id) {
+        auto segment_path = wal_writer->segment_path(segment_id);
+        if (!std::filesystem::exists(segment_path)) {
+            break;
+        }
+
+        auto bytes = read_file_bytes(segment_path);
+        auto offset = bored::storage::kWalBlockSize;
+        while (offset + sizeof(WalRecordHeader) <= bytes.size()) {
+            const auto* header = reinterpret_cast<const WalRecordHeader*>(bytes.data() + offset);
+            if (header->total_length == 0U) {
+                break;
+            }
+
+            auto payload_span = wal_payload_view(*header, reinterpret_cast<const std::byte*>(header));
+            const auto type = static_cast<WalRecordType>(header->type);
+            record_types.push_back(static_cast<int>(type));
+
+            if (have_previous_lsn) {
+                CHECK(header->prev_lsn == previous_lsn);
+            }
+
+            if (type == WalRecordType::TupleInsert) {
+                saw_insert = true;
+                auto meta = bored::storage::decode_wal_tuple_meta(payload_span);
+                REQUIRE(meta);
+                CHECK(meta->page_id == 3131U);
+                CHECK(meta->slot_index == insert_result.slot.index);
+            } else if (type == WalRecordType::TupleOverflowChunk) {
+                ++chunk_records;
+            } else if (type == WalRecordType::TupleBeforeImage) {
+                auto before_view = bored::storage::decode_wal_tuple_before_image(payload_span);
+                REQUIRE(before_view);
+                before_snapshot = *before_view;
+                before_header = header;
+                have_before_snapshot = true;
+            }
+
+            previous_lsn = header->lsn;
+            have_previous_lsn = true;
+            offset += align_up_to_block(header->total_length);
+        }
+    }
+
+    CAPTURE(record_types);
+    CAPTURE(chunk_records);
+    CAPTURE(insert_result.inline_length);
+    CAPTURE(insert_result.overflow_page_ids.size());
+
+    REQUIRE(saw_insert);
+    REQUIRE(have_before_snapshot);
+    REQUIRE(before_header != nullptr);
+    REQUIRE(chunk_records > 0U);
+    REQUIRE(chunk_records == insert_result.overflow_page_ids.size());
+    REQUIRE(before_snapshot.meta.page_id == 3131U);
+    REQUIRE(before_snapshot.meta.slot_index == insert_result.slot.index);
+    const auto header_size = bored::storage::overflow_tuple_header_size();
+    CHECK(before_snapshot.meta.tuple_length == header_size + insert_result.inline_length);
+    REQUIRE(before_snapshot.tuple_payload.size() == insert_result.inline_length + header_size);
+    REQUIRE(before_snapshot.overflow_chunks.size() == chunk_records);
+
+    if (insert_result.inline_length > 0U) {
+        auto inline_view = before_snapshot.tuple_payload.subspan(header_size);
+        auto expected_inline = std::span<const std::byte>(big_payload.data(), insert_result.inline_length);
+        REQUIRE(std::equal(inline_view.begin(), inline_view.end(), expected_inline.begin(), expected_inline.end()));
+    }
+
+    std::size_t expected_offset = insert_result.inline_length;
+    for (std::size_t index = 0; index < before_snapshot.overflow_chunks.size(); ++index) {
+        const auto& chunk_view = before_snapshot.overflow_chunks[index];
+        REQUIRE(chunk_view.meta.chunk_index == index);
+        REQUIRE(chunk_view.meta.overflow_page_id == insert_result.overflow_page_ids[index]);
+        REQUIRE(chunk_view.payload.size() == chunk_view.meta.chunk_length);
+        REQUIRE(expected_offset + chunk_view.meta.chunk_length <= big_payload.size());
+        auto expected_payload = std::span<const std::byte>(big_payload.data() + expected_offset, chunk_view.meta.chunk_length);
+        REQUIRE(std::equal(expected_payload.begin(), expected_payload.end(), chunk_view.payload.begin(), chunk_view.payload.end()));
+        expected_offset += chunk_view.meta.chunk_length;
+    }
+    REQUIRE(expected_offset == big_payload.size());
+
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
 TEST_CASE("PageManager invokes latch callbacks for tuple mutations")
 {
     auto io = make_async_io();

@@ -19,6 +19,7 @@ This document tracks the remaining work required to take the current page manage
    - ✅ Support tuples that exceed a single page by chaining overflow pages.
    - ✅ Extend page flags and tuple metadata accordingly.
    - ✅ Emit WAL truncation records on tuple deletes/updates and add undo walkers that rehydrate chains when required.
+   - ☐ Finalise before-image semantics for newly inserted overflow tuples so abort paths avoid duplicating stub records.
 
 4. **Concurrency Hooks**
    - ✅ Define latching protocol for page access (shared/exclusive) compatible with asynchronous I/O completions.
@@ -43,7 +44,7 @@ This document tracks the remaining work required to take the current page manage
 3. **Logical Tuple Records**
    - ✅ Integrate tuple insert/delete payloads via `PageManager` so WAL commits precede page mutations.
    - ✅ Integrate tuple update payloads into the WAL writer and manager path.
-   - Specify redo/undo semantics so logical operations can reproduce page changes.
+   - ☐ Finalise redo/undo semantics for overflow inserts so logical undo paths do not reapply the stub after abort.
 
 4. **Checkpointing**
    - ✅ Define checkpoint record payload (snapshot of dirty page table + active transactions) and expose encoding helpers via `CheckpointManager`.
@@ -56,7 +57,7 @@ This document tracks the remaining work required to take the current page manage
 6. **Recovery Workflow**
    - ✅ Outline REDO/UNDO passes using `WalRecoveryDriver` plan generation with provisional transaction grouping.
    - ✅ Implement page replay primitives that consume `WalRecoveryPlan` redo entries, hook them into PageManager, and validate crash/restart scenarios with refreshed FSM hints.
-   - ☐ Build UNDO walkers for in-flight transactions that restore pages and reclaim slots on restart.
+   - ☐ Build UNDO walkers for in-flight transactions that restore pages and reclaim slots on restart, including abort semantics for overflow inserts.
    - ✅ Deliver a WAL replayer utility that hydrates page images from redo plans with idempotent tuple insert/update/delete support.
    - ✅ Introduce a WAL reader utility to iterate segment files and validate checksums before replay.
 

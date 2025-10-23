@@ -348,6 +348,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     if (inline_length > 0U) {
         std::memcpy(stub_bytes.data() + overflow_tuple_header_size(), payload.data(), inline_length);
     }
+    auto stub_payload_span = std::span<const std::byte>(stub_bytes.data(), stub_bytes.size());
 
     WalTupleMeta meta{};
     meta.page_id = header.page_id;
@@ -359,7 +360,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     auto wal_buffer_span = std::span<std::byte>(wal_buffer.data(), wal_buffer.size());
     if (!encode_wal_tuple_insert(wal_buffer_span,
                                  meta,
-                                 std::span<const std::byte>(stub_bytes.data(), stub_bytes.size()))) {
+                                 stub_payload_span)) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 
@@ -373,6 +374,11 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     if (auto ec = wal_writer_->append_record(descriptor, wal_result); ec) {
         return ec;
     }
+
+    std::vector<WalOverflowChunkMeta> chunk_metas;
+    chunk_metas.reserve(chunk_count);
+    std::vector<std::span<const std::byte>> chunk_payload_views;
+    chunk_payload_views.reserve(chunk_count);
 
     std::size_t chunk_offset = inline_length;
     for (std::size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
@@ -400,9 +406,12 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
             chunk_meta.flags |= static_cast<std::uint16_t>(WalOverflowChunkFlag::ChainEnd);
         }
 
+        chunk_metas.push_back(chunk_meta);
+
         std::vector<std::byte> chunk_buffer(wal_overflow_chunk_payload_size(chunk_meta.chunk_length));
         auto chunk_span = std::span<std::byte>(chunk_buffer.data(), chunk_buffer.size());
         auto chunk_payload = payload.subspan(chunk_offset, chunk_length);
+        chunk_payload_views.emplace_back(chunk_payload.data(), chunk_payload.size());
         if (!encode_wal_overflow_chunk(chunk_span, chunk_meta, chunk_payload)) {
             return std::make_error_code(std::errc::invalid_argument);
         }
@@ -424,8 +433,31 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
         chunk_offset += chunk_length;
     }
 
-    auto stub_span = std::span<const std::byte>(stub_bytes.data(), stub_bytes.size());
-    auto slot = append_tuple(page, stub_span, wal_result.lsn, fsm_);
+    auto chunk_meta_span = std::span<const WalOverflowChunkMeta>(chunk_metas.data(), chunk_metas.size());
+    auto chunk_payload_span = std::span<const std::span<const std::byte>>(chunk_payload_views.data(), chunk_payload_views.size());
+
+    std::vector<std::byte> before_buffer(wal_tuple_before_image_payload_size(meta.tuple_length, chunk_meta_span));
+    auto before_span = std::span<std::byte>(before_buffer.data(), before_buffer.size());
+    if (!encode_wal_tuple_before_image(before_span,
+                                       meta,
+                                       stub_payload_span,
+                                       chunk_meta_span,
+                                       chunk_payload_span)) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    WalRecordDescriptor before_descriptor{};
+    before_descriptor.type = WalRecordType::TupleBeforeImage;
+    before_descriptor.page_id = header.page_id;
+    before_descriptor.flags = WalRecordFlag::None;
+    before_descriptor.payload = std::span<const std::byte>(before_span.data(), before_span.size());
+
+    WalAppendResult before_result{};
+    if (auto before_ec = wal_writer_->append_record(before_descriptor, before_result); before_ec) {
+        return before_ec;
+    }
+
+    auto slot = append_tuple(page, stub_payload_span, wal_result.lsn, fsm_);
     if (!slot) {
         return std::make_error_code(std::errc::io_error);
     }
