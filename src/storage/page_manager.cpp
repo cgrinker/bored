@@ -1,6 +1,7 @@
 #include "bored/storage/page_manager.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -53,6 +54,66 @@ std::uint32_t PageManager::allocate_overflow_page_id() const
     auto id = next_overflow_page_id_;
     ++next_overflow_page_id_;
     return id;
+}
+
+std::error_code PageManager::build_overflow_truncate_payload(const WalTupleMeta& owner_meta,
+                                                             const OverflowTupleHeader& header,
+                                                             std::vector<WalOverflowChunkMeta>& chunk_metas,
+                                                             std::vector<std::vector<std::byte>>& chunk_payloads,
+                                                             WalOverflowTruncateMeta& truncate_meta) const
+{
+    chunk_metas.clear();
+    chunk_payloads.clear();
+
+    truncate_meta.owner = owner_meta;
+    truncate_meta.first_overflow_page_id = header.first_overflow_page_id;
+    truncate_meta.released_page_count = header.chunk_count;
+    truncate_meta.reserved = 0U;
+
+    if (header.chunk_count == 0U) {
+        return {};
+    }
+
+    if (!config_.overflow_page_reader) {
+        return std::make_error_code(std::errc::function_not_supported);
+    }
+
+    chunk_metas.reserve(header.chunk_count);
+    chunk_payloads.reserve(header.chunk_count);
+
+    std::uint32_t current_page = header.first_overflow_page_id;
+
+    for (std::uint16_t index = 0; index < header.chunk_count; ++index) {
+        if (current_page == 0U) {
+            return std::make_error_code(std::errc::io_error);
+        }
+
+        std::array<std::byte, kPageSize> page_buffer{};
+        auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+        if (!config_.overflow_page_reader(current_page, page_span)) {
+            return std::make_error_code(std::errc::io_error);
+        }
+
+        auto chunk_meta = read_overflow_chunk_meta(as_const_span(page_span));
+        if (!chunk_meta) {
+            return std::make_error_code(std::errc::io_error);
+        }
+
+        if (chunk_meta->overflow_page_id != current_page) {
+            return std::make_error_code(std::errc::io_error);
+        }
+
+        chunk_metas.push_back(*chunk_meta);
+        auto payload_view = overflow_chunk_payload(as_const_span(page_span), *chunk_meta);
+        if (payload_view.size() != chunk_meta->chunk_length) {
+            return std::make_error_code(std::errc::io_error);
+        }
+
+        chunk_payloads.emplace_back(payload_view.begin(), payload_view.end());
+        current_page = chunk_meta->next_overflow_page_id;
+    }
+
+    return {};
 }
 
 std::error_code PageManager::insert_tuple(std::span<std::byte> page,
@@ -307,6 +368,50 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
         return before_ec;
     }
 
+    std::optional<OverflowTupleHeader> overflow_header;
+    std::vector<WalOverflowChunkMeta> truncate_chunk_metas;
+    std::vector<std::vector<std::byte>> truncate_chunk_payloads;
+    WalOverflowTruncateMeta truncate_meta{};
+
+    if (auto header_opt = parse_overflow_tuple(tuple_view)) {
+        if (header_opt->chunk_count > 0U) {
+            overflow_header = header_opt;
+            if (auto ec = build_overflow_truncate_payload(before_meta,
+                                                          *header_opt,
+                                                          truncate_chunk_metas,
+                                                          truncate_chunk_payloads,
+                                                          truncate_meta);
+                ec) {
+                return ec;
+            }
+
+            std::vector<std::span<const std::byte>> payload_views;
+            payload_views.reserve(truncate_chunk_payloads.size());
+            for (const auto& payload : truncate_chunk_payloads) {
+                payload_views.emplace_back(payload.data(), payload.size());
+            }
+
+            auto chunk_meta_span = std::span<const WalOverflowChunkMeta>(truncate_chunk_metas.data(), truncate_chunk_metas.size());
+            auto payload_span = std::span<const std::span<const std::byte>>(payload_views.data(), payload_views.size());
+            std::vector<std::byte> truncate_buffer(wal_overflow_truncate_payload_size(chunk_meta_span));
+            auto truncate_span = std::span<std::byte>(truncate_buffer.data(), truncate_buffer.size());
+            if (!encode_wal_overflow_truncate(truncate_span, truncate_meta, chunk_meta_span, payload_span)) {
+                return std::make_error_code(std::errc::invalid_argument);
+            }
+
+            WalRecordDescriptor truncate_descriptor{};
+            truncate_descriptor.type = WalRecordType::TupleOverflowTruncate;
+            truncate_descriptor.page_id = truncate_meta.first_overflow_page_id;
+            truncate_descriptor.flags = WalRecordFlag::None;
+            truncate_descriptor.payload = std::span<const std::byte>(truncate_span.data(), truncate_span.size());
+
+            WalAppendResult truncate_result{};
+            if (auto truncate_ec = wal_writer_->append_record(truncate_descriptor, truncate_result); truncate_ec) {
+                return truncate_ec;
+            }
+        }
+    }
+
     WalTupleMeta meta{};
     meta.page_id = header.page_id;
     meta.slot_index = slot_index;
@@ -391,6 +496,48 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     WalAppendResult before_result{};
     if (auto before_ec = wal_writer_->append_record(before_descriptor, before_result); before_ec) {
         return before_ec;
+    }
+
+    std::vector<WalOverflowChunkMeta> truncate_chunk_metas;
+    std::vector<std::vector<std::byte>> truncate_chunk_payloads;
+    WalOverflowTruncateMeta truncate_meta{};
+
+    if (auto overflow_header = parse_overflow_tuple(current_tuple)) {
+        if (overflow_header->chunk_count > 0U) {
+            if (auto ec = build_overflow_truncate_payload(before_meta,
+                                                          *overflow_header,
+                                                          truncate_chunk_metas,
+                                                          truncate_chunk_payloads,
+                                                          truncate_meta);
+                ec) {
+                return ec;
+            }
+
+            std::vector<std::span<const std::byte>> payload_views;
+            payload_views.reserve(truncate_chunk_payloads.size());
+            for (const auto& payload : truncate_chunk_payloads) {
+                payload_views.emplace_back(payload.data(), payload.size());
+            }
+
+            auto chunk_meta_span = std::span<const WalOverflowChunkMeta>(truncate_chunk_metas.data(), truncate_chunk_metas.size());
+            auto payload_span = std::span<const std::span<const std::byte>>(payload_views.data(), payload_views.size());
+            std::vector<std::byte> truncate_buffer(wal_overflow_truncate_payload_size(chunk_meta_span));
+            auto truncate_span = std::span<std::byte>(truncate_buffer.data(), truncate_buffer.size());
+            if (!encode_wal_overflow_truncate(truncate_span, truncate_meta, chunk_meta_span, payload_span)) {
+                return std::make_error_code(std::errc::invalid_argument);
+            }
+
+            WalRecordDescriptor truncate_descriptor{};
+            truncate_descriptor.type = WalRecordType::TupleOverflowTruncate;
+            truncate_descriptor.page_id = truncate_meta.first_overflow_page_id;
+            truncate_descriptor.flags = WalRecordFlag::None;
+            truncate_descriptor.payload = std::span<const std::byte>(truncate_span.data(), truncate_span.size());
+
+            WalAppendResult truncate_result{};
+            if (auto truncate_ec = wal_writer_->append_record(truncate_descriptor, truncate_result); truncate_ec) {
+                return truncate_ec;
+            }
+        }
     }
 
     WalTupleUpdateMeta meta{};

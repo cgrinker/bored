@@ -304,8 +304,18 @@ TEST_CASE("WalReplayer truncates overflow chains")
     truncate_meta.first_overflow_page_id = first_meta.overflow_page_id;
     truncate_meta.released_page_count = 2U;
 
-    std::vector<std::byte> truncate_payload(bored::storage::wal_overflow_truncate_payload_size());
-    REQUIRE(bored::storage::encode_wal_overflow_truncate(std::span<std::byte>(truncate_payload.data(), truncate_payload.size()), truncate_meta));
+    std::vector<bored::storage::WalOverflowChunkMeta> truncate_chunk_metas{first_meta, second_meta};
+    std::vector<std::span<const std::byte>> truncate_payload_views{
+        std::span<const std::byte>(first_payload.data(), first_payload.size()),
+        std::span<const std::byte>(second_payload.data(), second_payload.size())};
+
+    const auto truncate_payload_size = bored::storage::wal_overflow_truncate_payload_size(
+        std::span<const bored::storage::WalOverflowChunkMeta>(truncate_chunk_metas.data(), truncate_chunk_metas.size()));
+    std::vector<std::byte> truncate_payload(truncate_payload_size);
+    REQUIRE(bored::storage::encode_wal_overflow_truncate(std::span<std::byte>(truncate_payload.data(), truncate_payload.size()),
+                                                         truncate_meta,
+                                                         std::span<const bored::storage::WalOverflowChunkMeta>(truncate_chunk_metas.data(), truncate_chunk_metas.size()),
+                                                         std::span<const std::span<const std::byte>>(truncate_payload_views.data(), truncate_payload_views.size())));
 
     WalRecoveryRecord truncate_record{};
     truncate_record.header.type = static_cast<std::uint16_t>(WalRecordType::TupleOverflowTruncate);
@@ -332,6 +342,25 @@ TEST_CASE("WalReplayer truncates overflow chains")
     CHECK_FALSE(bored::storage::read_overflow_chunk_meta(second_page_reapplied));
     CHECK(bored::storage::page_header(first_page_reapplied).lsn == truncate_record.header.lsn);
     CHECK(bored::storage::page_header(second_page_reapplied).lsn == truncate_record.header.lsn);
+
+    WalRecoveryPlan undo_plan{};
+    undo_plan.undo.push_back(truncate_record);
+    REQUIRE_FALSE(replayer.apply_undo(undo_plan));
+
+    auto first_page_restored = std::span<const std::byte>(first_page.data(), first_page.size());
+    auto second_page_restored = std::span<const std::byte>(second_page.data(), second_page.size());
+    auto restored_first_meta = bored::storage::read_overflow_chunk_meta(first_page_restored);
+    auto restored_second_meta = bored::storage::read_overflow_chunk_meta(second_page_restored);
+    REQUIRE(restored_first_meta);
+    REQUIRE(restored_second_meta);
+    CHECK(restored_first_meta->chunk_length == first_meta.chunk_length);
+    CHECK(restored_second_meta->chunk_length == second_meta.chunk_length);
+    auto restored_first_payload = bored::storage::overflow_chunk_payload(first_page_restored, *restored_first_meta);
+    auto restored_second_payload = bored::storage::overflow_chunk_payload(second_page_restored, *restored_second_meta);
+    REQUIRE(restored_first_payload.size() == first_payload.size());
+    REQUIRE(restored_second_payload.size() == second_payload.size());
+    REQUIRE(std::equal(restored_first_payload.begin(), restored_first_payload.end(), first_payload.begin(), first_payload.end()));
+    REQUIRE(std::equal(restored_second_payload.begin(), restored_second_payload.end(), second_payload.begin(), second_payload.end()));
 }
 
 TEST_CASE("WalReplayer undoes uncommitted update using before image")

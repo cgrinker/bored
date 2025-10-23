@@ -1,6 +1,7 @@
 #include "bored/storage/wal_payloads.hpp"
 
 #include <cstring>
+#include <vector>
 
 namespace bored::storage {
 
@@ -140,14 +141,51 @@ bool encode_wal_overflow_chunk(std::span<std::byte> buffer,
     return true;
 }
 
-bool encode_wal_overflow_truncate(std::span<std::byte> buffer, const WalOverflowTruncateMeta& meta)
+std::size_t wal_overflow_truncate_payload_size(std::span<const WalOverflowChunkMeta> chunk_metas)
 {
-    const auto required = wal_overflow_truncate_payload_size();
+    std::size_t total = sizeof(WalOverflowTruncateMeta);
+    for (const auto& chunk_meta : chunk_metas) {
+        total += sizeof(WalOverflowChunkMeta) + chunk_meta.chunk_length;
+    }
+    return total;
+}
+
+bool encode_wal_overflow_truncate(std::span<std::byte> buffer,
+                                  const WalOverflowTruncateMeta& meta,
+                                  std::span<const WalOverflowChunkMeta> chunk_metas,
+                                  std::span<const std::span<const std::byte>> chunk_payloads)
+{
+    if (chunk_metas.size() != chunk_payloads.size()) {
+        return false;
+    }
+
+    if (meta.released_page_count != chunk_metas.size()) {
+        return false;
+    }
+
+    const auto required = wal_overflow_truncate_payload_size(chunk_metas);
     if (!fits(buffer, required)) {
         return false;
     }
 
     std::memcpy(buffer.data(), &meta, sizeof(WalOverflowTruncateMeta));
+
+    std::size_t offset = sizeof(WalOverflowTruncateMeta);
+    for (std::size_t index = 0; index < chunk_metas.size(); ++index) {
+        const auto& chunk_meta = chunk_metas[index];
+        const auto& payload = chunk_payloads[index];
+        if (payload.size() != chunk_meta.chunk_length) {
+            return false;
+        }
+
+        std::memcpy(buffer.data() + offset, &chunk_meta, sizeof(WalOverflowChunkMeta));
+        offset += sizeof(WalOverflowChunkMeta);
+
+        if (!payload.empty()) {
+            std::memcpy(buffer.data() + offset, payload.data(), payload.size());
+        }
+        offset += payload.size();
+    }
     return true;
 }
 
@@ -191,6 +229,39 @@ std::span<const std::byte> wal_overflow_chunk_payload(std::span<const std::byte>
     }
 
     return buffer.subspan(header_size, meta.chunk_length);
+}
+
+std::optional<std::vector<WalOverflowTruncateChunkView>> decode_wal_overflow_truncate_chunks(std::span<const std::byte> buffer,
+                                                                                             const WalOverflowTruncateMeta& meta)
+{
+    if (!fits(buffer, sizeof(WalOverflowTruncateMeta))) {
+        return std::nullopt;
+    }
+
+    std::size_t offset = sizeof(WalOverflowTruncateMeta);
+    std::vector<WalOverflowTruncateChunkView> results;
+    results.reserve(meta.released_page_count);
+
+    for (std::uint32_t index = 0; index < meta.released_page_count; ++index) {
+        if (!fits(buffer.subspan(offset), sizeof(WalOverflowChunkMeta))) {
+            return std::nullopt;
+        }
+
+        WalOverflowChunkMeta chunk_meta{};
+        std::memcpy(&chunk_meta, buffer.data() + offset, sizeof(WalOverflowChunkMeta));
+        offset += sizeof(WalOverflowChunkMeta);
+
+        if (!fits(buffer.subspan(offset), chunk_meta.chunk_length)) {
+            return std::nullopt;
+        }
+
+        auto payload = buffer.subspan(offset, chunk_meta.chunk_length);
+        offset += chunk_meta.chunk_length;
+
+        results.push_back(WalOverflowTruncateChunkView{chunk_meta, payload});
+    }
+
+    return results;
 }
 
 }  // namespace bored::storage

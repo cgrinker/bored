@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace bored::storage {
 
@@ -58,6 +59,11 @@ struct alignas(8) WalOverflowTruncateMeta final {
     std::uint32_t reserved = 0U;
 };
 
+struct WalOverflowTruncateChunkView final {
+    WalOverflowChunkMeta meta{};
+    std::span<const std::byte> payload{};
+};
+
 constexpr std::size_t wal_tuple_insert_payload_size(std::uint16_t tuple_length)
 {
     return sizeof(WalTupleMeta) + tuple_length;
@@ -78,10 +84,7 @@ constexpr std::size_t wal_overflow_chunk_payload_size(std::uint16_t chunk_length
     return sizeof(WalOverflowChunkMeta) + chunk_length;
 }
 
-constexpr std::size_t wal_overflow_truncate_payload_size()
-{
-    return sizeof(WalOverflowTruncateMeta);
-}
+std::size_t wal_overflow_truncate_payload_size(std::span<const WalOverflowChunkMeta> chunk_metas);
 
 bool encode_wal_tuple_insert(std::span<std::byte> buffer,
                              const WalTupleMeta& meta,
@@ -106,10 +109,16 @@ bool encode_wal_overflow_chunk(std::span<std::byte> buffer,
                                const WalOverflowChunkMeta& meta,
                                std::span<const std::byte> chunk_data);
 
-bool encode_wal_overflow_truncate(std::span<std::byte> buffer, const WalOverflowTruncateMeta& meta);
+bool encode_wal_overflow_truncate(std::span<std::byte> buffer,
+                                  const WalOverflowTruncateMeta& meta,
+                                  std::span<const WalOverflowChunkMeta> chunk_metas,
+                                  std::span<const std::span<const std::byte>> chunk_payloads);
 
 std::span<const std::byte> wal_overflow_chunk_payload(std::span<const std::byte> buffer,
                                                       const WalOverflowChunkMeta& meta);
+
+std::optional<std::vector<WalOverflowTruncateChunkView>> decode_wal_overflow_truncate_chunks(std::span<const std::byte> buffer,
+                                                                                             const WalOverflowTruncateMeta& meta);
 
 static_assert(sizeof(WalOverflowChunkMeta) == 32, "WalOverflowChunkMeta expected to be 32 bytes");
 static_assert(alignof(WalOverflowChunkMeta) == 8, "WalOverflowChunkMeta requires 8-byte alignment");

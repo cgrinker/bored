@@ -272,9 +272,22 @@ std::error_code undo_overflow_chunk(WalReplayContext& context,
     return {};
 }
 
-std::error_code undo_overflow_truncate(const WalOverflowTruncateMeta&)
+std::error_code undo_overflow_truncate(WalReplayContext& context,
+                                       const WalRecoveryRecord& record,
+                                       const WalOverflowTruncateMeta& meta)
 {
-    // Overflow truncates are idempotent for crash undo; redo replays rebuild the chain.
+    auto chunk_views = decode_wal_overflow_truncate_chunks(record.payload, meta);
+    if (!chunk_views) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    for (const auto& view : *chunk_views) {
+        auto page = ensure_page(context, view.meta.overflow_page_id, PageType::Overflow);
+        if (!write_overflow_chunk(page, view.meta, view.payload, record.header.lsn, context.free_space_map())) {
+            return std::make_error_code(std::errc::io_error);
+        }
+    }
+
     return {};
 }
 
@@ -461,7 +474,7 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        return undo_overflow_truncate(*meta);
+        return undo_overflow_truncate(context_, record, *meta);
     }
     default:
         return std::make_error_code(std::errc::not_supported);

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <span>
+#include <vector>
 #include <string_view>
 
 using bored::storage::PageFlag;
@@ -318,12 +319,41 @@ TEST_CASE("WAL overflow truncate payload round-trips")
     meta.first_overflow_page_id = 0xFEEDC0DEU;
     meta.released_page_count = 3U;
 
-    std::array<std::byte, 128> buffer{};
-    auto span = std::span<std::byte>(buffer.data(), buffer.size());
-    const auto required = bored::storage::wal_overflow_truncate_payload_size();
-    auto target = span.subspan(0, required);
+    std::vector<bored::storage::WalOverflowChunkMeta> chunk_metas;
+    std::vector<std::vector<std::byte>> chunk_payloads;
+    for (std::uint16_t index = 0; index < meta.released_page_count; ++index) {
+        bored::storage::WalOverflowChunkMeta chunk_meta{};
+        chunk_meta.owner = meta.owner;
+        chunk_meta.overflow_page_id = meta.first_overflow_page_id + index;
+        chunk_meta.next_overflow_page_id = (index + 1U < meta.released_page_count) ? (meta.first_overflow_page_id + index + 1U) : 0U;
+        chunk_meta.chunk_offset = static_cast<std::uint16_t>(index * 200U);
+        chunk_meta.chunk_length = static_cast<std::uint16_t>(100U + index * 10U);
+        chunk_meta.chunk_index = index;
+        chunk_meta.flags = (index == 0U ? static_cast<std::uint16_t>(bored::storage::WalOverflowChunkFlag::ChainStart) : 0U) |
+                           (index + 1U == meta.released_page_count ? static_cast<std::uint16_t>(bored::storage::WalOverflowChunkFlag::ChainEnd) : 0U);
+        chunk_metas.push_back(chunk_meta);
 
-    REQUIRE(bored::storage::encode_wal_overflow_truncate(target, meta));
+        std::vector<std::byte> payload(chunk_meta.chunk_length);
+        for (std::size_t byte_index = 0; byte_index < payload.size(); ++byte_index) {
+            payload[byte_index] = static_cast<std::byte>(index + byte_index);
+        }
+        chunk_payloads.push_back(payload);
+    }
+
+    std::vector<std::span<const std::byte>> payload_spans;
+    payload_spans.reserve(chunk_payloads.size());
+    for (const auto& payload : chunk_payloads) {
+        payload_spans.emplace_back(payload.data(), payload.size());
+    }
+
+    const auto required = bored::storage::wal_overflow_truncate_payload_size(std::span<const bored::storage::WalOverflowChunkMeta>(chunk_metas.data(), chunk_metas.size()));
+    std::vector<std::byte> buffer(required);
+    auto target = std::span<std::byte>(buffer.data(), buffer.size());
+
+    REQUIRE(bored::storage::encode_wal_overflow_truncate(target,
+                                                         meta,
+                                                         std::span<const bored::storage::WalOverflowChunkMeta>(chunk_metas.data(), chunk_metas.size()),
+                                                         std::span<const std::span<const std::byte>>(payload_spans.data(), payload_spans.size())));
 
     auto decoded = bored::storage::decode_wal_overflow_truncate_meta(target);
     REQUIRE(decoded);
@@ -333,4 +363,21 @@ TEST_CASE("WAL overflow truncate payload round-trips")
     CHECK(decoded->owner.row_id == meta.owner.row_id);
     CHECK(decoded->first_overflow_page_id == meta.first_overflow_page_id);
     CHECK(decoded->released_page_count == meta.released_page_count);
+
+    auto decoded_chunks = bored::storage::decode_wal_overflow_truncate_chunks(target, *decoded);
+    REQUIRE(decoded_chunks);
+    REQUIRE(decoded_chunks->size() == chunk_metas.size());
+    for (std::size_t index = 0; index < chunk_metas.size(); ++index) {
+        const auto& expected_meta = chunk_metas[index];
+        const auto& expected_payload = chunk_payloads[index];
+        const auto& view = decoded_chunks->at(index);
+        CHECK(view.meta.overflow_page_id == expected_meta.overflow_page_id);
+        CHECK(view.meta.next_overflow_page_id == expected_meta.next_overflow_page_id);
+        CHECK(view.meta.chunk_offset == expected_meta.chunk_offset);
+        CHECK(view.meta.chunk_length == expected_meta.chunk_length);
+        CHECK(view.meta.chunk_index == expected_meta.chunk_index);
+        CHECK(view.meta.flags == expected_meta.flags);
+        REQUIRE(view.payload.size() == expected_payload.size());
+        REQUIRE(std::equal(view.payload.begin(), view.payload.end(), expected_payload.begin(), expected_payload.end()));
+    }
 }
