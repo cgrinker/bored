@@ -5,7 +5,7 @@ This document captures the first pass at the on-disk layout for the experimental
 ### Progress Snapshot (Oct 23, 2025)
 
 - **WAL pipeline 100%**: Writer, reader, recovery planning/replay, telemetry registry, checkpoint scheduler, retention manager, and compaction metadata logging are covered by Catch2 suites.
-- **Storage pages ~98%**: Core page operations, compaction with WAL slot relocation metadata, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, and lock-manager backed latch workflows are live; remaining work targets observability and benchmarking.
+- **Storage pages ~99%**: Core page operations, compaction with WAL slot relocation metadata, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, and the undo walker now feeds the replay path; remaining work targets crash drills, observability, and benchmarking.
 
 ## Page Format
 
