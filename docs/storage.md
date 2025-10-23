@@ -5,7 +5,7 @@ This document captures the first pass at the on-disk layout for the experimental
 ### Progress Snapshot (Oct 23, 2025)
 
 - **WAL pipeline 100%**: Writer, reader, recovery planning/replay, telemetry registry, checkpoint scheduler, retention manager, and compaction metadata logging are covered by Catch2 suites. Checkpoint cadence and retention pruning metrics now flow through the storage telemetry registry for diagnostics callers, and the new diagnostics collector exports aggregated snapshots for operators.
-- **Storage pages ~99%**: Core page operations, compaction with WAL slot relocation metadata, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, and the undo walker now feeds the replay path; remaining work targets crash drills, observability surface wiring, and benchmarking.
+- **Storage pages ~99%**: Core page operations, compaction with WAL slot relocation metadata, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, and undo-driven crash drills now verify before-image recovery across single and multi-owner overflow spans. Remaining work focuses on benchmarking plus operator-facing observability surfaces.
 
 ## Page Format
 
@@ -132,9 +132,8 @@ Redo records always run in log order to rebuild page images, while undo records 
 
 ## Next Steps (Prioritised Backlog)
 
-1. Build crash/restart drills that exercise the new undo walker across overflow chains and validate before-image consistency on restart.
-2. Benchmark FSM refresh, retention pruning, and overflow replay using representative workloads to establish performance baselines and regression thresholds.
-3. Finalise operator-facing tooling and documentation for retention, checkpoint scheduling, and recovery workflows.
+1. Benchmark FSM refresh, retention pruning, and overflow replay using representative workloads to establish performance baselines and regression thresholds.
+2. Finalise operator-facing tooling and documentation for retention, checkpoint scheduling, and recovery workflows.
 
 ### Roadmap to 100% Feature Completeness (Updated Oct 23, 2025)
 
@@ -144,9 +143,9 @@ Redo records always run in log order to rebuild page images, while undo records 
   - `CheckpointScheduler` orchestrates WAL checkpoints from dirty page snapshots, flushes the writer, and invokes retention hooks after successful emits.
 3. **Compaction & Index Metadata Logging** (✅ Oct 23, 2025)
   - `PageManager::compact_page` now emits `PageCompaction` records with relocation metadata and index refresh hints; `WalReplayer` replays and records the events for downstream index maintenance.
-4. **Undo Walkers & Crash Drills** (In Progress)
+4. **Undo Walkers & Crash Drills** (✅ Oct 23, 2025)
   - ✅ Implement undo walker coverage for in-flight transactions, grouping overflow chains under the owning table page and exposing walk spans.
-  - ☐ Add WAL-only restart tests that inspect page/header correctness using the new walker.
+  - ✅ Add WAL-only restart tests that inspect page/header correctness using the new walker.
 5. **Observability & Telemetry** (Following)
   - Capture and publish latch contention, checkpoint latency, and retention activity metrics for operators and regression dashboards.
 6. **Benchmarking & Tooling** (Later)
