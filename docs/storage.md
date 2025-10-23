@@ -5,7 +5,7 @@ This document captures the first pass at the on-disk layout for the experimental
 ### Progress Snapshot (Oct 23, 2025)
 
 - **WAL pipeline 100%**: Writer, reader, recovery planning/replay, telemetry registry, checkpoint scheduler, retention manager, and compaction metadata logging are covered by Catch2 suites. Checkpoint cadence and retention pruning metrics now flow through the storage telemetry registry for diagnostics callers, and the new diagnostics collector exports aggregated snapshots for operators.
-- **Storage pages ~99%**: Core page operations, compaction with WAL slot relocation metadata, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, undo-driven crash drills now verify before-image recovery across single and multi-owner overflow spans, and the new `bored_benchmarks` harness exercises FSM refresh, retention pruning, and overflow replay loops. Remaining work focuses on capturing baselines plus operator-facing observability surfaces.
+- **Storage pages ~99%**: Core page operations, compaction with WAL slot relocation metadata, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, undo-driven crash drills now verify before-image recovery across single and multi-owner overflow spans, and the new `bored_benchmarks` harness exercises FSM refresh, retention pruning, and overflow replay loops. Baseline runs (`benchmarks/baseline_results.json`) capture current timings until real workloads exist; remaining work focuses on regression alerts plus operator-facing observability surfaces.
 
 ## Page Format
 
@@ -132,7 +132,7 @@ Redo records always run in log order to rebuild page images, while undo records 
 
 ## Next Steps (Prioritised Backlog)
 
-1. Capture and publish baseline metrics from the `bored_benchmarks` harness for FSM refresh, retention pruning, and overflow replay, then wire regression thresholds into CI.
+1. Wire the `bored_benchmarks` harness (seeded with `benchmarks/baseline_results.json`) into CI so regressions flag once thresholds are defined.
 2. Finalise operator-facing tooling and documentation for retention, checkpoint scheduling, and recovery workflows.
 
 ### Roadmap to 100% Feature Completeness (Updated Oct 23, 2025)
