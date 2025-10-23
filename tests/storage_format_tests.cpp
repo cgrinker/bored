@@ -264,6 +264,78 @@ TEST_CASE("WAL tuple update payload records previous length")
     REQUIRE(std::equal(payload.begin(), payload.end(), kTestPayload.begin(), kTestPayload.end()));
 }
 
+TEST_CASE("WAL tuple before-image payload captures overflow chunks")
+{
+    bored::storage::WalTupleMeta meta{};
+    meta.page_id = 44U;
+    meta.slot_index = 7U;
+    meta.tuple_length = static_cast<std::uint16_t>(kTestPayload.size());
+    meta.row_id = 0x0BAD'F00D'CAFE'BEEFull;
+
+    std::vector<bored::storage::WalOverflowChunkMeta> chunk_metas;
+    std::vector<std::vector<std::byte>> chunk_payloads;
+    constexpr std::uint32_t first_page = 9000U;
+    for (std::uint16_t index = 0; index < 2U; ++index) {
+        bored::storage::WalOverflowChunkMeta chunk_meta{};
+        chunk_meta.owner = meta;
+        chunk_meta.overflow_page_id = first_page + index;
+        chunk_meta.next_overflow_page_id = (index == 0U) ? first_page + 1U : 0U;
+        chunk_meta.chunk_offset = static_cast<std::uint16_t>(index * 64U);
+        chunk_meta.chunk_length = static_cast<std::uint16_t>(48U + index * 8U);
+        chunk_meta.chunk_index = index;
+        chunk_meta.flags = (index == 0U ? static_cast<std::uint16_t>(bored::storage::WalOverflowChunkFlag::ChainStart) : 0U) |
+                           (index == 1U ? static_cast<std::uint16_t>(bored::storage::WalOverflowChunkFlag::ChainEnd) : 0U);
+        chunk_metas.push_back(chunk_meta);
+
+        std::vector<std::byte> payload(chunk_meta.chunk_length);
+        for (std::size_t byte_index = 0; byte_index < payload.size(); ++byte_index) {
+            payload[byte_index] = static_cast<std::byte>((index << 4) | (byte_index & 0xF));
+        }
+        chunk_payloads.push_back(payload);
+    }
+
+    std::vector<std::span<const std::byte>> payload_spans;
+    payload_spans.reserve(chunk_payloads.size());
+    for (const auto& payload : chunk_payloads) {
+        payload_spans.emplace_back(payload.data(), payload.size());
+    }
+
+    const auto required = bored::storage::wal_tuple_before_image_payload_size(meta.tuple_length,
+                                                                              std::span<const bored::storage::WalOverflowChunkMeta>(chunk_metas));
+    std::vector<std::byte> buffer(required);
+    auto target = std::span<std::byte>(buffer.data(), buffer.size());
+
+    auto tuple_payload = std::span<const std::byte>(kTestPayload);
+    REQUIRE(bored::storage::encode_wal_tuple_before_image(target,
+                                                          meta,
+                                                          tuple_payload,
+                                                          std::span<const bored::storage::WalOverflowChunkMeta>(chunk_metas),
+                                                          std::span<const std::span<const std::byte>>(payload_spans)));
+
+    auto decoded = bored::storage::decode_wal_tuple_before_image(std::span<const std::byte>(buffer.data(), buffer.size()));
+    REQUIRE(decoded);
+    CHECK(decoded->meta.page_id == meta.page_id);
+    CHECK(decoded->meta.slot_index == meta.slot_index);
+    CHECK(decoded->meta.tuple_length == meta.tuple_length);
+    CHECK(decoded->meta.row_id == meta.row_id);
+    REQUIRE(decoded->tuple_payload.size() == kTestPayload.size());
+    REQUIRE(std::equal(decoded->tuple_payload.begin(), decoded->tuple_payload.end(), kTestPayload.begin(), kTestPayload.end()));
+    REQUIRE(decoded->overflow_chunks.size() == chunk_metas.size());
+    for (std::size_t index = 0; index < chunk_metas.size(); ++index) {
+        const auto& expected_meta = chunk_metas[index];
+        const auto& expected_payload = chunk_payloads[index];
+        const auto& view = decoded->overflow_chunks[index];
+        CHECK(view.meta.overflow_page_id == expected_meta.overflow_page_id);
+        CHECK(view.meta.next_overflow_page_id == expected_meta.next_overflow_page_id);
+        CHECK(view.meta.chunk_offset == expected_meta.chunk_offset);
+        CHECK(view.meta.chunk_length == expected_meta.chunk_length);
+        CHECK(view.meta.chunk_index == expected_meta.chunk_index);
+        CHECK(view.meta.flags == expected_meta.flags);
+        REQUIRE(view.payload.size() == expected_payload.size());
+        REQUIRE(std::equal(view.payload.begin(), view.payload.end(), expected_payload.begin(), expected_payload.end()));
+    }
+}
+
 TEST_CASE("WAL overflow chunk payload round-trips")
 {
     bored::storage::WalOverflowChunkMeta meta{};

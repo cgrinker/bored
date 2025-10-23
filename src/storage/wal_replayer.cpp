@@ -449,16 +449,36 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         return apply_tuple_delete(page, record.header, meta->base, fsm);
     }
     case WalRecordType::TupleBeforeImage: {
-        auto meta = decode_wal_tuple_meta(payload);
-        if (!meta) {
+        auto before_view = decode_wal_tuple_before_image(payload);
+        if (!before_view) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        auto tuple_payload = wal_tuple_payload(payload, *meta);
-        if (tuple_payload.size() != meta->tuple_length) {
+        if (before_view->tuple_payload.size() != before_view->meta.tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
         auto page = ensure_page(context_, record.header.page_id, PageType::Table);
-        return apply_tuple_insert(page, record.header, *meta, tuple_payload, fsm, true);
+        if (auto ec = apply_tuple_insert(page,
+                                         record.header,
+                                         before_view->meta,
+                                         before_view->tuple_payload,
+                                         fsm,
+                                         true);
+            ec) {
+            return ec;
+        }
+
+        for (const auto& chunk_view : before_view->overflow_chunks) {
+            auto chunk_page = ensure_page(context_, chunk_view.meta.overflow_page_id, PageType::Overflow);
+            if (!write_overflow_chunk(chunk_page,
+                                      chunk_view.meta,
+                                      chunk_view.payload,
+                                      record.header.lsn,
+                                      context_.free_space_map())) {
+                return std::make_error_code(std::errc::io_error);
+            }
+        }
+
+        return {};
     }
     case WalRecordType::TupleDelete:
         return {};

@@ -439,3 +439,93 @@ TEST_CASE("WalReplayer undoes uncommitted update using before image")
 
     (void)std::filesystem::remove_all(wal_dir);
 }
+
+TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_replay_overflow_before_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = 40404U;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+    std::vector<std::byte> payload(8192U);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::byte>((index * 7U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, payload, 8080U, insert_result));
+    REQUIRE(insert_result.used_overflow);
+
+    PageManager::TupleDeleteResult delete_result{};
+    REQUIRE_FALSE(manager.delete_tuple(page_span, insert_result.slot.index, 8080U, delete_result));
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    auto before_it = std::find_if(plan.undo.begin(), plan.undo.end(), [](const WalRecoveryRecord& record) {
+        return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage;
+    });
+    REQUIRE(before_it != plan.undo.end());
+
+    auto before_view = bored::storage::decode_wal_tuple_before_image(std::span<const std::byte>(before_it->payload.data(), before_it->payload.size()));
+    REQUIRE(before_view);
+    REQUIRE_FALSE(before_view->overflow_chunks.empty());
+
+    std::vector<bored::storage::WalOverflowChunkMeta> expected_chunk_metas;
+    std::vector<std::vector<std::byte>> expected_chunk_payloads;
+    expected_chunk_metas.reserve(before_view->overflow_chunks.size());
+    expected_chunk_payloads.reserve(before_view->overflow_chunks.size());
+    for (const auto& chunk_view : before_view->overflow_chunks) {
+        expected_chunk_metas.push_back(chunk_view.meta);
+        expected_chunk_payloads.emplace_back(chunk_view.payload.begin(), chunk_view.payload.end());
+    }
+
+    plan.undo.erase(std::remove_if(plan.undo.begin(),
+                                   plan.undo.end(),
+                                   [](const WalRecoveryRecord& record) {
+                                       return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleOverflowTruncate;
+                                   }),
+                    plan.undo.end());
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Table, &replay_fsm};
+    WalReplayer replayer{context};
+
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    for (std::size_t index = 0; index < expected_chunk_metas.size(); ++index) {
+        const auto& expected_meta = expected_chunk_metas[index];
+        const auto& expected_payload = expected_chunk_payloads[index];
+        auto page = context.get_page(expected_meta.overflow_page_id);
+        auto restored_meta = bored::storage::read_overflow_chunk_meta(std::span<const std::byte>(page.data(), page.size()));
+        REQUIRE(restored_meta);
+        CHECK(restored_meta->overflow_page_id == expected_meta.overflow_page_id);
+        CHECK(restored_meta->next_overflow_page_id == expected_meta.next_overflow_page_id);
+        CHECK(restored_meta->chunk_index == expected_meta.chunk_index);
+        CHECK(restored_meta->chunk_length == expected_meta.chunk_length);
+        auto restored_payload = bored::storage::overflow_chunk_payload(std::span<const std::byte>(page.data(), page.size()), *restored_meta);
+        REQUIRE(restored_payload.size() == expected_payload.size());
+        REQUIRE(std::equal(restored_payload.begin(), restored_payload.end(), expected_payload.begin(), expected_payload.end()));
+    }
+
+    (void)std::filesystem::remove_all(wal_dir);
+}

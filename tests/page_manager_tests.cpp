@@ -179,13 +179,13 @@ TEST_CASE("PageManager delete tuple logs WAL record")
 
     auto second_payload = wal_payload_view(*second_header,
                                            bytes.data() + bored::storage::kWalBlockSize + first_aligned);
-    auto before_meta = bored::storage::decode_wal_tuple_meta(second_payload);
-    REQUIRE(before_meta);
-    REQUIRE(before_meta->slot_index == insert_result.slot.index);
-    REQUIRE(before_meta->page_id == 77U);
-    auto before_payload = bored::storage::wal_tuple_payload(second_payload, *before_meta);
-    REQUIRE(before_payload.size() == tuple.size());
-    REQUIRE(std::equal(before_payload.begin(), before_payload.end(), tuple.begin(), tuple.end()));
+    auto before_view = bored::storage::decode_wal_tuple_before_image(second_payload);
+    REQUIRE(before_view);
+    REQUIRE(before_view->meta.slot_index == insert_result.slot.index);
+    REQUIRE(before_view->meta.page_id == 77U);
+    REQUIRE(before_view->tuple_payload.size() == tuple.size());
+    REQUIRE(std::equal(before_view->tuple_payload.begin(), before_view->tuple_payload.end(), tuple.begin(), tuple.end()));
+    REQUIRE(before_view->overflow_chunks.empty());
 
     auto second_aligned = align_up_to_block(second_header->total_length);
 
@@ -261,14 +261,14 @@ TEST_CASE("PageManager update tuple logs WAL record")
     REQUIRE(second_header->page_id == 501U);
 
     auto second_payload = wal_payload_view(*second_header, bytes.data() + bored::storage::kWalBlockSize + first_aligned);
-    auto before_meta = bored::storage::decode_wal_tuple_meta(second_payload);
-    REQUIRE(before_meta);
-    REQUIRE(before_meta->slot_index == insert_result.slot.index);
-    REQUIRE(before_meta->page_id == 501U);
-    REQUIRE(before_meta->tuple_length == original.size());
-    auto before_payload = bored::storage::wal_tuple_payload(second_payload, *before_meta);
-    REQUIRE(before_payload.size() == original.size());
-    REQUIRE(std::equal(before_payload.begin(), before_payload.end(), original.begin(), original.end()));
+    auto before_view = bored::storage::decode_wal_tuple_before_image(second_payload);
+    REQUIRE(before_view);
+    REQUIRE(before_view->meta.slot_index == insert_result.slot.index);
+    REQUIRE(before_view->meta.page_id == 501U);
+    REQUIRE(before_view->meta.tuple_length == original.size());
+    REQUIRE(before_view->tuple_payload.size() == original.size());
+    REQUIRE(std::equal(before_view->tuple_payload.begin(), before_view->tuple_payload.end(), original.begin(), original.end()));
+    REQUIRE(before_view->overflow_chunks.empty());
 
     auto second_aligned = align_up_to_block(second_header->total_length);
 
@@ -349,14 +349,27 @@ TEST_CASE("PageManager delete overflow tuple logs truncate record")
             const auto type = static_cast<WalRecordType>(header->type);
             record_types.push_back(static_cast<int>(type));
 
+            auto record_payload = wal_payload_view(*header, reinterpret_cast<const std::byte*>(header));
+
+            if (type == WalRecordType::TupleBeforeImage) {
+                auto before_view = bored::storage::decode_wal_tuple_before_image(record_payload);
+                REQUIRE(before_view);
+                REQUIRE(before_view->meta.page_id == 2025U);
+                REQUIRE(before_view->overflow_chunks.size() == insert_result.overflow_page_ids.size());
+                for (std::size_t index = 0; index < before_view->overflow_chunks.size(); ++index) {
+                    const auto& chunk_view = before_view->overflow_chunks[index];
+                    REQUIRE(chunk_view.meta.overflow_page_id == insert_result.overflow_page_ids[index]);
+                    REQUIRE(chunk_view.payload.size() == chunk_view.meta.chunk_length);
+                }
+            }
+
             if (!truncate_found && type == WalRecordType::TupleOverflowTruncate) {
-                auto truncate_payload = wal_payload_view(*header, reinterpret_cast<const std::byte*>(header));
-                auto truncate_meta = bored::storage::decode_wal_overflow_truncate_meta(truncate_payload);
+                auto truncate_meta = bored::storage::decode_wal_overflow_truncate_meta(record_payload);
                 REQUIRE(truncate_meta);
                 CHECK(truncate_meta->owner.page_id == 2025U);
                 CHECK(truncate_meta->released_page_count == insert_result.overflow_page_ids.size());
 
-                auto chunk_views = bored::storage::decode_wal_overflow_truncate_chunks(truncate_payload, *truncate_meta);
+                auto chunk_views = bored::storage::decode_wal_overflow_truncate_chunks(record_payload, *truncate_meta);
                 REQUIRE(chunk_views);
                 REQUIRE(chunk_views->size() == insert_result.overflow_page_ids.size());
                 for (std::size_t index = 0; index < chunk_views->size(); ++index) {

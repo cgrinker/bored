@@ -119,6 +119,66 @@ std::span<const std::byte> wal_tuple_update_payload(std::span<const std::byte> b
     return buffer.subspan(header_size, meta.base.tuple_length);
 }
 
+std::size_t wal_tuple_before_image_payload_size(std::uint16_t tuple_length,
+                                                std::span<const WalOverflowChunkMeta> chunk_metas)
+{
+    std::size_t total = sizeof(WalTupleBeforeImageHeader) + tuple_length;
+    for (const auto& chunk_meta : chunk_metas) {
+        total += sizeof(WalOverflowChunkMeta) + chunk_meta.chunk_length;
+    }
+    return total;
+}
+
+bool encode_wal_tuple_before_image(std::span<std::byte> buffer,
+                                   const WalTupleMeta& meta,
+                                   std::span<const std::byte> tuple_data,
+                                   std::span<const WalOverflowChunkMeta> chunk_metas,
+                                   std::span<const std::span<const std::byte>> chunk_payloads)
+{
+    if (meta.tuple_length != tuple_data.size()) {
+        return false;
+    }
+
+    if (chunk_metas.size() != chunk_payloads.size()) {
+        return false;
+    }
+
+    const auto required = wal_tuple_before_image_payload_size(meta.tuple_length, chunk_metas);
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    WalTupleBeforeImageHeader header{};
+    header.meta = meta;
+    header.overflow_chunk_count = static_cast<std::uint32_t>(chunk_metas.size());
+
+    std::memcpy(buffer.data(), &header, sizeof(WalTupleBeforeImageHeader));
+
+    std::size_t offset = sizeof(WalTupleBeforeImageHeader);
+    if (!tuple_data.empty()) {
+        std::memcpy(buffer.data() + offset, tuple_data.data(), tuple_data.size());
+    }
+    offset += tuple_data.size();
+
+    for (std::size_t index = 0; index < chunk_metas.size(); ++index) {
+        const auto& chunk_meta = chunk_metas[index];
+        const auto& payload = chunk_payloads[index];
+        if (payload.size() != chunk_meta.chunk_length) {
+            return false;
+        }
+
+        std::memcpy(buffer.data() + offset, &chunk_meta, sizeof(WalOverflowChunkMeta));
+        offset += sizeof(WalOverflowChunkMeta);
+
+        if (!payload.empty()) {
+            std::memcpy(buffer.data() + offset, payload.data(), payload.size());
+        }
+        offset += payload.size();
+    }
+
+    return true;
+}
+
 bool encode_wal_overflow_chunk(std::span<std::byte> buffer,
                                const WalOverflowChunkMeta& meta,
                                std::span<const std::byte> chunk_data)
@@ -262,6 +322,48 @@ std::optional<std::vector<WalOverflowTruncateChunkView>> decode_wal_overflow_tru
     }
 
     return results;
+}
+
+std::optional<WalTupleBeforeImageView> decode_wal_tuple_before_image(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalTupleBeforeImageHeader))) {
+        return std::nullopt;
+    }
+
+    WalTupleBeforeImageHeader header{};
+    std::memcpy(&header, buffer.data(), sizeof(WalTupleBeforeImageHeader));
+
+    if (!fits(buffer, sizeof(WalTupleBeforeImageHeader) + header.meta.tuple_length)) {
+        return std::nullopt;
+    }
+
+    WalTupleBeforeImageView view{};
+    view.meta = header.meta;
+    view.tuple_payload = buffer.subspan(sizeof(WalTupleBeforeImageHeader), header.meta.tuple_length);
+
+    std::size_t offset = sizeof(WalTupleBeforeImageHeader) + header.meta.tuple_length;
+    view.overflow_chunks.reserve(header.overflow_chunk_count);
+
+    for (std::uint32_t index = 0; index < header.overflow_chunk_count; ++index) {
+        if (!fits(buffer.subspan(offset), sizeof(WalOverflowChunkMeta))) {
+            return std::nullopt;
+        }
+
+        WalOverflowChunkMeta chunk_meta{};
+        std::memcpy(&chunk_meta, buffer.data() + offset, sizeof(WalOverflowChunkMeta));
+        offset += sizeof(WalOverflowChunkMeta);
+
+        if (!fits(buffer.subspan(offset), chunk_meta.chunk_length)) {
+            return std::nullopt;
+        }
+
+        auto payload = buffer.subspan(offset, chunk_meta.chunk_length);
+        offset += chunk_meta.chunk_length;
+
+        view.overflow_chunks.push_back(WalTupleBeforeImageChunkView{chunk_meta, payload});
+    }
+
+    return view;
 }
 
 }  // namespace bored::storage

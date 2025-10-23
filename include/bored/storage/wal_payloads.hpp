@@ -64,6 +64,20 @@ struct WalOverflowTruncateChunkView final {
     std::span<const std::byte> payload{};
 };
 
+struct alignas(8) WalTupleBeforeImageHeader final {
+    WalTupleMeta meta{};
+    std::uint32_t overflow_chunk_count = 0U;
+    std::uint32_t reserved = 0U;
+};
+
+using WalTupleBeforeImageChunkView = WalOverflowTruncateChunkView;
+
+struct WalTupleBeforeImageView final {
+    WalTupleMeta meta{};
+    std::span<const std::byte> tuple_payload{};
+    std::vector<WalTupleBeforeImageChunkView> overflow_chunks{};
+};
+
 constexpr std::size_t wal_tuple_insert_payload_size(std::uint16_t tuple_length)
 {
     return sizeof(WalTupleMeta) + tuple_length;
@@ -84,6 +98,9 @@ constexpr std::size_t wal_overflow_chunk_payload_size(std::uint16_t chunk_length
     return sizeof(WalOverflowChunkMeta) + chunk_length;
 }
 
+std::size_t wal_tuple_before_image_payload_size(std::uint16_t tuple_length,
+                                                std::span<const WalOverflowChunkMeta> chunk_metas);
+
 std::size_t wal_overflow_truncate_payload_size(std::span<const WalOverflowChunkMeta> chunk_metas);
 
 bool encode_wal_tuple_insert(std::span<std::byte> buffer,
@@ -96,8 +113,16 @@ bool encode_wal_tuple_update(std::span<std::byte> buffer,
                              const WalTupleUpdateMeta& meta,
                              std::span<const std::byte> new_tuple_data);
 
+bool encode_wal_tuple_before_image(std::span<std::byte> buffer,
+                                   const WalTupleMeta& meta,
+                                   std::span<const std::byte> tuple_data,
+                                   std::span<const WalOverflowChunkMeta> chunk_metas,
+                                   std::span<const std::span<const std::byte>> chunk_payloads);
+
 std::optional<WalTupleMeta> decode_wal_tuple_meta(std::span<const std::byte> buffer);
 std::optional<WalTupleUpdateMeta> decode_wal_tuple_update_meta(std::span<const std::byte> buffer);
+
+std::optional<WalTupleBeforeImageView> decode_wal_tuple_before_image(std::span<const std::byte> buffer);
 
 std::optional<WalOverflowChunkMeta> decode_wal_overflow_chunk_meta(std::span<const std::byte> buffer);
 std::optional<WalOverflowTruncateMeta> decode_wal_overflow_truncate_meta(std::span<const std::byte> buffer);
@@ -124,5 +149,7 @@ static_assert(sizeof(WalOverflowChunkMeta) == 32, "WalOverflowChunkMeta expected
 static_assert(alignof(WalOverflowChunkMeta) == 8, "WalOverflowChunkMeta requires 8-byte alignment");
 static_assert(sizeof(WalOverflowTruncateMeta) == 32, "WalOverflowTruncateMeta expected to be 32 bytes");
 static_assert(alignof(WalOverflowTruncateMeta) == 8, "WalOverflowTruncateMeta requires 8-byte alignment");
+static_assert(sizeof(WalTupleBeforeImageHeader) == 32, "WalTupleBeforeImageHeader expected to be 32 bytes");
+static_assert(alignof(WalTupleBeforeImageHeader) == 8, "WalTupleBeforeImageHeader requires 8-byte alignment");
 
 }  // namespace bored::storage
