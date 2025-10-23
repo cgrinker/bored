@@ -18,7 +18,7 @@ This document tracks the remaining work required to take the current page manage
 3. **Overflow / Large Tuple Handling**
    - ✅ Support tuples that exceed a single page by chaining overflow pages.
    - ✅ Extend page flags and tuple metadata accordingly.
-   - ☐ Emit WAL truncation/undo flows for reclaiming overflow chains during deletes and recovery.
+   - ☐ Emit WAL truncation records on tuple deletes/updates and add undo walkers that rehydrate chains when required.
 
 4. **Concurrency Hooks**
    - Define latching protocol for page access (shared/exclusive) compatible with asynchronous I/O completions.

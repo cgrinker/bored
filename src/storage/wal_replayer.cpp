@@ -13,6 +13,48 @@ namespace bored::storage {
 
 namespace {
 
+std::span<const std::byte> as_const_span(std::span<std::byte> buffer)
+{
+    return {buffer.data(), buffer.size()};
+}
+
+void set_has_overflow(PageHeader& header, bool value)
+{
+    const auto flag_bit = static_cast<std::uint16_t>(PageFlag::HasOverflow);
+    if (value) {
+        header.flags |= flag_bit;
+    } else {
+        header.flags &= static_cast<std::uint16_t>(~flag_bit);
+    }
+}
+
+bool page_contains_overflow(std::span<const std::byte> page)
+{
+    const auto& header = page_header(page);
+    if (!is_valid(header) || header.tuple_count == 0U) {
+        return false;
+    }
+
+    for (std::uint16_t index = 0U; index < header.tuple_count; ++index) {
+        auto tuple = read_tuple(page, index);
+        if (tuple.empty()) {
+            continue;
+        }
+        if (is_overflow_tuple(tuple)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void refresh_overflow_flag(std::span<std::byte> page)
+{
+    auto const_view = as_const_span(page);
+    auto& header = page_header(page);
+    set_has_overflow(header, page_contains_overflow(const_view));
+}
+
 std::span<std::byte> ensure_page(WalReplayContext& context, std::uint32_t page_id, PageType type)
 {
     auto page = context.get_page(page_id);
@@ -45,6 +87,7 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
         return std::make_error_code(std::errc::invalid_argument);
     }
 
+    const bool inserted_overflow = is_overflow_tuple(payload);
     const auto previous_lsn = page_header(page).lsn;
 
     if (force) {
@@ -67,6 +110,11 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
         }
         header_ref.flags |= static_cast<std::uint16_t>(PageFlag::Dirty);
         header_ref.lsn = std::max(previous_lsn, header.lsn);
+        if (inserted_overflow) {
+            set_has_overflow(header_ref, true);
+        } else {
+            refresh_overflow_flag(page);
+        }
         if (fsm != nullptr) {
             sync_free_space(*fsm, page);
         }
@@ -90,6 +138,13 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
         std::swap(directory[appended->index], directory[meta.slot_index]);
     }
 
+    if (inserted_overflow) {
+        auto& header_ref = page_header(page);
+        set_has_overflow(header_ref, true);
+    } else {
+        refresh_overflow_flag(page);
+    }
+
     return {};
 }
 
@@ -109,6 +164,8 @@ std::error_code apply_tuple_delete(std::span<std::byte> page,
     if (!delete_tuple(page, meta.slot_index, header.lsn, fsm)) {
         return std::make_error_code(std::errc::io_error);
     }
+
+    refresh_overflow_flag(page);
 
     return {};
 }
@@ -142,6 +199,13 @@ std::error_code apply_tuple_update(std::span<std::byte> page,
             return std::make_error_code(std::errc::invalid_argument);
         }
         std::swap(directory[appended->index], directory[meta.base.slot_index]);
+    }
+
+    if (is_overflow_tuple(payload)) {
+        auto& header_ref = page_header(page);
+        set_has_overflow(header_ref, true);
+    } else {
+        refresh_overflow_flag(page);
     }
 
     return {};
