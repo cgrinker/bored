@@ -356,10 +356,12 @@ std::error_code WalReplayer::apply_redo(const WalRecoveryPlan& plan)
 std::error_code WalReplayer::apply_undo(const WalRecoveryPlan& plan)
 {
     for (const auto& record : plan.undo) {
+        last_undo_type_ = static_cast<WalRecordType>(record.header.type);
         if (auto ec = apply_undo_record(record); ec) {
             return ec;
         }
     }
+    last_undo_type_.reset();
     return {};
 }
 
@@ -499,6 +501,11 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
     default:
         return std::make_error_code(std::errc::not_supported);
     }
+}
+
+std::optional<WalRecordType> WalReplayer::last_undo_type() const noexcept
+{
+    return last_undo_type_;
 }
 
 }  // namespace bored::storage

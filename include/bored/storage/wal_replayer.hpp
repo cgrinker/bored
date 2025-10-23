@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <system_error>
 #include <unordered_map>
@@ -34,12 +35,14 @@ public:
 
     [[nodiscard]] std::error_code apply_redo(const WalRecoveryPlan& plan);
     [[nodiscard]] std::error_code apply_undo(const WalRecoveryPlan& plan);
+    [[nodiscard]] std::optional<WalRecordType> last_undo_type() const noexcept;
 
 private:
     [[nodiscard]] std::error_code apply_redo_record(const WalRecoveryRecord& record);
     [[nodiscard]] std::error_code apply_undo_record(const WalRecoveryRecord& record);
 
     WalReplayContext& context_;
+    std::optional<WalRecordType> last_undo_type_{};
 };
 
 }  // namespace bored::storage

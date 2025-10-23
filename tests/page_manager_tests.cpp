@@ -23,6 +23,7 @@ using bored::storage::AsyncIoBackend;
 using bored::storage::AsyncIoConfig;
 using bored::storage::FreeSpaceMap;
 using bored::storage::PageManager;
+using bored::storage::PageLatchMode;
 using bored::storage::PageType;
 using bored::storage::TupleSlot;
 using bored::storage::WalAppendResult;
@@ -387,6 +388,140 @@ TEST_CASE("PageManager delete overflow tuple logs truncate record")
 
     CAPTURE(record_types);
     REQUIRE(truncate_found);
+
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager invokes latch callbacks for tuple mutations")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_latch_hooks_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+
+    std::vector<std::uint32_t> acquired_pages;
+    std::vector<PageLatchMode> acquired_modes;
+    std::vector<std::uint32_t> released_pages;
+    std::vector<PageLatchMode> released_modes;
+
+    PageManager::Config config{};
+    config.latch_callbacks.acquire = [&](std::uint32_t page_id, PageLatchMode mode) -> std::error_code {
+        acquired_pages.push_back(page_id);
+        acquired_modes.push_back(mode);
+        return {};
+    };
+    config.latch_callbacks.release = [&](std::uint32_t page_id, PageLatchMode mode) {
+        released_pages.push_back(page_id);
+        released_modes.push_back(mode);
+    };
+
+    PageManager manager{&fsm, wal_writer, config};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 606U));
+
+    acquired_pages.clear();
+    acquired_modes.clear();
+    released_pages.clear();
+    released_modes.clear();
+
+    const std::array<std::byte, 8> tuple{std::byte{'c'}, std::byte{'o'}, std::byte{'n'}, std::byte{'c'}, std::byte{'u'}, std::byte{'r'}, std::byte{'r'}, std::byte{'y'}};
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, tuple, 42U, insert_result));
+
+    REQUIRE(acquired_pages == std::vector<std::uint32_t>{606U});
+    REQUIRE(acquired_modes == std::vector<PageLatchMode>{PageLatchMode::Exclusive});
+    REQUIRE(released_pages == acquired_pages);
+    REQUIRE(released_modes == acquired_modes);
+
+    acquired_pages.clear();
+    acquired_modes.clear();
+    released_pages.clear();
+    released_modes.clear();
+
+    const std::array<std::byte, 12> updated{std::byte{'l'}, std::byte{'a'}, std::byte{'t'}, std::byte{'c'}, std::byte{'h'}, std::byte{'e'}, std::byte{'d'}, std::byte{'_'}, std::byte{'d'}, std::byte{'a'}, std::byte{'t'}, std::byte{'a'}};
+    PageManager::TupleUpdateResult update_result{};
+    REQUIRE_FALSE(manager.update_tuple(page_span, insert_result.slot.index, updated, 42U, update_result));
+
+    REQUIRE(acquired_pages == std::vector<std::uint32_t>{606U});
+    REQUIRE(acquired_modes == std::vector<PageLatchMode>{PageLatchMode::Exclusive});
+    REQUIRE(released_pages == acquired_pages);
+    REQUIRE(released_modes == acquired_modes);
+
+    acquired_pages.clear();
+    acquired_modes.clear();
+    released_pages.clear();
+    released_modes.clear();
+
+    PageManager::TupleDeleteResult delete_result{};
+    REQUIRE_FALSE(manager.delete_tuple(page_span, insert_result.slot.index, 42U, delete_result));
+
+    REQUIRE(acquired_pages == std::vector<std::uint32_t>{606U});
+    REQUIRE(acquired_modes == std::vector<PageLatchMode>{PageLatchMode::Exclusive});
+    REQUIRE(released_pages == acquired_pages);
+    REQUIRE(released_modes == acquired_modes);
+
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager propagates latch acquire failures")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_latch_failure_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+
+    PageManager::Config config{};
+    std::size_t acquire_calls = 0U;
+    std::size_t release_calls = 0U;
+    bool fail_next_acquire = false;
+    const auto expected_error = std::make_error_code(std::errc::resource_unavailable_try_again);
+
+    config.latch_callbacks.acquire = [&](std::uint32_t, PageLatchMode) -> std::error_code {
+        ++acquire_calls;
+        if (fail_next_acquire) {
+            fail_next_acquire = false;
+            return expected_error;
+        }
+        return {};
+    };
+    config.latch_callbacks.release = [&](std::uint32_t, PageLatchMode) {
+        ++release_calls;
+    };
+
+    PageManager manager{&fsm, wal_writer, config};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 707U));
+
+    acquire_calls = 0U;
+    release_calls = 0U;
+    fail_next_acquire = true;
+
+    const std::array<std::byte, 4> tuple{std::byte{'f'}, std::byte{'a'}, std::byte{'i'}, std::byte{'l'}};
+    PageManager::TupleInsertResult insert_result{};
+    auto acquire_error = manager.insert_tuple(page_span, tuple, 88U, insert_result);
+    REQUIRE(acquire_error == expected_error);
+    REQUIRE(acquire_calls == 1U);
+    REQUIRE(release_calls == 0U);
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();

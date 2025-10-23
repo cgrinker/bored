@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bored/storage/page_latch.hpp"
 #include "bored/storage/page_operations.hpp"
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_writer.hpp"
@@ -17,6 +18,7 @@ public:
     struct Config final {
         std::uint32_t overflow_page_start = 1U << 20;  // default high range to reduce collisions
         std::size_t overflow_inline_prefix = 256U;
+        PageLatchCallbacks latch_callbacks{};
     };
 
     struct TupleInsertResult final {

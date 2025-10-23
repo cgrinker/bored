@@ -14,6 +14,7 @@
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -423,7 +424,9 @@ TEST_CASE("WalReplayer undoes uncommitted update using before image")
 
     WalReplayer replayer{context};
     REQUIRE_FALSE(replayer.apply_redo(plan));
-    REQUIRE_FALSE(replayer.apply_undo(plan));
+    auto undo_error = replayer.apply_undo(plan);
+    CAPTURE(replayer.last_undo_type());
+    REQUIRE_FALSE(undo_error);
 
     auto replayed_page = context.get_page(page_id);
     const auto replayed_header = bored::storage::page_header(
@@ -476,6 +479,8 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
+    auto baseline_page = page_buffer;
+
     WalRecoveryDriver driver{wal_dir};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
@@ -488,6 +493,9 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
     auto before_view = bored::storage::decode_wal_tuple_before_image(std::span<const std::byte>(before_it->payload.data(), before_it->payload.size()));
     REQUIRE(before_view);
     REQUIRE_FALSE(before_view->overflow_chunks.empty());
+    REQUIRE(before_view->tuple_payload.size() == before_view->meta.tuple_length);
+    CAPTURE(before_view->meta.slot_index);
+    CAPTURE(before_view->meta.tuple_length);
 
     std::vector<bored::storage::WalOverflowChunkMeta> expected_chunk_metas;
     std::vector<std::vector<std::byte>> expected_chunk_payloads;
@@ -501,16 +509,60 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
     plan.undo.erase(std::remove_if(plan.undo.begin(),
                                    plan.undo.end(),
                                    [](const WalRecoveryRecord& record) {
-                                       return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleOverflowTruncate;
+                                       const auto type = static_cast<WalRecordType>(record.header.type);
+                                       return type == WalRecordType::TupleOverflowTruncate
+                                              || type == WalRecordType::TupleOverflowChunk;
                                    }),
                     plan.undo.end());
 
     FreeSpaceMap replay_fsm;
     WalReplayContext context{PageType::Table, &replay_fsm};
+    context.set_page(page_id, std::span<const std::byte>(baseline_page.data(), baseline_page.size()));
     WalReplayer replayer{context};
 
+    std::vector<int> redo_types;
+    redo_types.reserve(plan.redo.size());
+    for (const auto& record : plan.redo) {
+        redo_types.push_back(static_cast<int>(record.header.type));
+    }
+    CAPTURE(redo_types);
+
+    auto delete_it = std::find_if(plan.undo.begin(), plan.undo.end(), [](const WalRecoveryRecord& record) {
+        return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleDelete;
+    });
+    if (delete_it != plan.undo.end()) {
+        auto delete_meta = bored::storage::decode_wal_tuple_meta(std::span<const std::byte>(delete_it->payload.data(), delete_it->payload.size()));
+        CAPTURE(delete_meta ? delete_meta->slot_index : static_cast<std::uint16_t>(std::numeric_limits<std::uint16_t>::max()));
+    }
+
+    std::vector<int> undo_types;
+    undo_types.reserve(plan.undo.size());
+    std::vector<std::uint32_t> undo_page_ids;
+    undo_page_ids.reserve(plan.undo.size());
+    std::vector<std::uint16_t> undo_slot_indices;
+    undo_slot_indices.reserve(plan.undo.size());
+    for (const auto& record : plan.undo) {
+        undo_types.push_back(static_cast<int>(record.header.type));
+        undo_page_ids.push_back(record.header.page_id);
+        auto type = static_cast<WalRecordType>(record.header.type);
+        if (type == WalRecordType::TupleInsert || type == WalRecordType::TupleDelete) {
+            auto meta = bored::storage::decode_wal_tuple_meta(std::span<const std::byte>(record.payload.data(), record.payload.size()));
+            undo_slot_indices.push_back(meta ? meta->slot_index : std::numeric_limits<std::uint16_t>::max());
+        } else {
+            undo_slot_indices.push_back(std::numeric_limits<std::uint16_t>::max());
+        }
+    }
+    CAPTURE(undo_types);
+    CAPTURE(undo_page_ids);
+    CAPTURE(undo_slot_indices);
+
     REQUIRE_FALSE(replayer.apply_redo(plan));
-    REQUIRE_FALSE(replayer.apply_undo(plan));
+    auto undo_error = replayer.apply_undo(plan);
+    auto last_type = replayer.last_undo_type();
+    CAPTURE(last_type.has_value());
+    const int last_type_value = last_type ? static_cast<int>(*last_type) : -1;
+    CAPTURE(last_type_value);
+    REQUIRE_FALSE(undo_error);
 
     for (std::size_t index = 0; index < expected_chunk_metas.size(); ++index) {
         const auto& expected_meta = expected_chunk_metas[index];

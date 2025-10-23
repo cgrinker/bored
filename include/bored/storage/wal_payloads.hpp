@@ -68,6 +68,7 @@ struct alignas(8) WalTupleBeforeImageHeader final {
     WalTupleMeta meta{};
     std::uint32_t overflow_chunk_count = 0U;
     std::uint32_t reserved = 0U;
+    std::uint64_t reserved_high = 0U;
 };
 
 using WalTupleBeforeImageChunkView = WalOverflowTruncateChunkView;
@@ -76,6 +77,32 @@ struct WalTupleBeforeImageView final {
     WalTupleMeta meta{};
     std::span<const std::byte> tuple_payload{};
     std::vector<WalTupleBeforeImageChunkView> overflow_chunks{};
+};
+
+struct alignas(8) WalCheckpointHeader final {
+    std::uint64_t checkpoint_id = 0U;
+    std::uint64_t redo_lsn = 0U;
+    std::uint64_t undo_lsn = 0U;
+    std::uint32_t dirty_page_count = 0U;
+    std::uint32_t active_transaction_count = 0U;
+};
+
+struct alignas(8) WalCheckpointDirtyPageEntry final {
+    std::uint32_t page_id = 0U;
+    std::uint32_t reserved = 0U;
+    std::uint64_t page_lsn = 0U;
+};
+
+struct alignas(8) WalCheckpointTxnEntry final {
+    std::uint32_t transaction_id = 0U;
+    std::uint32_t state = 0U;
+    std::uint64_t last_lsn = 0U;
+};
+
+struct WalCheckpointView final {
+    WalCheckpointHeader header{};
+    std::vector<WalCheckpointDirtyPageEntry> dirty_pages{};
+    std::vector<WalCheckpointTxnEntry> active_transactions{};
 };
 
 constexpr std::size_t wal_tuple_insert_payload_size(std::uint16_t tuple_length)
@@ -103,6 +130,8 @@ std::size_t wal_tuple_before_image_payload_size(std::uint16_t tuple_length,
 
 std::size_t wal_overflow_truncate_payload_size(std::span<const WalOverflowChunkMeta> chunk_metas);
 
+std::size_t wal_checkpoint_payload_size(std::size_t dirty_page_count, std::size_t active_transaction_count);
+
 bool encode_wal_tuple_insert(std::span<std::byte> buffer,
                              const WalTupleMeta& meta,
                              std::span<const std::byte> tuple_data);
@@ -127,6 +156,8 @@ std::optional<WalTupleBeforeImageView> decode_wal_tuple_before_image(std::span<c
 std::optional<WalOverflowChunkMeta> decode_wal_overflow_chunk_meta(std::span<const std::byte> buffer);
 std::optional<WalOverflowTruncateMeta> decode_wal_overflow_truncate_meta(std::span<const std::byte> buffer);
 
+std::optional<WalCheckpointView> decode_wal_checkpoint(std::span<const std::byte> buffer);
+
 std::span<const std::byte> wal_tuple_payload(std::span<const std::byte> buffer, const WalTupleMeta& meta);
 std::span<const std::byte> wal_tuple_update_payload(std::span<const std::byte> buffer, const WalTupleUpdateMeta& meta);
 
@@ -138,6 +169,11 @@ bool encode_wal_overflow_truncate(std::span<std::byte> buffer,
                                   const WalOverflowTruncateMeta& meta,
                                   std::span<const WalOverflowChunkMeta> chunk_metas,
                                   std::span<const std::span<const std::byte>> chunk_payloads);
+
+bool encode_wal_checkpoint(std::span<std::byte> buffer,
+                           const WalCheckpointHeader& header,
+                           std::span<const WalCheckpointDirtyPageEntry> dirty_pages,
+                           std::span<const WalCheckpointTxnEntry> active_transactions);
 
 std::span<const std::byte> wal_overflow_chunk_payload(std::span<const std::byte> buffer,
                                                       const WalOverflowChunkMeta& meta);
@@ -151,5 +187,11 @@ static_assert(sizeof(WalOverflowTruncateMeta) == 32, "WalOverflowTruncateMeta ex
 static_assert(alignof(WalOverflowTruncateMeta) == 8, "WalOverflowTruncateMeta requires 8-byte alignment");
 static_assert(sizeof(WalTupleBeforeImageHeader) == 32, "WalTupleBeforeImageHeader expected to be 32 bytes");
 static_assert(alignof(WalTupleBeforeImageHeader) == 8, "WalTupleBeforeImageHeader requires 8-byte alignment");
+static_assert(sizeof(WalCheckpointHeader) == 32, "WalCheckpointHeader expected to be 32 bytes");
+static_assert(alignof(WalCheckpointHeader) == 8, "WalCheckpointHeader requires 8-byte alignment");
+static_assert(sizeof(WalCheckpointDirtyPageEntry) == 16, "WalCheckpointDirtyPageEntry expected to be 16 bytes");
+static_assert(alignof(WalCheckpointDirtyPageEntry) == 8, "WalCheckpointDirtyPageEntry requires 8-byte alignment");
+static_assert(sizeof(WalCheckpointTxnEntry) == 16, "WalCheckpointTxnEntry expected to be 16 bytes");
+static_assert(alignof(WalCheckpointTxnEntry) == 8, "WalCheckpointTxnEntry requires 8-byte alignment");
 
 }  // namespace bored::storage

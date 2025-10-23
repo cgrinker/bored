@@ -19,6 +19,72 @@ std::span<const std::byte> as_const_span(std::span<std::byte> buffer)
     return {buffer.data(), buffer.size()};
 }
 
+class PageLatchGuard final {
+public:
+    PageLatchGuard(const PageLatchCallbacks* callbacks, std::uint32_t page_id, PageLatchMode mode)
+        : callbacks_{callbacks}
+        , page_id_{page_id}
+        , mode_{mode}
+    {
+        if (callbacks_ != nullptr && callbacks_->acquire) {
+            status_ = callbacks_->acquire(page_id_, mode_);
+            locked_ = !status_;
+        }
+    }
+
+    PageLatchGuard(const PageLatchGuard&) = delete;
+    PageLatchGuard& operator=(const PageLatchGuard&) = delete;
+
+    PageLatchGuard(PageLatchGuard&& other) noexcept
+        : callbacks_{other.callbacks_}
+        , page_id_{other.page_id_}
+        , mode_{other.mode_}
+        , locked_{other.locked_}
+        , status_{other.status_}
+    {
+        other.locked_ = false;
+    }
+
+    PageLatchGuard& operator=(PageLatchGuard&& other) noexcept
+    {
+        if (this != &other) {
+            release();
+            callbacks_ = other.callbacks_;
+            page_id_ = other.page_id_;
+            mode_ = other.mode_;
+            locked_ = other.locked_;
+            status_ = other.status_;
+            other.locked_ = false;
+        }
+        return *this;
+    }
+
+    ~PageLatchGuard()
+    {
+        release();
+    }
+
+    [[nodiscard]] std::error_code status() const noexcept
+    {
+        return status_;
+    }
+
+private:
+    void release() noexcept
+    {
+        if (locked_ && callbacks_ != nullptr && callbacks_->release) {
+            callbacks_->release(page_id_, mode_);
+        }
+        locked_ = false;
+    }
+
+    const PageLatchCallbacks* callbacks_ = nullptr;
+    std::uint32_t page_id_ = 0U;
+    PageLatchMode mode_ = PageLatchMode::Shared;
+    bool locked_ = false;
+    std::error_code status_{};
+};
+
 constexpr std::size_t kOverflowChunkCapacity = kPageSize - sizeof(PageHeader) - sizeof(WalOverflowChunkMeta);
 static_assert(kOverflowChunkCapacity > 0U, "Overflow chunk capacity must be positive");
 
@@ -40,6 +106,11 @@ std::error_code PageManager::initialize_page(std::span<std::byte> page,
                                              std::uint32_t page_id,
                                              std::uint64_t base_lsn) const
 {
+    PageLatchGuard latch_guard{&config_.latch_callbacks, page_id, PageLatchMode::Exclusive};
+    if (auto latch_ec = latch_guard.status(); latch_ec) {
+        return latch_ec;
+    }
+
     if (!bored::storage::initialize_page(page, type, page_id, base_lsn, fsm_)) {
         return std::make_error_code(std::errc::invalid_argument);
     }
@@ -112,10 +183,17 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     }
 
     const auto page_const = as_const_span(page);
+    const auto& header = page_header(page_const);
+    if (!is_valid(header)) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    PageLatchGuard latch_guard{&config_.latch_callbacks, header.page_id, PageLatchMode::Exclusive};
+    if (auto latch_ec = latch_guard.status(); latch_ec) {
+        return latch_ec;
+    }
 
     if (auto plan = prepare_append_tuple(page_const, payload.size())) {
-        const auto& header = page_header(page_const);
-
         WalTupleMeta meta{};
         meta.page_id = header.page_id;
         meta.slot_index = plan->slot_index;
@@ -152,8 +230,6 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
         out_result.overflow_page_ids.clear();
         return {};
     }
-
-    const auto& header = page_header(page_const);
 
     const auto max_stub_inline = static_cast<std::size_t>(
         std::numeric_limits<std::uint16_t>::max() - overflow_tuple_header_size());
@@ -323,12 +399,21 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
                                           std::uint64_t row_id,
                                           TupleDeleteResult& out_result) const
 {
-    auto tuple_view = read_tuple(as_const_span(page), slot_index);
-    if (tuple_view.empty()) {
+    const auto page_const = as_const_span(page);
+    const auto& header = page_header(page_const);
+    if (!is_valid(header)) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 
-    const auto& header = page_header(as_const_span(page));
+    PageLatchGuard latch_guard{&config_.latch_callbacks, header.page_id, PageLatchMode::Exclusive};
+    if (auto latch_ec = latch_guard.status(); latch_ec) {
+        return latch_ec;
+    }
+
+    auto tuple_view = read_tuple(page_const, slot_index);
+    if (tuple_view.empty()) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
 
     WalTupleMeta before_meta{};
     before_meta.page_id = header.page_id;
@@ -449,12 +534,21 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     }
 
     const auto page_const = as_const_span(page);
+    const auto& header = page_header(page_const);
+    if (!is_valid(header)) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    PageLatchGuard latch_guard{&config_.latch_callbacks, header.page_id, PageLatchMode::Exclusive};
+    if (auto latch_ec = latch_guard.status(); latch_ec) {
+        return latch_ec;
+    }
+
     auto current_tuple = read_tuple(page_const, slot_index);
     if (current_tuple.empty()) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 
-    const auto& header = page_header(page_const);
     if (new_payload.size() > std::numeric_limits<std::uint16_t>::max()) {
         return std::make_error_code(std::errc::value_too_large);
     }

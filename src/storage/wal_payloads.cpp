@@ -1,6 +1,7 @@
 #include "bored/storage/wal_payloads.hpp"
 
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace bored::storage {
@@ -210,6 +211,13 @@ std::size_t wal_overflow_truncate_payload_size(std::span<const WalOverflowChunkM
     return total;
 }
 
+std::size_t wal_checkpoint_payload_size(std::size_t dirty_page_count, std::size_t active_transaction_count)
+{
+    return sizeof(WalCheckpointHeader)
+        + (dirty_page_count * sizeof(WalCheckpointDirtyPageEntry))
+        + (active_transaction_count * sizeof(WalCheckpointTxnEntry));
+}
+
 bool encode_wal_overflow_truncate(std::span<std::byte> buffer,
                                   const WalOverflowTruncateMeta& meta,
                                   std::span<const WalOverflowChunkMeta> chunk_metas,
@@ -246,6 +254,49 @@ bool encode_wal_overflow_truncate(std::span<std::byte> buffer,
         }
         offset += payload.size();
     }
+    return true;
+}
+
+bool encode_wal_checkpoint(std::span<std::byte> buffer,
+                           const WalCheckpointHeader& header,
+                           std::span<const WalCheckpointDirtyPageEntry> dirty_pages,
+                           std::span<const WalCheckpointTxnEntry> active_transactions)
+{
+    if (dirty_pages.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    if (active_transactions.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+
+    if (header.dirty_page_count != dirty_pages.size()) {
+        return false;
+    }
+    if (header.active_transaction_count != active_transactions.size()) {
+        return false;
+    }
+
+    const auto required = wal_checkpoint_payload_size(dirty_pages.size(), active_transactions.size());
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &header, sizeof(WalCheckpointHeader));
+
+    std::size_t offset = sizeof(WalCheckpointHeader);
+    const auto dirty_bytes = dirty_pages.size() * sizeof(WalCheckpointDirtyPageEntry);
+    if (dirty_bytes != 0U) {
+        std::memcpy(buffer.data() + offset, dirty_pages.data(), dirty_bytes);
+        offset += dirty_bytes;
+    }
+
+    const auto txn_bytes = active_transactions.size() * sizeof(WalCheckpointTxnEntry);
+    if (txn_bytes != 0U) {
+        std::memcpy(buffer.data() + offset, active_transactions.data(), txn_bytes);
+        offset += txn_bytes;
+    }
+
+    (void)offset;
     return true;
 }
 
@@ -361,6 +412,42 @@ std::optional<WalTupleBeforeImageView> decode_wal_tuple_before_image(std::span<c
         offset += chunk_meta.chunk_length;
 
         view.overflow_chunks.push_back(WalTupleBeforeImageChunkView{chunk_meta, payload});
+    }
+
+    return view;
+}
+
+std::optional<WalCheckpointView> decode_wal_checkpoint(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalCheckpointHeader))) {
+        return std::nullopt;
+    }
+
+    WalCheckpointHeader header{};
+    std::memcpy(&header, buffer.data(), sizeof(WalCheckpointHeader));
+
+    const auto required = wal_checkpoint_payload_size(header.dirty_page_count, header.active_transaction_count);
+    if (!fits(buffer, required)) {
+        return std::nullopt;
+    }
+
+    WalCheckpointView view{};
+    view.header = header;
+
+    std::size_t offset = sizeof(WalCheckpointHeader);
+
+    if (header.dirty_page_count != 0U) {
+        view.dirty_pages.resize(header.dirty_page_count);
+        const auto dirty_bytes = view.dirty_pages.size() * sizeof(WalCheckpointDirtyPageEntry);
+        std::memcpy(view.dirty_pages.data(), buffer.data() + offset, dirty_bytes);
+        offset += dirty_bytes;
+    }
+
+    if (header.active_transaction_count != 0U) {
+        view.active_transactions.resize(header.active_transaction_count);
+        const auto txn_bytes = view.active_transactions.size() * sizeof(WalCheckpointTxnEntry);
+        std::memcpy(view.active_transactions.data(), buffer.data() + offset, txn_bytes);
+        offset += txn_bytes;
     }
 
     return view;

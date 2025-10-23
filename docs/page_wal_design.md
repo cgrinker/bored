@@ -18,11 +18,11 @@ This document tracks the remaining work required to take the current page manage
 3. **Overflow / Large Tuple Handling**
    - ✅ Support tuples that exceed a single page by chaining overflow pages.
    - ✅ Extend page flags and tuple metadata accordingly.
-   - ☐ Emit WAL truncation records on tuple deletes/updates and add undo walkers that rehydrate chains when required.
+   - ✅ Emit WAL truncation records on tuple deletes/updates and add undo walkers that rehydrate chains when required.
 
 4. **Concurrency Hooks**
-   - Define latching protocol for page access (shared/exclusive) compatible with asynchronous I/O completions.
-   - Stub out lock manager interactions to prepare for multi-transaction workloads and cooperative scheduling.
+   - ✅ Define latching protocol for page access (shared/exclusive) compatible with asynchronous I/O completions.
+   - ☐ Stub out lock manager interactions to prepare for multi-transaction workloads and cooperative scheduling.
 
 5. **Diagnostic Instrumentation**
    - Add page dump utilities for debugging (hexdump + interpreted view of slots/tuples).
@@ -46,7 +46,7 @@ This document tracks the remaining work required to take the current page manage
    - Specify redo/undo semantics so logical operations can reproduce page changes.
 
 4. **Checkpointing**
-   - Define checkpoint record payload (snapshot of dirty page table + active transactions).
+   - ✅ Define checkpoint record payload (snapshot of dirty page table + active transactions) and expose encoding helpers via `CheckpointManager`.
    - Implement a basic checkpoint writer that truncates/compresses WAL segments once durable.
 
 5. **Segment Management**

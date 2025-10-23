@@ -5,7 +5,7 @@ This document captures the first pass at the on-disk layout for the experimental
 ### Progress Snapshot (Oct 22, 2025)
 
 - **WAL pipeline 100%**: Writer, reader, recovery planning/replay, telemetry registry, and retention manager are in place with full Catch2 coverage.
-- **Storage pages ~75%**: Core page operations, compaction, free-space persistence, overflow tuple WAL emission, and replay flag maintenance are live; overflow truncation logging, undo walkers, and concurrency hooks remain.
+- **Storage pages ~90%**: Core page operations, compaction, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, latch-aware tuple workflows, and replay flag maintenance are live; compaction/index metadata still pending.
 
 ## Page Format
 
@@ -25,7 +25,7 @@ This document captures the first pass at the on-disk layout for the experimental
 - **Slot directory:** `SlotPointer` entries contain an offset/length pair. Offsets always reference the start of a tuple payload counted from the beginning of the page, enabling relocations without rewriting referencing indices.
 - **Max tuples:** With the default sizing, a page can host up to 2,038 slots before either free space or the slot array is exhausted.
 - **Validation helpers:** Inline helpers (`is_valid`, `compute_free_bytes`, etc.) provide lightweight sanity checks without forcing an allocator implementation.
-- **Mutable helpers:** `page_operations.hpp` offers routines to initialise a page buffer, append tuples, reclaim slots, and read payloads while tracking the header metadata. These helpers now detect overflow tuples, shape stub payloads, and will become latch-aware so concurrent readers and mutators can coordinate via lightweight locks.
+- **Mutable helpers:** `page_operations.hpp` offers routines to initialise a page buffer, append tuples, reclaim slots, and read payloads while tracking the header metadata. These helpers detect overflow tuples, shape stub payloads, and cooperate with the new latch callbacks so concurrent readers and mutators coordinate via lightweight locks.
 - **Free space map:** `FreeSpaceMap` maintains bucketed page candidates keyed by contiguous free bytes and prefers unfragmented buffers during allocation. Snapshots persist via `FreeSpaceMapPersistence` and prime replay contexts before WAL redo.
 - **Page compaction:** `compact_page` rewrites surviving tuples to eliminate gaps, resets contiguous free space, drops `fragment_count`, and pushes the refreshed measurements back into the free-space map.
 
@@ -48,6 +48,7 @@ This document captures the first pass at the on-disk layout for the experimental
 - **WAL writer runtime:** `WalWriter` maintains an aligned in-memory buffer, allocates monotonically increasing LSNs, rotates 16 MiB segments when full, and persists segment headers + records through the shared `AsyncIo` dispatchers. Exposes size/time/commit-driven flush hooks layered on `flush()` for commit coordination.
 - **Telemetry registry:** `WalTelemetryRegistry` collects `WalWriterTelemetrySnapshot` samplers so admin tooling and diagnostics endpoints can surface append/flush metrics without coupling to writer internals. Configure `WalWriterConfig::telemetry_registry` + `telemetry_identifier` to auto-register writers and tear them down safely.
 - **Retention manager:** `WalRetentionManager` enforces `WalRetentionConfig` knobs (`retention_segments`, `retention_hours`, `archive_path`) after durable flushes, pruning or archiving old segments without ever touching the active writer segment.
+- **Checkpoint manager:** `CheckpointManager` encodes dirty page tables and active transaction snapshots into `WalRecordType::Checkpoint` payloads so recovery can bootstrap redo horizons quickly while keeping the WAL append path consistent.
 - **WAL reader runtime:** `WalReader` enumerates segment files, validates CRC32C checksums, and streams records across segment boundaries for recovery and tooling consumers while honouring on-disk alignment rules.
 - **Recovery planning:** `WalRecoveryDriver` consumes `WalReader` streams, groups records by provisional transaction identifier, emits REDO/UNDO plans, and flags truncated tails so replay can halt cleanly on partial segments.
 - **Recovery replay:** `WalReplayer` hydrates page images from `WalRecoveryPlan` redo entries, applies tuple inserts/updates/deletes idempotently, and prepares the buffer cache for crash restart simulations while refreshing free-space hints.
@@ -127,11 +128,9 @@ Redo records always run in log order to rebuild page images, while undo records 
 
 ## Next Steps
 
-- Emit overflow truncation WAL records from delete/update paths so recovery can reclaim spill chains, then wire undo flows that rehydrate chains when necessary.
 - Extend page compaction to emit slot relocation metadata for indexes, integrate with WAL archival / recycling processes, and communicate flushes through `AsyncIo`.
 - Implement on-disk free-space map management to speed page allocation decisions and route reads/writes through the async dispatcher.
 - Design index logging payloads (B-Tree page splits/merges) using the same WAL infrastructure and schedule their persistence via `AsyncIo` implementations.
-- Introduce page concurrency hooks (latching) so high-contention workloads stay consistent while WAL/page mutations proceed.
 - See roadmap below for the detailed completion plan covering WAL, storage, recovery, and observability milestones.
 
 ### Roadmap to 100 % Feature Completeness
@@ -141,11 +140,11 @@ Redo records always run in log order to rebuild page images, while undo records 
   - Build UNDO walkers for in-flight transactions, ensuring slot reclamation and tuple visibility rules hold.
   - Add crash/restart integration tests that boot from WAL-only state and validate page images.
 2. **Checkpointing & Retention**
-  - Define checkpoint record payloads (dirty page table, active txn table) and emit them on schedule.
+  - ✅ Define checkpoint record payloads (dirty page table, active txn table) and surface emit helpers through `CheckpointManager`.
   - Wire checkpoint completion to WAL archival/retention policies and add CLI/tooling hooks for archive management.
 3. **FSM & Overflow Durability**
   - Persist free-space map structures, replay WAL hints at startup, and verify crash consistency via tests.
-  - Add overflow tuple/page chain logging, redo/undo handlers, and PageManager coverage.
+  - Benchmark before-image overflow replay paths and stress undo/redo with larger segment chains.
 4. **Index & Compaction Metadata**
   - Log compaction slot relocations and index maintenance payloads (B-Tree split/merge/delete).
   - Extend PageManager + WAL payload helpers to encode/decode these flows with tests.
