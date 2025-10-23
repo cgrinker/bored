@@ -107,6 +107,10 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
         }
         std::memcpy(page.data() + slot.offset, payload.data(), payload.size());
         slot.length = static_cast<std::uint16_t>(payload.size());
+        const auto tuple_end = static_cast<std::uint16_t>(slot.offset + slot.length);
+        if (tuple_end > header_ref.free_start) {
+            header_ref.free_start = tuple_end;
+        }
         if (header_ref.fragment_count > 0U) {
             --header_ref.fragment_count;
         }
@@ -116,6 +120,9 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
             set_has_overflow(header_ref, true);
         } else {
             refresh_overflow_flag(page);
+        }
+        if (!compact_page(page, header_ref.lsn, fsm)) {
+            return std::make_error_code(std::errc::io_error);
         }
         if (fsm != nullptr) {
             sync_free_space(*fsm, page);

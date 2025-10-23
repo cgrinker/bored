@@ -13,11 +13,14 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -27,6 +30,7 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+#include <unordered_map>
 
 namespace bs = bored::storage;
 
@@ -42,6 +46,8 @@ struct BenchmarkOptions final {
     std::size_t overflow_page_count = 64U;
     std::size_t overflow_payload_bytes = 16384U;
     bool json_output = false;
+    std::optional<std::filesystem::path> baseline_path{};
+    double tolerance = 0.15;  // 15% default budget
 };
 
 struct BenchmarkResult final {
@@ -56,6 +62,13 @@ struct Summary final {
     double max_ms = 0.0;
     double p95_ms = 0.0;
 };
+
+struct BaselineEntry final {
+    double mean_ms = 0.0;
+    double p95_ms = 0.0;
+};
+
+using BaselineMap = std::unordered_map<std::string, BaselineEntry>;
 
 class TempDirectory final {
 public:
@@ -100,6 +113,8 @@ private:
               << "  --retention-keep=N          Segments to retain after pruning (default 4)\n"
               << "  --overflow-pages=N          Overflow tuples to generate for replay (default 64)\n"
               << "  --overflow-bytes=N          Payload bytes per overflow tuple (default 16384)\n"
+              << "  --baseline=PATH            Load baseline JSON to enforce regression thresholds\n"
+              << "  --tolerance=FRACTION       Allowable fractional regression over baseline (default 0.15)\n"
               << "  --json                      Emit JSON summary instead of table output\n"
               << "  --help                      Show this message\n";
     std::exit(1);
@@ -113,6 +128,24 @@ std::size_t parse_size(std::string_view value, std::string_view option)
     if (auto [ptr, ec] = std::from_chars(begin, end, result); ec != std::errc{} || ptr != end) {
         throw std::invalid_argument(std::string{"Invalid value for "} + std::string(option));
     }
+    return result;
+}
+
+double parse_double(std::string_view value, std::string_view option)
+{
+    std::string buffer(value);
+    std::size_t processed = 0U;
+    double result = 0.0;
+    try {
+        result = std::stod(buffer, &processed);
+    } catch (const std::exception&) {
+        throw std::invalid_argument(std::string{"Invalid value for "} + std::string(option));
+    }
+
+    if (processed != buffer.size()) {
+        throw std::invalid_argument(std::string{"Invalid value for "} + std::string(option));
+    }
+
     return result;
 }
 
@@ -149,6 +182,131 @@ Summary summarise(const std::vector<double>& samples)
     const auto index = static_cast<std::size_t>(std::ceil(0.95 * static_cast<double>(sorted.size()))) - 1U;
     summary.p95_ms = sorted[std::min(index, sorted.size() - 1U)];
     return summary;
+}
+
+[[nodiscard]] std::string normalise_baseline_content(std::string raw)
+{
+    if (raw.size() >= 2U) {
+        const auto first = static_cast<unsigned char>(raw[0]);
+        const auto second = static_cast<unsigned char>(raw[1]);
+        if (first == 0xFFU && second == 0xFEU) {
+            // UTF-16 LE
+            std::string utf8;
+            utf8.reserve(raw.size() / 2U);
+            for (std::size_t index = 2U; index + 1U < raw.size(); index += 2U) {
+                const auto lo = static_cast<unsigned char>(raw[index]);
+                const auto hi = static_cast<unsigned char>(raw[index + 1U]);
+                const char16_t code_unit = static_cast<char16_t>(lo | (static_cast<char16_t>(hi) << 8U));
+                if (code_unit <= 0x7F) {
+                    utf8.push_back(static_cast<char>(code_unit));
+                } else {
+                    throw std::runtime_error("Baseline file contains non-ASCII UTF-16 characters");
+                }
+            }
+            return utf8;
+        }
+        if (first == 0xFEU && second == 0xFFU) {
+            // UTF-16 BE
+            std::string utf8;
+            utf8.reserve(raw.size() / 2U);
+            for (std::size_t index = 2U; index + 1U < raw.size(); index += 2U) {
+                const auto hi = static_cast<unsigned char>(raw[index]);
+                const auto lo = static_cast<unsigned char>(raw[index + 1U]);
+                const char16_t code_unit = static_cast<char16_t>((static_cast<char16_t>(hi) << 8U) | lo);
+                if (code_unit <= 0x7F) {
+                    utf8.push_back(static_cast<char>(code_unit));
+                } else {
+                    throw std::runtime_error("Baseline file contains non-ASCII UTF-16 characters");
+                }
+            }
+            return utf8;
+        }
+    }
+
+    return raw;
+}
+
+[[nodiscard]] BaselineMap load_baseline_file(const std::filesystem::path& path)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        throw std::runtime_error("Failed to open baseline file: " + path.string());
+    }
+
+    std::string raw((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    auto content = normalise_baseline_content(std::move(raw));
+    BaselineMap baselines;
+
+    std::size_t cursor = 0U;
+    while ((cursor = content.find("\"name\":\"", cursor)) != std::string::npos) {
+    cursor += 9U;  // advance past "name":"
+        const auto name_end = content.find('"', cursor);
+        if (name_end == std::string::npos) {
+            break;
+        }
+        std::string name = content.substr(cursor, name_end - cursor);
+
+        auto locate_numeric = [&](std::string_view label, std::size_t start) -> std::pair<double, std::size_t> {
+            auto value_pos = content.find(label, start);
+            if (value_pos == std::string::npos) {
+                throw std::runtime_error("Baseline file missing field " + std::string(label));
+            }
+            value_pos += label.size();
+            while (value_pos < content.size() && std::isspace(static_cast<unsigned char>(content[value_pos]))) {
+                ++value_pos;
+            }
+            const auto value_end = content.find_first_of(",}", value_pos);
+            if (value_end == std::string::npos) {
+                throw std::runtime_error("Malformed baseline number for " + std::string(label));
+            }
+            double value = std::stod(content.substr(value_pos, value_end - value_pos));
+            return {value, value_end};
+        };
+
+        auto [mean_ms, mean_end] = locate_numeric("\"mean_ms\":", name_end);
+        auto [p95_ms, p95_end] = locate_numeric("\"p95_ms\":", mean_end);
+
+        baselines[name] = BaselineEntry{mean_ms, p95_ms};
+        cursor = p95_end;
+    }
+
+    if (baselines.empty()) {
+        throw std::runtime_error("Baseline file contained no benchmark entries");
+    }
+
+    return baselines;
+}
+
+[[nodiscard]] std::vector<std::string> evaluate_baselines(const std::vector<BenchmarkResult>& results,
+                                                          const BaselineMap& baselines,
+                                                          double tolerance)
+{
+    std::vector<std::string> failures;
+    for (const auto& result : results) {
+        auto baseline_it = baselines.find(result.name);
+        if (baseline_it == baselines.end()) {
+            continue;
+        }
+
+        const auto summary = summarise(result.samples_ms);
+        const auto& baseline = baseline_it->second;
+        const auto mean_budget = baseline.mean_ms * (1.0 + tolerance);
+        const auto p95_budget = baseline.p95_ms * (1.0 + tolerance);
+
+        if (summary.mean_ms > mean_budget) {
+            std::ostringstream oss;
+            oss << result.name << ": mean " << std::fixed << std::setprecision(3) << summary.mean_ms
+                << "ms exceeded baseline " << baseline.mean_ms << "ms by more than " << tolerance * 100.0 << "%";
+            failures.push_back(oss.str());
+        }
+        if (summary.p95_ms > p95_budget) {
+            std::ostringstream oss;
+            oss << result.name << ": p95 " << std::fixed << std::setprecision(3) << summary.p95_ms
+                << "ms exceeded baseline " << baseline.p95_ms << "ms by more than " << tolerance * 100.0 << "%";
+            failures.push_back(oss.str());
+        }
+    }
+    return failures;
 }
 
 struct OverflowFixture final {
@@ -488,6 +646,17 @@ BenchmarkOptions parse_options(int argc, char** argv)
             options.overflow_page_count = parse_size(argument.substr(17), "--overflow-pages");
         } else if (argument.rfind("--overflow-bytes=", 0) == 0) {
             options.overflow_payload_bytes = parse_size(argument.substr(17), "--overflow-bytes");
+        } else if (argument.rfind("--baseline=", 0) == 0) {
+            auto path_value = argument.substr(11);
+            if (path_value.empty()) {
+                throw std::invalid_argument("--baseline requires a path");
+            }
+            options.baseline_path = std::filesystem::path(std::string(path_value));
+        } else if (argument.rfind("--tolerance=", 0) == 0) {
+            options.tolerance = parse_double(argument.substr(12), "--tolerance");
+            if (options.tolerance < 0.0) {
+                throw std::invalid_argument("--tolerance must be non-negative");
+            }
         } else {
             usage();
         }
@@ -512,6 +681,18 @@ int main(int argc, char** argv)
             print_json(results);
         } else {
             print_table(results);
+        }
+
+        if (options.baseline_path) {
+            const auto baselines = load_baseline_file(*options.baseline_path);
+            const auto failures = evaluate_baselines(results, baselines, options.tolerance);
+            if (!failures.empty()) {
+                std::cerr << "Benchmark regressions detected (tolerance " << options.tolerance * 100.0 << "%):\n";
+                for (const auto& failure : failures) {
+                    std::cerr << "  - " << failure << '\n';
+                }
+                return 2;
+            }
         }
 
         return 0;

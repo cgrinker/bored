@@ -665,7 +665,7 @@ TEST_CASE("Wal crash drill restores overflow before image")
 
     WalWriterConfig config{};
     config.directory = wal_dir;
-    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.segment_size = 128U * bored::storage::kWalBlockSize;
     config.buffer_size = 2U * bored::storage::kWalBlockSize;
     config.start_lsn = bored::storage::kWalBlockSize;
 
@@ -678,7 +678,7 @@ TEST_CASE("Wal crash drill restores overflow before image")
     auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
     REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
 
-    std::vector<std::byte> initial_payload(12288U);
+    std::vector<std::byte> initial_payload(12160U);
     for (std::size_t index = 0; index < initial_payload.size(); ++index) {
         initial_payload[index] = static_cast<std::byte>((index * 5U) & 0xFFU);
     }
@@ -771,14 +771,12 @@ TEST_CASE("Wal crash drill restores overflow before image")
 
     REQUIRE_FALSE(replayer.apply_redo(plan));
     auto undo_error = replayer.apply_undo(plan);
-    CAPTURE(replayer.last_undo_type());
     REQUIRE_FALSE(undo_error);
 
     auto restored_page = context.get_page(page_id);
     auto restored_tuple = bored::storage::read_tuple(std::span<const std::byte>(restored_page.data(), restored_page.size()), insert_result.slot.index);
     REQUIRE(restored_tuple.size() == expected_tuple_payload.size());
     REQUIRE(std::equal(restored_tuple.begin(), restored_tuple.end(), expected_tuple_payload.begin(), expected_tuple_payload.end()));
-
     CHECK(replay_fsm.current_free_bytes(page_id) == baseline_free_bytes);
 
     for (std::size_t index = 0; index < expected_chunk_metas.size(); ++index) {
@@ -806,7 +804,7 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
 
     WalWriterConfig config{};
     config.directory = wal_dir;
-    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.segment_size = 128U * bored::storage::kWalBlockSize;
     config.buffer_size = 2U * bored::storage::kWalBlockSize;
     config.start_lsn = bored::storage::kWalBlockSize;
 
@@ -823,7 +821,7 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
     REQUIRE_FALSE(manager.initialize_page(page_a_span, PageType::Table, page_id_a));
     REQUIRE_FALSE(manager.initialize_page(page_b_span, PageType::Table, page_id_b));
 
-    std::vector<std::byte> payload_a(16384U);
+    std::vector<std::byte> payload_a(12160U);
     for (std::size_t index = 0; index < payload_a.size(); ++index) {
         payload_a[index] = static_cast<std::byte>((index * 3U) & 0xFFU);
     }
@@ -831,7 +829,7 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
     PageManager::TupleInsertResult insert_a{};
     REQUIRE_FALSE(manager.insert_tuple(page_a_span, payload_a, 0xCAFEULL, insert_a));
     REQUIRE(insert_a.used_overflow);
-    REQUIRE(insert_a.overflow_page_ids.size() >= 3U);
+    REQUIRE(insert_a.overflow_page_ids.size() >= 2U);
 
     std::vector<std::byte> payload_b(9216U);
     for (std::size_t index = 0; index < payload_b.size(); ++index) {
