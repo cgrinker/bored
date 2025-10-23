@@ -585,6 +585,71 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
+TEST_CASE("WalReplayer undo overflow insert leaves stub behind (current bug)")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_replay_overflow_insert_undo_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = 50505U;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+    std::vector<std::byte> payload(8192U);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::byte>((index * 11U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, payload, 0xDEADULL, insert_result));
+    REQUIRE(insert_result.used_overflow);
+    REQUIRE_FALSE(insert_result.overflow_page_ids.empty());
+
+    const auto crash_snapshot = page_buffer;
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    CAPTURE(plan.redo.size());
+    CAPTURE(plan.undo.size());
+    REQUIRE(plan.redo.empty());
+    REQUIRE_FALSE(plan.undo.empty());
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Table, &replay_fsm};
+    context.set_page(page_id, std::span<const std::byte>(crash_snapshot.data(), crash_snapshot.size()));
+    WalReplayer replayer{context};
+
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    auto page_after = context.get_page(page_id);
+    auto page_after_const = std::span<const std::byte>(page_after.data(), page_after.size());
+    auto tuple_after = bored::storage::read_tuple(page_after_const, insert_result.slot.index);
+    CAPTURE(tuple_after.size());
+    CAPTURE(insert_result.inline_length);
+    CAPTURE(insert_result.slot.index);
+
+    REQUIRE(tuple_after.empty());
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
 TEST_CASE("WalReplayer replays page compaction")
 {
     auto io = make_async_io();
