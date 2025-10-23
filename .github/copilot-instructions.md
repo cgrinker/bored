@@ -30,11 +30,12 @@
 - `FreeSpaceMapPersistence` snapshots FSM hints to disk; `WalReplayContext` reloads and refreshes them during crash recovery.
 - `PageManager` plans tuple inserts/deletes/updates, emits WAL records ahead of page mutations, and keeps page headers/free-space map LSNs consistent.
 - `StorageTelemetryRegistry` now aggregates latch waits from page managers plus checkpoint cadence and retention pruning telemetry emitted by `CheckpointScheduler` samplers.
+- `storage_diagnostics.hpp` collects aggregated storage telemetry snapshots and serialises them to JSON for diagnostics surfaces.
 - Catch2 suites (`wal_writer_tests.cpp`, `wal_reader_tests.cpp`, `wal_recovery_tests.cpp`, `page_manager_tests.cpp`) parse emitted segments to confirm header chaining, payload encoding, truncated tail detection, and delete/update linkages.
 - Docs updated (`docs/storage.md`, `docs/page_wal_design.md`) to reflect completed WAL sequencing milestones and new TODOs.
 - Progress snapshot: WAL pipeline 100% complete; storage page roadmap ~65% complete.
 
 ## Next Tasks
-1. Surface the new storage telemetry snapshots through diagnostics endpoints and operator tooling.
-2. Build crash/restart drills that exercise the undo walker across overflow chains and validate before-image consistency on restart.
-3. Benchmark FSM refresh, retention pruning, and overflow replay using representative workloads to establish performance baselines and regression thresholds.
+1. Build crash/restart drills that exercise the undo walker across overflow chains and validate before-image consistency on restart.
+2. Benchmark FSM refresh, retention pruning, and overflow replay using representative workloads to establish performance baselines and regression thresholds.
+3. Finalise operator-facing tooling and documentation for retention, checkpoint scheduling, and recovery workflows.

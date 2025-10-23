@@ -4,7 +4,7 @@ This document captures the first pass at the on-disk layout for the experimental
 
 ### Progress Snapshot (Oct 23, 2025)
 
-- **WAL pipeline 100%**: Writer, reader, recovery planning/replay, telemetry registry, checkpoint scheduler, retention manager, and compaction metadata logging are covered by Catch2 suites. Checkpoint cadence and retention pruning metrics now flow through the storage telemetry registry for diagnostics callers.
+- **WAL pipeline 100%**: Writer, reader, recovery planning/replay, telemetry registry, checkpoint scheduler, retention manager, and compaction metadata logging are covered by Catch2 suites. Checkpoint cadence and retention pruning metrics now flow through the storage telemetry registry for diagnostics callers, and the new diagnostics collector exports aggregated snapshots for operators.
 - **Storage pages ~99%**: Core page operations, compaction with WAL slot relocation metadata, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, and the undo walker now feeds the replay path; remaining work targets crash drills, observability surface wiring, and benchmarking.
 
 ## Page Format
@@ -46,11 +46,13 @@ This document captures the first pass at the on-disk layout for the experimental
 - **Tuple payloads:** `wal_payloads.hpp` defines aligned layouts for tuple inserts, deletes, and updates to simplify serialisation/deserialisation when building records.
 - **Async persistence abstraction:** The `AsyncIo` interface hides platform-specific queues (Windows IORing, Linux io_uring) behind a unified submission/completion API for page and WAL traffic, with a portable thread-pool fallback selected by `create_async_io()` today.
 - **WAL writer runtime:** `WalWriter` maintains an aligned in-memory buffer, allocates monotonically increasing LSNs, rotates 16 MiB segments when full, and persists segment headers + records through the shared `AsyncIo` dispatchers. Exposes size/time/commit-driven flush hooks layered on `flush()` for commit coordination.
-- **Telemetry registry:** `WalTelemetryRegistry` collects `WalWriterTelemetrySnapshot` samplers so admin tooling and diagnostics endpoints can surface append/flush metrics without coupling to writer internals. Configure `WalWriterConfig::telemetry_registry` + `telemetry_identifier` to auto-register writers and tear them down safely.
+- **Telemetry registry:** `WalTelemetryRegistry` collects `WalWriterTelemetrySnapshot` samplers so admin tooling and diagnostics endpoints can surface append/flush metrics without coupling to writer internals. Configure `WalWriterConfig::telemetry_registry` + `telemetry_identifier` to auto-register writers and tear them down safely. `StorageTelemetryRegistry` now feeds a diagnostics collector that emits JSON for page managers, checkpoint schedulers, and retention workers.
 - **Retention manager:** `WalRetentionManager` enforces `WalRetentionConfig` knobs (`retention_segments`, `retention_hours`, `archive_path`) after durable flushes, pruning or archiving old segments without ever touching the active writer segment. Retention pruning runs now report scan/prune statistics back through storage telemetry samplers when invoked by the scheduler.
 - **Checkpoint manager:** `CheckpointManager` encodes dirty page tables and active transaction snapshots into `WalRecordType::Checkpoint` payloads so recovery can bootstrap redo horizons quickly while keeping the WAL append path consistent.
 - **Page compaction record:** `WalRecordType::PageCompaction` captures slot relocation metadata, refreshed free space boundaries, and index maintenance flags so both online replay and background tooling can reconcile tuple layout changes without full page images.
-- **Checkpoint scheduler:** `CheckpointScheduler` coordinates periodic checkpoint emission based on dirty-page/transaction pressure, flushes the WAL writer, and kicks retention policies once records are durable. Trigger counts, forced runs, and emission/flush/retention latencies are tracked per scheduler and exposed through `StorageTelemetryRegistry` samplers.
+- **Checkpoint scheduler:** `CheckpointScheduler` coordinates periodic checkpoint emission based on dirty-page/transaction pressure, flushes the WAL writer, and kicks retention policies once records are durable. Trigger counts, forced runs, and emission/flush/retention latencies are tracked per scheduler and exposed through `StorageTelemetryRegistry` samplers and diagnostics exports.
+
+- **Diagnostics collector:** `storage_diagnostics.hpp` provides a lightweight collector that aggregates storage telemetry snapshots, optional per-component breakdowns, and renders them as JSON so HTTP endpoints or CLI tooling can respond without reimplementing aggregation logic.
 - **WAL reader runtime:** `WalReader` enumerates segment files, validates CRC32C checksums, and streams records across segment boundaries for recovery and tooling consumers while honouring on-disk alignment rules.
 - **Recovery planning:** `WalRecoveryDriver` consumes `WalReader` streams, groups records by provisional transaction identifier, emits REDO/UNDO plans, and flags truncated tails so replay can halt cleanly on partial segments.
 - **Recovery replay:** `WalReplayer` hydrates page images from `WalRecoveryPlan` redo entries, applies tuple inserts/updates/deletes idempotently, and prepares the buffer cache for crash restart simulations while refreshing free-space hints.
@@ -130,10 +132,9 @@ Redo records always run in log order to rebuild page images, while undo records 
 
 ## Next Steps (Prioritised Backlog)
 
-1. Surface the new storage telemetry snapshots through diagnostics endpoints and operator tooling.
-2. Build crash/restart drills that exercise the new undo walker across overflow chains and validate before-image consistency on restart.
-3. Benchmark FSM refresh, retention pruning, and overflow replay using representative workloads to establish performance baselines and regression thresholds.
-4. Finalise operator-facing tooling and documentation for retention, checkpoint scheduling, and recovery workflows.
+1. Build crash/restart drills that exercise the new undo walker across overflow chains and validate before-image consistency on restart.
+2. Benchmark FSM refresh, retention pruning, and overflow replay using representative workloads to establish performance baselines and regression thresholds.
+3. Finalise operator-facing tooling and documentation for retention, checkpoint scheduling, and recovery workflows.
 
 ### Roadmap to 100% Feature Completeness (Updated Oct 23, 2025)
 
