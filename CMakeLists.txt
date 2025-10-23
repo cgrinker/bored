@@ -16,6 +16,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/checkpoint_manager.cpp
     src/storage/wal_payloads.cpp
     src/storage/page_manager.cpp
+    src/storage/lock_manager.cpp
     src/storage/free_space_map_persistence.cpp
     src/storage/wal_writer.cpp
     src/storage/wal_reader.cpp
@@ -64,6 +65,7 @@ if(BORED_ENABLE_TESTS)
         tests/wal_replay_tests.cpp
         tests/wal_telemetry_tests.cpp
         tests/wal_checkpoint_tests.cpp
+    tests/lock_manager_tests.cpp
     )
 
     target_link_libraries(${PROJECT_NAME}_tests

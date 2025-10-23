@@ -126,34 +126,29 @@ Redo records always run in log order to rebuild page images, while undo records 
   - Checkpointer and background cleaners enqueue page flushes without monopolising submission slots by respecting dispatcher-issued backpressure tokens.
 - **Error propagation:** All completions map platform-specific status codes into `std::error_code`. Fatal errors surface through the associated futures, allowing higher layers to trigger crash-recovery sequences while ensuring the dispatcher drains outstanding I/O safely.
 
-## Next Steps
+## Next Steps (Prioritised Backlog)
 
-- Extend page compaction to emit slot relocation metadata for indexes, integrate with WAL archival / recycling processes, and communicate flushes through `AsyncIo`.
-- Implement on-disk free-space map management to speed page allocation decisions and route reads/writes through the async dispatcher.
-- Design index logging payloads (B-Tree page splits/merges) using the same WAL infrastructure and schedule their persistence via `AsyncIo` implementations.
-- See roadmap below for the detailed completion plan covering WAL, storage, recovery, and observability milestones.
+1. Integrate the new latch callback surface with the forthcoming lock manager, add contention-focused Catch2 coverage, and codify latch acquisition ordering rules.
+2. Schedule checkpoints off the dirty page table, feed completion into `WalRetentionManager`, and layer CLI hooks so retention/archival can be exercised end-to-end.
+3. Extend WAL payloads to record page compaction slot relocations and index maintenance metadata; teach `WalReplayer` and `PageManager` to honour the richer records.
+4. Instrument storage and WAL paths with telemetry for latch wait time, checkpoint cadence, and retention pruning, surfacing the data through diagnostics endpoints.
+5. Finish the undo walkers for long-lived transactions and add crash/restart drills that prove before-image replay across overflow chains.
+6. Benchmark FSM refresh, retention pruning, and overflow replay using representative workloads to establish performance baselines and regression thresholds.
 
-### Roadmap to 100 % Feature Completeness
+### Roadmap to 100% Feature Completeness (Updated Oct 23, 2025)
 
-1. **Redo/Undo Integration**
-  - Implement page replay primitives that consume `WalRecoveryPlan` redo entries and apply physical/logical updates.
-  - Build UNDO walkers for in-flight transactions, ensuring slot reclamation and tuple visibility rules hold.
-  - Add crash/restart integration tests that boot from WAL-only state and validate page images.
-2. **Checkpointing & Retention**
-  - ✅ Define checkpoint record payloads (dirty page table, active txn table) and surface emit helpers through `CheckpointManager`.
-  - Wire checkpoint completion to WAL archival/retention policies and add CLI/tooling hooks for archive management.
-3. **FSM & Overflow Durability**
-  - Persist free-space map structures, replay WAL hints at startup, and verify crash consistency via tests.
-  - Benchmark before-image overflow replay paths and stress undo/redo with larger segment chains.
-4. **Index & Compaction Metadata**
-  - Log compaction slot relocations and index maintenance payloads (B-Tree split/merge/delete).
-  - Extend PageManager + WAL payload helpers to encode/decode these flows with tests.
-5. **Observability & Telemetry**
-  - Capture WAL append latency, flush durations, and FSM hint journaling metrics.
-  - Expose counters via diagnostics API and baseline with microbenchmarks.
-6. **Documentation & Tooling**
-  - Produce redo/undo state diagrams, WAL retention policies, and plantuml/mermaid overviews of record formats.
-  - Document operational runbooks for recovery, checkpointing, and archival rotation.
+1. **Concurrency & Lock Manager Integration** (Next)
+  - Marry `PageManager` latch callbacks with the lock manager contract and validate priority inversion safeguards under stress tests.
+2. **Checkpoint Scheduling & Retention Wiring** (Next)
+  - Drive periodic checkpoints from dirty page metrics, notify `WalRetentionManager` when horizons advance, and expose operator controls for archival windows.
+3. **Compaction & Index Metadata Logging** (Next)
+  - Emit WAL payloads for slot relocation and index maintenance, ensuring replay stitches compaction outcomes back into live page images.
+4. **Undo Walkers & Crash Drills** (Following)
+  - Complete undo walker coverage for in-flight transactions and add WAL-only restart tests that inspect page/header correctness.
+5. **Observability & Telemetry** (Following)
+  - Capture and publish latch contention, checkpoint latency, and retention activity metrics for operators and regression dashboards.
+6. **Benchmarking & Tooling** (Later)
+  - Establish reproducible benchmarks for FSM refresh, overflow replay, and retention throughput; finalise operational runbooks and visual documentation.
 - **Deferred: Linux io_uring backend roadmap**
   - Target liburing 2.x to mirror the Windows IoRing dispatcher with queue-depth aware submission, per-file-class backpressure, and dsync-aware flush handling.
   - Translate Linux `io_uring_cqe::res` results into `std::error_code` values using `std::system_category()` while preserving errno semantics.
