@@ -8,6 +8,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <system_error>
+#include <vector>
 
 namespace bored::storage {
 
@@ -291,6 +292,115 @@ std::error_code undo_overflow_truncate(WalReplayContext& context,
     return {};
 }
 
+std::error_code apply_page_compaction(std::span<std::byte> page,
+                                      const WalRecordHeader& header,
+                                      const WalCompactionView& view,
+                                      FreeSpaceMap* fsm,
+                                      bool& applied)
+{
+    applied = false;
+
+    auto const_page = as_const_span(page);
+    if (page_header(const_page).page_id != header.page_id) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    if (page_already_applied(const_page, header)) {
+        return {};
+    }
+
+    std::vector<std::byte> original(const_page.begin(), const_page.end());
+    auto directory = slot_directory(page);
+    const auto directory_size = directory.size();
+
+    if (view.header.new_free_start > kPageSize) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    for (const auto& entry : view.entries) {
+        if (entry.slot_index >= directory_size) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        const auto directory_index = directory_size - static_cast<std::size_t>(entry.slot_index) - 1U;
+        auto& slot = directory[directory_index];
+        if (slot.length != entry.length) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        if (static_cast<std::size_t>(entry.old_offset) + entry.length > original.size()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        if (static_cast<std::size_t>(entry.new_offset) + entry.length > page.size()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        if (entry.length != 0U) {
+            std::memcpy(page.data() + entry.new_offset, original.data() + entry.old_offset, entry.length);
+        }
+        slot.offset = static_cast<std::uint16_t>(entry.new_offset);
+    }
+
+    auto& header_ref = page_header(page);
+    header_ref.free_start = static_cast<std::uint16_t>(view.header.new_free_start);
+    header_ref.fragment_count = 0U;
+    header_ref.flags |= static_cast<std::uint16_t>(PageFlag::Dirty);
+    header_ref.lsn = header.lsn;
+
+    if (fsm != nullptr) {
+        sync_free_space(*fsm, page);
+    }
+
+    applied = true;
+    return {};
+}
+
+std::error_code undo_page_compaction(std::span<std::byte> page,
+                                     const WalRecordHeader& header,
+                                     const WalCompactionView& view,
+                                     FreeSpaceMap* fsm)
+{
+    if (page_header(page).page_id != header.page_id) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    std::vector<std::byte> original(page.begin(), page.end());
+    auto directory = slot_directory(page);
+    const auto directory_size = directory.size();
+
+    for (const auto& entry : view.entries) {
+        if (entry.slot_index >= directory_size) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        const auto directory_index = directory_size - static_cast<std::size_t>(entry.slot_index) - 1U;
+        auto& slot = directory[directory_index];
+        if (slot.length != entry.length) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        if (static_cast<std::size_t>(entry.new_offset) + entry.length > original.size()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        if (static_cast<std::size_t>(entry.old_offset) + entry.length > page.size()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        if (entry.length != 0U) {
+            std::memcpy(page.data() + entry.old_offset, original.data() + entry.new_offset, entry.length);
+        }
+        slot.offset = static_cast<std::uint16_t>(entry.old_offset);
+    }
+
+    auto& header_ref = page_header(page);
+    header_ref.free_start = static_cast<std::uint16_t>(view.header.old_free_start);
+    header_ref.fragment_count = static_cast<std::uint16_t>(view.header.old_fragment_count);
+    header_ref.flags |= static_cast<std::uint16_t>(PageFlag::Dirty);
+    header_ref.lsn = header.lsn;
+
+    if (fsm != nullptr) {
+        sync_free_space(*fsm, page);
+    }
+
+    return {};
+}
+
 }  // namespace
 
 WalReplayContext::WalReplayContext(PageType default_page_type, FreeSpaceMap* fsm)
@@ -336,6 +446,16 @@ void WalReplayContext::set_free_space_map(FreeSpaceMap* fsm) noexcept
 FreeSpaceMap* WalReplayContext::free_space_map() const noexcept
 {
     return free_space_map_;
+}
+
+void WalReplayContext::record_index_metadata(std::span<const WalCompactionEntry> entries)
+{
+    index_metadata_events_.insert(index_metadata_events_.end(), entries.begin(), entries.end());
+}
+
+const std::vector<WalCompactionEntry>& WalReplayContext::index_metadata() const noexcept
+{
+    return index_metadata_events_;
 }
 
 WalReplayer::WalReplayer(WalReplayContext& context)
@@ -423,6 +543,21 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         }
         return apply_overflow_truncate(context_, record.header, *meta);
     }
+    case WalRecordType::PageCompaction: {
+        auto view = decode_wal_compaction(payload);
+        if (!view) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+        bool applied = false;
+        if (auto ec = apply_page_compaction(page, record.header, *view, fsm, applied); ec) {
+            return ec;
+        }
+        if (applied) {
+            context_.record_index_metadata(std::span<const WalCompactionEntry>(view->entries.data(), view->entries.size()));
+        }
+        return {};
+    }
     default:
         return std::make_error_code(std::errc::not_supported);
     }
@@ -497,6 +632,18 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
             return std::make_error_code(std::errc::invalid_argument);
         }
         return undo_overflow_truncate(context_, record, *meta);
+    }
+    case WalRecordType::PageCompaction: {
+        auto view = decode_wal_compaction(payload);
+        if (!view) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+        if (auto ec = undo_page_compaction(page, record.header, *view, fsm); ec) {
+            return ec;
+        }
+        context_.record_index_metadata(std::span<const WalCompactionEntry>(view->entries.data(), view->entries.size()));
+        return {};
     }
     default:
         return std::make_error_code(std::errc::not_supported);

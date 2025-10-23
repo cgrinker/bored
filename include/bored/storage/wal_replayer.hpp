@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/storage/page_format.hpp"
+#include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_recovery.hpp"
 
 #include <array>
@@ -9,6 +10,7 @@
 #include <span>
 #include <system_error>
 #include <unordered_map>
+#include <vector>
 
 namespace bored::storage {
 
@@ -22,11 +24,14 @@ public:
     [[nodiscard]] std::span<std::byte> get_page(std::uint32_t page_id);
     void set_free_space_map(FreeSpaceMap* fsm) noexcept;
     [[nodiscard]] FreeSpaceMap* free_space_map() const noexcept;
+    void record_index_metadata(std::span<const WalCompactionEntry> entries);
+    [[nodiscard]] const std::vector<WalCompactionEntry>& index_metadata() const noexcept;
 
 private:
     PageType default_page_type_;
     std::unordered_map<std::uint32_t, std::array<std::byte, kPageSize>> pages_;
     FreeSpaceMap* free_space_map_ = nullptr;
+    std::vector<WalCompactionEntry> index_metadata_events_{};
 };
 
 class WalReplayer final {

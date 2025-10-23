@@ -218,6 +218,11 @@ std::size_t wal_checkpoint_payload_size(std::size_t dirty_page_count, std::size_
         + (active_transaction_count * sizeof(WalCheckpointTxnEntry));
 }
 
+std::size_t wal_compaction_payload_size(std::size_t entry_count)
+{
+    return sizeof(WalCompactionHeader) + (entry_count * sizeof(WalCompactionEntry));
+}
+
 bool encode_wal_overflow_truncate(std::span<std::byte> buffer,
                                   const WalOverflowTruncateMeta& meta,
                                   std::span<const WalOverflowChunkMeta> chunk_metas,
@@ -300,6 +305,29 @@ bool encode_wal_checkpoint(std::span<std::byte> buffer,
     return true;
 }
 
+bool encode_wal_compaction(std::span<std::byte> buffer,
+                           const WalCompactionHeader& header,
+                           std::span<const WalCompactionEntry> entries)
+{
+    WalCompactionHeader local_header = header;
+    if (entries.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+
+    local_header.entry_count = static_cast<std::uint32_t>(entries.size());
+
+    const auto required = wal_compaction_payload_size(entries.size());
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &local_header, sizeof(WalCompactionHeader));
+    if (!entries.empty()) {
+        std::memcpy(buffer.data() + sizeof(WalCompactionHeader), entries.data(), entries.size() * sizeof(WalCompactionEntry));
+    }
+    return true;
+}
+
 std::optional<WalOverflowChunkMeta> decode_wal_overflow_chunk_meta(std::span<const std::byte> buffer)
 {
     if (!fits(buffer, sizeof(WalOverflowChunkMeta))) {
@@ -373,6 +401,29 @@ std::optional<std::vector<WalOverflowTruncateChunkView>> decode_wal_overflow_tru
     }
 
     return results;
+}
+
+std::optional<WalCompactionView> decode_wal_compaction(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalCompactionHeader))) {
+        return std::nullopt;
+    }
+
+    WalCompactionHeader header{};
+    std::memcpy(&header, buffer.data(), sizeof(WalCompactionHeader));
+
+    const auto entry_bytes = static_cast<std::size_t>(header.entry_count) * sizeof(WalCompactionEntry);
+    if (!fits(buffer, sizeof(WalCompactionHeader) + entry_bytes)) {
+        return std::nullopt;
+    }
+
+    WalCompactionView view{};
+    view.header = header;
+    view.entries.resize(header.entry_count);
+    if (!view.entries.empty()) {
+        std::memcpy(view.entries.data(), buffer.data() + sizeof(WalCompactionHeader), entry_bytes);
+    }
+    return view;
 }
 
 std::optional<WalTupleBeforeImageView> decode_wal_tuple_before_image(std::span<const std::byte> buffer)

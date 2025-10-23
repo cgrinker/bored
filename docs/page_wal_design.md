@@ -12,8 +12,8 @@ This document tracks the remaining work required to take the current page manage
 
 2. **Page Compaction / Defragmentation**
    - ✅ Implement vacuum/defragment routines that coalesce free space within a page by rewriting tuples and updating slots via `compact_page`.
-   - ☐ Capture slot relocation metadata and feed it into index/WAL machinery when compaction runs.
-   - ☐ Integrate with WAL to log page images or logical redo data for compaction.
+   - ✅ Capture slot relocation metadata and feed it into index/WAL machinery when compaction runs.
+   - ✅ Integrate with WAL to log logical redo data (`WalRecordType::PageCompaction`) for compaction.
 
 3. **Overflow / Large Tuple Handling**
    - ✅ Support tuples that exceed a single page by chaining overflow pages.

@@ -5,6 +5,7 @@
 #include "bored/storage/page_operations.hpp"
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_payloads.hpp"
+#include "bored/storage/wal_reader.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -34,6 +35,11 @@ using bored::storage::WalTupleMeta;
 using bored::storage::WalTupleUpdateMeta;
 using bored::storage::WalOverflowTruncateMeta;
 using bored::storage::WalOverflowChunkMeta;
+using bored::storage::WalCompactionEntry;
+using bored::storage::WalCompactionView;
+using bored::storage::WalIndexMaintenanceAction;
+using bored::storage::any;
+using bored::storage::WalReader;
 
 namespace {
 
@@ -522,6 +528,93 @@ TEST_CASE("PageManager propagates latch acquire failures")
     REQUIRE(acquire_error == expected_error);
     REQUIRE(acquire_calls == 1U);
     REQUIRE(release_calls == 0U);
+
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager compacts fragmented page and logs metadata")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_compact_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+
+    std::vector<WalCompactionEntry> observed_metadata;
+
+    PageManager::Config config{};
+    config.index_metadata_callback = [&](const WalCompactionEntry& entry) {
+        observed_metadata.push_back(entry);
+    };
+
+    PageManager manager{&fsm, wal_writer, config};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    constexpr std::uint32_t page_id = 900U;
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+    std::array<std::byte, 48> first_tuple{};
+    first_tuple.fill(std::byte{0x1});
+    PageManager::TupleInsertResult first_insert{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, first_tuple, 10U, first_insert));
+
+    std::array<std::byte, 64> second_tuple{};
+    second_tuple.fill(std::byte{0x2});
+    PageManager::TupleInsertResult second_insert{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, second_tuple, 11U, second_insert));
+
+    const auto before_offset = second_insert.slot.offset;
+
+    PageManager::TupleDeleteResult delete_result{};
+    REQUIRE_FALSE(manager.delete_tuple(page_span, first_insert.slot.index, 10U, delete_result));
+
+    PageManager::PageCompactionResult compaction_result{};
+    REQUIRE_FALSE(manager.compact_page(page_span, compaction_result));
+    REQUIRE(compaction_result.performed);
+    REQUIRE(compaction_result.relocations.size() == 1U);
+    const auto& relocation = compaction_result.relocations.front();
+    CHECK(relocation.slot_index == second_insert.slot.index);
+    CHECK(relocation.old_offset == before_offset);
+    CHECK(relocation.new_offset == static_cast<std::uint32_t>(sizeof(bored::storage::PageHeader)));
+    CHECK(any(static_cast<WalIndexMaintenanceAction>(relocation.index_action)));
+
+    const auto post_header = bored::storage::page_header(std::span<const std::byte>(page_span.data(), page_span.size()));
+    CHECK(post_header.fragment_count == 0U);
+    CHECK(post_header.free_start == relocation.new_offset + relocation.length);
+
+    REQUIRE(observed_metadata.size() == 1U);
+    CHECK(observed_metadata.front().slot_index == relocation.slot_index);
+    CHECK(static_cast<WalIndexMaintenanceAction>(observed_metadata.front().index_action) == WalIndexMaintenanceAction::RefreshPointers);
+
+    REQUIRE_FALSE(manager.flush_wal());
+
+    auto segment_path = wal_writer->segment_path(0U);
+    REQUIRE(std::filesystem::exists(segment_path));
+    WalReader reader{wal_dir};
+    bool found_compaction = false;
+    auto visit_ec = reader.for_each_record([&](const auto&, const WalRecordHeader& header, std::span<const std::byte> payload) {
+        const auto type = static_cast<WalRecordType>(header.type);
+        if (type != WalRecordType::PageCompaction) {
+            return true;
+        }
+        auto decoded = bored::storage::decode_wal_compaction(payload);
+        REQUIRE(decoded);
+        REQUIRE(decoded->header.entry_count == compaction_result.relocations.size());
+        REQUIRE_FALSE(decoded->entries.empty());
+        REQUIRE(decoded->entries.front().new_offset == relocation.new_offset);
+        found_compaction = true;
+        return false;
+    });
+    REQUIRE_FALSE(visit_ec);
+    CHECK(found_compaction);
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();

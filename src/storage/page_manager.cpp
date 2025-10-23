@@ -691,6 +691,102 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     return {};
 }
 
+std::error_code PageManager::compact_page(std::span<std::byte> page,
+                                          PageCompactionResult& out_result) const
+{
+    out_result = {};
+
+    const auto page_const = as_const_span(page);
+    const auto& header = page_header(page_const);
+    if (!is_valid(header)) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    PageLatchGuard latch_guard{&config_.latch_callbacks, header.page_id, PageLatchMode::Exclusive};
+    if (auto latch_ec = latch_guard.status(); latch_ec) {
+        return latch_ec;
+    }
+
+    auto directory = slot_directory(page_const);
+    const auto directory_size = directory.size();
+    std::vector<WalCompactionEntry> entries;
+    entries.reserve(directory_size);
+
+    bool needs_compaction = header.fragment_count > 0U;
+    std::uint32_t write_cursor = static_cast<std::uint32_t>(sizeof(PageHeader));
+
+    for (std::size_t logical_index = 0; logical_index < directory_size; ++logical_index) {
+        const auto directory_index = directory_size - logical_index - 1U;
+        const auto& slot = directory[directory_index];
+        if (slot.length == 0U) {
+            continue;
+        }
+
+        WalCompactionEntry entry{};
+        entry.slot_index = static_cast<std::uint16_t>(logical_index);
+        entry.old_offset = slot.offset;
+        entry.new_offset = write_cursor;
+        entry.length = slot.length;
+
+        if (entry.old_offset != entry.new_offset) {
+            needs_compaction = true;
+            entry.index_action = static_cast<std::uint32_t>(WalIndexMaintenanceAction::RefreshPointers);
+        }
+
+        entries.push_back(entry);
+        write_cursor += slot.length;
+    }
+
+    if (header.free_start != write_cursor) {
+        needs_compaction = true;
+    }
+
+    if (!needs_compaction) {
+        out_result.performed = false;
+        return {};
+    }
+
+    WalCompactionHeader compaction_header{};
+    compaction_header.entry_count = static_cast<std::uint32_t>(entries.size());
+    compaction_header.old_free_start = header.free_start;
+    compaction_header.new_free_start = write_cursor;
+    compaction_header.old_fragment_count = header.fragment_count;
+
+    std::vector<std::byte> payload(wal_compaction_payload_size(entries.size()));
+    if (!encode_wal_compaction(std::span<std::byte>(payload.data(), payload.size()), compaction_header, std::span<const WalCompactionEntry>(entries.data(), entries.size()))) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::PageCompaction;
+    descriptor.page_id = header.page_id;
+    descriptor.flags = WalRecordFlag::None;
+    descriptor.payload = std::span<const std::byte>(payload.data(), payload.size());
+
+    WalAppendResult wal_result{};
+    if (auto ec = wal_writer_->append_record(descriptor, wal_result); ec) {
+        return ec;
+    }
+
+    if (!bored::storage::compact_page(page, wal_result.lsn, fsm_)) {
+        return std::make_error_code(std::errc::io_error);
+    }
+
+    out_result.compaction_wal = wal_result;
+    out_result.performed = true;
+    out_result.relocations = entries;
+
+    if (config_.index_metadata_callback) {
+        for (const auto& entry : entries) {
+            if (any(static_cast<WalIndexMaintenanceAction>(entry.index_action))) {
+                config_.index_metadata_callback(entry);
+            }
+        }
+    }
+
+    return {};
+}
+
 std::error_code PageManager::flush_wal() const
 {
     if (auto ec = wal_writer_->flush(); ec) {

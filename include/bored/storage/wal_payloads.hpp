@@ -105,6 +105,49 @@ struct WalCheckpointView final {
     std::vector<WalCheckpointTxnEntry> active_transactions{};
 };
 
+enum class WalIndexMaintenanceAction : std::uint32_t {
+    None = 0,
+    RefreshPointers = 1U << 0
+};
+
+constexpr WalIndexMaintenanceAction operator|(WalIndexMaintenanceAction lhs, WalIndexMaintenanceAction rhs)
+{
+    return static_cast<WalIndexMaintenanceAction>(static_cast<std::uint32_t>(lhs) | static_cast<std::uint32_t>(rhs));
+}
+
+constexpr WalIndexMaintenanceAction operator&(WalIndexMaintenanceAction lhs, WalIndexMaintenanceAction rhs)
+{
+    return static_cast<WalIndexMaintenanceAction>(static_cast<std::uint32_t>(lhs) & static_cast<std::uint32_t>(rhs));
+}
+
+constexpr bool any(WalIndexMaintenanceAction value)
+{
+    return static_cast<std::uint32_t>(value) != 0U;
+}
+
+struct alignas(8) WalCompactionHeader final {
+    std::uint32_t entry_count = 0U;
+    std::uint32_t old_free_start = 0U;
+    std::uint32_t new_free_start = 0U;
+    std::uint32_t old_fragment_count = 0U;
+    std::uint64_t reserved0 = 0U;
+    std::uint64_t reserved1 = 0U;
+};
+
+struct alignas(8) WalCompactionEntry final {
+    std::uint16_t slot_index = 0U;
+    std::uint16_t reserved = 0U;
+    std::uint32_t old_offset = 0U;
+    std::uint32_t new_offset = 0U;
+    std::uint32_t length = 0U;
+    std::uint32_t index_action = static_cast<std::uint32_t>(WalIndexMaintenanceAction::None);
+};
+
+struct WalCompactionView final {
+    WalCompactionHeader header{};
+    std::vector<WalCompactionEntry> entries{};
+};
+
 constexpr std::size_t wal_tuple_insert_payload_size(std::uint16_t tuple_length)
 {
     return sizeof(WalTupleMeta) + tuple_length;
@@ -132,6 +175,8 @@ std::size_t wal_overflow_truncate_payload_size(std::span<const WalOverflowChunkM
 
 std::size_t wal_checkpoint_payload_size(std::size_t dirty_page_count, std::size_t active_transaction_count);
 
+std::size_t wal_compaction_payload_size(std::size_t entry_count);
+
 bool encode_wal_tuple_insert(std::span<std::byte> buffer,
                              const WalTupleMeta& meta,
                              std::span<const std::byte> tuple_data);
@@ -158,6 +203,8 @@ std::optional<WalOverflowTruncateMeta> decode_wal_overflow_truncate_meta(std::sp
 
 std::optional<WalCheckpointView> decode_wal_checkpoint(std::span<const std::byte> buffer);
 
+std::optional<WalCompactionView> decode_wal_compaction(std::span<const std::byte> buffer);
+
 std::span<const std::byte> wal_tuple_payload(std::span<const std::byte> buffer, const WalTupleMeta& meta);
 std::span<const std::byte> wal_tuple_update_payload(std::span<const std::byte> buffer, const WalTupleUpdateMeta& meta);
 
@@ -174,6 +221,10 @@ bool encode_wal_checkpoint(std::span<std::byte> buffer,
                            const WalCheckpointHeader& header,
                            std::span<const WalCheckpointDirtyPageEntry> dirty_pages,
                            std::span<const WalCheckpointTxnEntry> active_transactions);
+
+bool encode_wal_compaction(std::span<std::byte> buffer,
+                           const WalCompactionHeader& header,
+                           std::span<const WalCompactionEntry> entries);
 
 std::span<const std::byte> wal_overflow_chunk_payload(std::span<const std::byte> buffer,
                                                       const WalOverflowChunkMeta& meta);
@@ -193,5 +244,9 @@ static_assert(sizeof(WalCheckpointDirtyPageEntry) == 16, "WalCheckpointDirtyPage
 static_assert(alignof(WalCheckpointDirtyPageEntry) == 8, "WalCheckpointDirtyPageEntry requires 8-byte alignment");
 static_assert(sizeof(WalCheckpointTxnEntry) == 16, "WalCheckpointTxnEntry expected to be 16 bytes");
 static_assert(alignof(WalCheckpointTxnEntry) == 8, "WalCheckpointTxnEntry requires 8-byte alignment");
+static_assert(sizeof(WalCompactionHeader) == 32, "WalCompactionHeader expected to be 32 bytes");
+static_assert(alignof(WalCompactionHeader) == 8, "WalCompactionHeader requires 8-byte alignment");
+static_assert(sizeof(WalCompactionEntry) == 24, "WalCompactionEntry expected to be 24 bytes");
+static_assert(alignof(WalCompactionEntry) == 8, "WalCompactionEntry requires 8-byte alignment");
 
 }  // namespace bored::storage

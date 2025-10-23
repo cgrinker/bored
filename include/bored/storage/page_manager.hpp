@@ -6,6 +6,7 @@
 #include "bored/storage/wal_writer.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <system_error>
 #include <unordered_map>
@@ -19,6 +20,7 @@ public:
         std::uint32_t overflow_page_start = 1U << 20;  // default high range to reduce collisions
         std::size_t overflow_inline_prefix = 256U;
         PageLatchCallbacks latch_callbacks{};
+        std::function<void(const WalCompactionEntry&)> index_metadata_callback{};
     };
 
     struct TupleInsertResult final {
@@ -42,6 +44,12 @@ public:
         std::size_t logical_length = 0U;
         std::size_t inline_length = 0U;
         std::vector<std::uint32_t> overflow_page_ids{};
+    };
+
+    struct PageCompactionResult final {
+        WalAppendResult compaction_wal{};
+        bool performed = false;
+        std::vector<WalCompactionEntry> relocations{};
     };
 
     PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer, Config config = {});
@@ -71,6 +79,9 @@ public:
                                                std::span<const std::byte> new_payload,
                                                std::uint64_t row_id,
                                                TupleUpdateResult& out_result) const;
+
+    [[nodiscard]] std::error_code compact_page(std::span<std::byte> page,
+                                               PageCompactionResult& out_result) const;
 
     [[nodiscard]] std::error_code flush_wal() const;
     [[nodiscard]] std::error_code close_wal() const;

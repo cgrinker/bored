@@ -34,6 +34,9 @@ using bored::storage::WalReplayContext;
 using bored::storage::WalReplayer;
 using bored::storage::WalWriter;
 using bored::storage::WalWriterConfig;
+using bored::storage::WalCompactionEntry;
+using bored::storage::WalIndexMaintenanceAction;
+using bored::storage::any;
 
 namespace {
 
@@ -578,6 +581,97 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
         REQUIRE(restored_payload.size() == expected_payload.size());
         REQUIRE(std::equal(restored_payload.begin(), restored_payload.end(), expected_payload.begin(), expected_payload.end()));
     }
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("WalReplayer replays page compaction")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_replay_compaction_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = 6060U;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+    std::array<std::byte, 40> first_tuple{};
+    first_tuple.fill(std::byte{0x33});
+    PageManager::TupleInsertResult first_insert{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, first_tuple, 301U, first_insert));
+
+    std::array<std::byte, 56> second_tuple{};
+    second_tuple.fill(std::byte{0x44});
+    PageManager::TupleInsertResult second_insert{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, second_tuple, 302U, second_insert));
+
+    PageManager::TupleDeleteResult delete_result{};
+    REQUIRE_FALSE(manager.delete_tuple(page_span, first_insert.slot.index, 301U, delete_result));
+
+    PageManager::PageCompactionResult compaction_result{};
+    REQUIRE_FALSE(manager.compact_page(page_span, compaction_result));
+    REQUIRE(compaction_result.performed);
+
+    WalRecordDescriptor commit{};
+    commit.type = WalRecordType::Commit;
+    commit.page_id = page_id;
+    commit.flags = bored::storage::WalRecordFlag::None;
+    commit.payload = {};
+    bored::storage::WalAppendResult commit_result{};
+    REQUIRE_FALSE(wal_writer->append_record(commit, commit_result));
+
+    const auto post_compaction_snapshot = page_buffer;
+
+    REQUIRE_FALSE(wal_writer->flush());
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    std::vector<WalRecordType> redo_types;
+    redo_types.reserve(plan.redo.size());
+    bool compaction_found = false;
+    for (const auto& record : plan.redo) {
+        auto type = static_cast<WalRecordType>(record.header.type);
+        redo_types.push_back(type);
+        if (type == WalRecordType::PageCompaction) {
+            compaction_found = true;
+        }
+    }
+    CAPTURE(redo_types);
+    REQUIRE(compaction_found);
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Table, &replay_fsm};
+    WalReplayer replayer{context};
+
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+
+    auto replayed_page = context.get_page(page_id);
+    auto expected_span = std::span<const std::byte>(post_compaction_snapshot.data(), post_compaction_snapshot.size());
+    REQUIRE(std::equal(replayed_page.begin(), replayed_page.end(), expected_span.begin(), expected_span.end()));
+
+    const auto& metadata = context.index_metadata();
+    REQUIRE_FALSE(metadata.empty());
+    bool refresh_seen = false;
+    for (const auto& entry : metadata) {
+        if (any(static_cast<WalIndexMaintenanceAction>(entry.index_action))) {
+            refresh_seen = true;
+        }
+    }
+    CHECK(refresh_seen);
 
     (void)std::filesystem::remove_all(wal_dir);
 }
