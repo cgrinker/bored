@@ -1,5 +1,6 @@
 #include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_recovery.hpp"
+#include "bored/storage/wal_undo_walker.hpp"
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/page_operations.hpp"
@@ -32,6 +33,7 @@ using bored::storage::WalRecordDescriptor;
 using bored::storage::WalRecordType;
 using bored::storage::WalReplayContext;
 using bored::storage::WalReplayer;
+using bored::storage::WalUndoWalker;
 using bored::storage::WalWriter;
 using bored::storage::WalWriterConfig;
 using bored::storage::WalCompactionEntry;
@@ -475,6 +477,14 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
     REQUIRE_FALSE(manager.insert_tuple(page_span, payload, 8080U, insert_result));
     REQUIRE(insert_result.used_overflow);
 
+    WalRecordDescriptor commit{};
+    commit.type = WalRecordType::Commit;
+    commit.page_id = page_id;
+    commit.flags = bored::storage::WalRecordFlag::None;
+    commit.payload = {};
+    bored::storage::WalAppendResult commit_result{};
+    REQUIRE_FALSE(wal_writer->append_record(commit, commit_result));
+
     PageManager::TupleDeleteResult delete_result{};
     REQUIRE_FALSE(manager.delete_tuple(page_span, insert_result.slot.index, 8080U, delete_result));
 
@@ -487,6 +497,13 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
     WalRecoveryDriver driver{wal_dir};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
+
+    REQUIRE(plan.undo_spans.size() == 1U);
+    WalUndoWalker span_walker{plan};
+    auto span_item = span_walker.next();
+    REQUIRE(span_item);
+    CHECK(span_item->owner_page_id == page_id);
+    CHECK_FALSE(span_walker.next());
 
     auto before_it = std::find_if(plan.undo.begin(), plan.undo.end(), [](const WalRecoveryRecord& record) {
         return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage;
@@ -508,15 +525,6 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
         expected_chunk_metas.push_back(chunk_view.meta);
         expected_chunk_payloads.emplace_back(chunk_view.payload.begin(), chunk_view.payload.end());
     }
-
-    plan.undo.erase(std::remove_if(plan.undo.begin(),
-                                   plan.undo.end(),
-                                   [](const WalRecoveryRecord& record) {
-                                       const auto type = static_cast<WalRecordType>(record.header.type);
-                                       return type == WalRecordType::TupleOverflowTruncate
-                                              || type == WalRecordType::TupleOverflowChunk;
-                                   }),
-                    plan.undo.end());
 
     FreeSpaceMap replay_fsm;
     WalReplayContext context{PageType::Table, &replay_fsm};

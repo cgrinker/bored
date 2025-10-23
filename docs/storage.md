@@ -131,7 +131,7 @@ Redo records always run in log order to rebuild page images, while undo records 
 ## Next Steps (Prioritised Backlog)
 
 1. Instrument storage and WAL paths with telemetry for latch wait time, checkpoint cadence, and retention pruning, surfacing the data through diagnostics endpoints.
-2. Finish the undo walkers for long-lived transactions and add crash/restart drills that prove before-image replay across overflow chains.
+2. Build crash/restart drills that exercise the new undo walker across overflow chains and validate before-image consistency on restart.
 3. Benchmark FSM refresh, retention pruning, and overflow replay using representative workloads to establish performance baselines and regression thresholds.
 4. Finalise operator-facing tooling and documentation for retention, checkpoint scheduling, and recovery workflows.
 
@@ -143,8 +143,9 @@ Redo records always run in log order to rebuild page images, while undo records 
   - `CheckpointScheduler` orchestrates WAL checkpoints from dirty page snapshots, flushes the writer, and invokes retention hooks after successful emits.
 3. **Compaction & Index Metadata Logging** (✅ Oct 23, 2025)
   - `PageManager::compact_page` now emits `PageCompaction` records with relocation metadata and index refresh hints; `WalReplayer` replays and records the events for downstream index maintenance.
-4. **Undo Walkers & Crash Drills** (Following)
-  - Complete undo walker coverage for in-flight transactions and add WAL-only restart tests that inspect page/header correctness.
+4. **Undo Walkers & Crash Drills** (In Progress)
+  - ✅ Implement undo walker coverage for in-flight transactions, grouping overflow chains under the owning table page and exposing walk spans.
+  - ☐ Add WAL-only restart tests that inspect page/header correctness using the new walker.
 5. **Observability & Telemetry** (Following)
   - Capture and publish latch contention, checkpoint latency, and retention activity metrics for operators and regression dashboards.
 6. **Benchmarking & Tooling** (Later)

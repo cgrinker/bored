@@ -2,6 +2,7 @@
 
 #include "bored/storage/wal_reader.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -15,9 +16,16 @@ struct WalRecoveryRecord final {
     std::vector<std::byte> payload{};
 };
 
+struct WalUndoSpan final {
+    std::uint32_t owner_page_id = 0U;
+    std::size_t offset = 0U;
+    std::size_t count = 0U;
+};
+
 struct WalRecoveryPlan final {
     std::vector<WalRecoveryRecord> redo{};
     std::vector<WalRecoveryRecord> undo{};
+    std::vector<WalUndoSpan> undo_spans{};
     bool truncated_tail = false;
     std::uint64_t truncated_segment_id = 0U;
     std::uint64_t truncated_lsn = 0U;

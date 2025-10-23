@@ -1,6 +1,9 @@
 #include "bored/storage/wal_recovery.hpp"
+#include "bored/storage/wal_undo_walker.hpp"
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/async_io.hpp"
+#include "bored/storage/page_manager.hpp"
+#include "bored/storage/free_space_map.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -9,6 +12,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <vector>
 
 using bored::storage::AsyncIo;
@@ -20,6 +24,10 @@ using bored::storage::WalRecordDescriptor;
 using bored::storage::WalRecordType;
 using bored::storage::WalRecoveryDriver;
 using bored::storage::WalRecoveryPlan;
+using bored::storage::FreeSpaceMap;
+using bored::storage::PageManager;
+using bored::storage::PageType;
+using bored::storage::WalUndoWalker;
 using bored::storage::WalWriter;
 using bored::storage::WalWriterConfig;
 
@@ -188,6 +196,71 @@ TEST_CASE("WalRecoveryDriver marks truncated tail")
     REQUIRE(plan.redo.size() == 1U);
     REQUIRE(plan.redo[0].header.lsn == tx_commit.lsn);
     REQUIRE(plan.undo.empty());
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("WalUndoWalker collates overflow undo records")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_undo_walker_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = 13579U;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+    std::vector<std::byte> payload(8192U);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::byte>((index * 5U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, payload, 424242U, insert_result));
+    REQUIRE(insert_result.used_overflow);
+    REQUIRE_FALSE(insert_result.overflow_page_ids.empty());
+
+    PageManager::TupleDeleteResult delete_result{};
+    REQUIRE_FALSE(manager.delete_tuple(page_span, insert_result.slot.index, 424242U, delete_result));
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    REQUIRE(plan.redo.empty());
+    REQUIRE(plan.undo_spans.size() == 1U);
+    const auto& span = plan.undo_spans.front();
+    CHECK(span.owner_page_id == page_id);
+    CHECK(span.offset == 0U);
+    CHECK(span.count == plan.undo.size());
+    REQUIRE(span.count > 0U);
+
+    WalUndoWalker walker{plan};
+    auto item = walker.next();
+    REQUIRE(item);
+    CHECK(item->owner_page_id == page_id);
+    CHECK(item->records.size() == plan.undo.size());
+
+    for (auto overflow_id : insert_result.overflow_page_ids) {
+        auto found = std::find(item->overflow_page_ids.begin(), item->overflow_page_ids.end(), overflow_id);
+        REQUIRE(found != item->overflow_page_ids.end());
+    }
+
+    CHECK_FALSE(walker.next());
 
     (void)std::filesystem::remove_all(wal_dir);
 }

@@ -1,9 +1,13 @@
 #include "bored/storage/wal_recovery.hpp"
 
 #include "bored/storage/wal_format.hpp"
+#include "bored/storage/wal_payloads.hpp"
 
 #include <algorithm>
+#include <optional>
+#include <span>
 #include <unordered_map>
+#include <vector>
 
 namespace bored::storage {
 
@@ -11,7 +15,60 @@ namespace {
 
 struct TransactionState final {
     std::vector<WalRecoveryRecord> records{};
+    std::size_t sequence = 0U;
 };
+
+std::optional<std::uint32_t> owner_page_id(const WalRecordView& view)
+{
+    const auto type = static_cast<WalRecordType>(view.header.type);
+    auto payload = std::span<const std::byte>(view.payload.data(), view.payload.size());
+
+    switch (type) {
+    case WalRecordType::TupleInsert:
+    case WalRecordType::TupleDelete: {
+        auto meta = decode_wal_tuple_meta(payload);
+        if (!meta || meta->page_id == 0U || meta->page_id != view.header.page_id) {
+            return view.header.page_id;
+        }
+        return meta->page_id;
+    }
+    case WalRecordType::TupleUpdate: {
+        auto meta = decode_wal_tuple_update_meta(payload);
+        if (!meta || meta->base.page_id == 0U || meta->base.page_id != view.header.page_id) {
+            return view.header.page_id;
+        }
+        return meta->base.page_id;
+    }
+    case WalRecordType::TupleBeforeImage: {
+        auto before_view = decode_wal_tuple_before_image(payload);
+        if (!before_view || before_view->meta.page_id == 0U || before_view->meta.page_id != view.header.page_id) {
+            return view.header.page_id;
+        }
+        return before_view->meta.page_id;
+    }
+    case WalRecordType::TupleOverflowChunk: {
+        auto meta = decode_wal_overflow_chunk_meta(payload);
+        if (!meta || meta->owner.page_id == 0U) {
+            return view.header.page_id;
+        }
+        return meta->owner.page_id;
+    }
+    case WalRecordType::TupleOverflowTruncate: {
+        auto meta = decode_wal_overflow_truncate_meta(payload);
+        if (!meta || meta->owner.page_id == 0U) {
+            return view.header.page_id;
+        }
+        return meta->owner.page_id;
+    }
+    case WalRecordType::PageCompaction:
+    case WalRecordType::Commit:
+    case WalRecordType::Abort:
+    case WalRecordType::Checkpoint:
+        return view.header.page_id;
+    default:
+        return view.header.page_id;
+    }
+}
 
 WalRecoveryRecord make_recovery_record(const WalRecordView& view)
 {
@@ -43,6 +100,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
 {
     plan.redo.clear();
     plan.undo.clear();
+    plan.undo_spans.clear();
     plan.truncated_tail = false;
     plan.truncated_segment_id = 0U;
     plan.truncated_lsn = 0U;
@@ -53,6 +111,29 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
     }
 
     std::unordered_map<std::uint32_t, TransactionState> transactions;
+    std::size_t transaction_sequence = 0U;
+
+    auto ensure_transaction = [&](std::uint32_t txn_id) -> TransactionState& {
+        auto [it, inserted] = transactions.try_emplace(txn_id);
+        if (inserted) {
+            it->second.sequence = transaction_sequence++;
+        }
+        return it->second;
+    };
+
+    auto append_undo_span = [&](std::uint32_t txn_id, const std::vector<WalRecoveryRecord>& records) {
+        if (records.empty()) {
+            return;
+        }
+        const auto start = plan.undo.size();
+        for (auto rit = records.rbegin(); rit != records.rend(); ++rit) {
+            plan.undo.push_back(*rit);
+        }
+        const auto count = plan.undo.size() - start;
+        if (count != 0U) {
+            plan.undo_spans.push_back(WalUndoSpan{txn_id, start, count});
+        }
+    };
 
     for (const auto& segment : segments) {
         std::vector<WalRecordView> records;
@@ -69,7 +150,11 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
 
         for (const auto& record_view : records) {
             const auto type = static_cast<WalRecordType>(record_view.header.type);
-            const auto txn_id = record_view.header.page_id;
+            auto owner = owner_page_id(record_view);
+            if (!owner) {
+                return std::make_error_code(std::errc::invalid_argument);
+            }
+            const auto txn_id = *owner;
 
             switch (type) {
             case WalRecordType::Commit: {
@@ -90,10 +175,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
             case WalRecordType::Abort: {
                 auto it = transactions.find(txn_id);
                 if (it != transactions.end()) {
-                    auto& prepared = it->second.records;
-                    for (auto rit = prepared.rbegin(); rit != prepared.rend(); ++rit) {
-                        plan.undo.push_back(*rit);
-                    }
+                    append_undo_span(txn_id, it->second.records);
                     transactions.erase(it);
                 }
                 break;
@@ -103,7 +185,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 break;
             }
             default: {
-                auto& txn = transactions[txn_id];  // Treat page_id as provisional transaction identifier.
+                auto& txn = ensure_transaction(txn_id);
                 txn.records.push_back(make_recovery_record(record_view));
                 break;
             }
@@ -115,11 +197,18 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
         }
     }
 
+    std::vector<std::pair<std::uint32_t, TransactionState*>> survivors;
+    survivors.reserve(transactions.size());
     for (auto& [txn_id, state] : transactions) {
-        (void)txn_id;
-        for (auto rit = state.records.rbegin(); rit != state.records.rend(); ++rit) {
-            plan.undo.push_back(*rit);
-        }
+        survivors.emplace_back(txn_id, &state);
+    }
+
+    std::sort(survivors.begin(), survivors.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.second->sequence < rhs.second->sequence;
+    });
+
+    for (const auto& [txn_id, state] : survivors) {
+        append_undo_span(txn_id, state->records);
     }
 
     return {};

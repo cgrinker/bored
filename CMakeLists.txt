@@ -22,6 +22,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/wal_writer.cpp
     src/storage/wal_reader.cpp
     src/storage/wal_recovery.cpp
+    src/storage/wal_undo_walker.cpp
     src/storage/wal_replayer.cpp
     src/storage/wal_retention.cpp
     src/storage/wal_telemetry_registry.cpp
