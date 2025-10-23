@@ -5,21 +5,18 @@
 #include "bored/storage/wal_writer.hpp"
 
 #include <filesystem>
-#include <functional>
 #include <memory>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 namespace bored::storage {
 
 class PageManager final {
 public:
-    using OverflowPageReader = std::function<bool(std::uint32_t page_id, std::span<std::byte> buffer)>;
-
     struct Config final {
         std::uint32_t overflow_page_start = 1U << 20;  // default high range to reduce collisions
         std::size_t overflow_inline_prefix = 256U;
-        OverflowPageReader overflow_page_reader{};
     };
 
     struct TupleInsertResult final {
@@ -86,6 +83,11 @@ private:
     std::shared_ptr<WalWriter> wal_writer_{};
     Config config_{};
     mutable std::uint32_t next_overflow_page_id_ = 0U;
+    struct OverflowChunkCacheEntry final {
+        WalOverflowChunkMeta meta{};
+        std::vector<std::byte> payload{};
+    };
+    mutable std::unordered_map<std::uint32_t, OverflowChunkCacheEntry> overflow_cache_{};
 
     [[nodiscard]] std::uint32_t allocate_overflow_page_id() const;
     [[nodiscard]] std::error_code build_overflow_truncate_payload(const WalTupleMeta& owner_meta,

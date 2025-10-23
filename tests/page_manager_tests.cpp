@@ -31,6 +31,8 @@ using bored::storage::WalRecordType;
 using bored::storage::WalSegmentHeader;
 using bored::storage::WalTupleMeta;
 using bored::storage::WalTupleUpdateMeta;
+using bored::storage::WalOverflowTruncateMeta;
+using bored::storage::WalOverflowChunkMeta;
 
 namespace {
 
@@ -288,6 +290,90 @@ TEST_CASE("PageManager update tuple logs WAL record")
     auto payload_bytes = bored::storage::wal_tuple_update_payload(payload, *meta);
     REQUIRE(payload_bytes.size() == updated.size());
     REQUIRE(std::equal(payload_bytes.begin(), payload_bytes.end(), updated.begin(), updated.end()));
+
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager delete overflow tuple logs truncate record")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_overflow_delete_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 2025U));
+
+    std::vector<std::byte> big_payload(9000U);
+    for (std::size_t index = 0; index < big_payload.size(); ++index) {
+        big_payload[index] = static_cast<std::byte>(index & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, big_payload, 4242U, insert_result));
+    REQUIRE(insert_result.used_overflow);
+    REQUIRE_FALSE(insert_result.overflow_page_ids.empty());
+
+    PageManager::TupleDeleteResult delete_result{};
+    REQUIRE_FALSE(manager.delete_tuple(page_span, insert_result.slot.index, 4242U, delete_result));
+
+    REQUIRE_FALSE(manager.flush_wal());
+
+    std::vector<int> record_types;
+    bool truncate_found = false;
+
+    for (std::uint32_t segment_id = 0U;; ++segment_id) {
+        auto segment_path = wal_writer->segment_path(segment_id);
+        if (!std::filesystem::exists(segment_path)) {
+            break;
+        }
+
+        auto bytes = read_file_bytes(segment_path);
+        auto offset = bored::storage::kWalBlockSize;
+        while (offset + sizeof(WalRecordHeader) <= bytes.size()) {
+            const auto* header = reinterpret_cast<const WalRecordHeader*>(bytes.data() + offset);
+            if (header->total_length == 0U) {
+                break;
+            }
+
+            const auto type = static_cast<WalRecordType>(header->type);
+            record_types.push_back(static_cast<int>(type));
+
+            if (!truncate_found && type == WalRecordType::TupleOverflowTruncate) {
+                auto truncate_payload = wal_payload_view(*header, reinterpret_cast<const std::byte*>(header));
+                auto truncate_meta = bored::storage::decode_wal_overflow_truncate_meta(truncate_payload);
+                REQUIRE(truncate_meta);
+                CHECK(truncate_meta->owner.page_id == 2025U);
+                CHECK(truncate_meta->released_page_count == insert_result.overflow_page_ids.size());
+
+                auto chunk_views = bored::storage::decode_wal_overflow_truncate_chunks(truncate_payload, *truncate_meta);
+                REQUIRE(chunk_views);
+                REQUIRE(chunk_views->size() == insert_result.overflow_page_ids.size());
+                for (std::size_t index = 0; index < chunk_views->size(); ++index) {
+                    const auto& view = chunk_views->at(index);
+                    REQUIRE(view.payload.size() == view.meta.chunk_length);
+                    REQUIRE(view.meta.overflow_page_id == insert_result.overflow_page_ids[index]);
+                }
+
+                truncate_found = true;
+            }
+
+            offset += align_up_to_block(header->total_length);
+        }
+    }
+
+    CAPTURE(record_types);
+    REQUIRE(truncate_found);
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();

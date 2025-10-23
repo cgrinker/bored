@@ -74,43 +74,25 @@ std::error_code PageManager::build_overflow_truncate_payload(const WalTupleMeta&
         return {};
     }
 
-    if (!config_.overflow_page_reader) {
-        return std::make_error_code(std::errc::function_not_supported);
-    }
-
     chunk_metas.reserve(header.chunk_count);
     chunk_payloads.reserve(header.chunk_count);
 
     std::uint32_t current_page = header.first_overflow_page_id;
 
     for (std::uint16_t index = 0; index < header.chunk_count; ++index) {
-        if (current_page == 0U) {
+        auto cache_it = overflow_cache_.find(current_page);
+        if (cache_it == overflow_cache_.end()) {
+            return std::make_error_code(std::errc::no_such_file_or_directory);
+        }
+
+        const auto& entry = cache_it->second;
+        if (entry.meta.overflow_page_id != current_page) {
             return std::make_error_code(std::errc::io_error);
         }
 
-        std::array<std::byte, kPageSize> page_buffer{};
-        auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
-        if (!config_.overflow_page_reader(current_page, page_span)) {
-            return std::make_error_code(std::errc::io_error);
-        }
-
-        auto chunk_meta = read_overflow_chunk_meta(as_const_span(page_span));
-        if (!chunk_meta) {
-            return std::make_error_code(std::errc::io_error);
-        }
-
-        if (chunk_meta->overflow_page_id != current_page) {
-            return std::make_error_code(std::errc::io_error);
-        }
-
-        chunk_metas.push_back(*chunk_meta);
-        auto payload_view = overflow_chunk_payload(as_const_span(page_span), *chunk_meta);
-        if (payload_view.size() != chunk_meta->chunk_length) {
-            return std::make_error_code(std::errc::io_error);
-        }
-
-        chunk_payloads.emplace_back(payload_view.begin(), payload_view.end());
-        current_page = chunk_meta->next_overflow_page_id;
+        chunk_metas.push_back(entry.meta);
+        chunk_payloads.push_back(entry.payload);
+        current_page = entry.meta.next_overflow_page_id;
     }
 
     return {};
@@ -301,6 +283,9 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
             return std::make_error_code(std::errc::invalid_argument);
         }
 
+        overflow_cache_[chunk_meta.overflow_page_id] = OverflowChunkCacheEntry{chunk_meta,
+                                                                               std::vector<std::byte>(chunk_payload.begin(), chunk_payload.end())};
+
         WalRecordDescriptor chunk_descriptor{};
         chunk_descriptor.type = WalRecordType::TupleOverflowChunk;
         chunk_descriptor.page_id = chunk_meta.overflow_page_id;
@@ -408,6 +393,10 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
             WalAppendResult truncate_result{};
             if (auto truncate_ec = wal_writer_->append_record(truncate_descriptor, truncate_result); truncate_ec) {
                 return truncate_ec;
+            }
+
+            for (const auto& meta_entry : truncate_chunk_metas) {
+                overflow_cache_.erase(meta_entry.overflow_page_id);
             }
         }
     }
@@ -536,6 +525,10 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
             WalAppendResult truncate_result{};
             if (auto truncate_ec = wal_writer_->append_record(truncate_descriptor, truncate_result); truncate_ec) {
                 return truncate_ec;
+            }
+
+            for (const auto& meta_entry : truncate_chunk_metas) {
+                overflow_cache_.erase(meta_entry.overflow_page_id);
             }
         }
     }
