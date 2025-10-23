@@ -3,6 +3,7 @@
 #include "bored/storage/free_space_map.hpp"
 #include "bored/storage/page_operations.hpp"
 #include "bored/storage/wal_payloads.hpp"
+#include "bored/storage/wal_undo_walker.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -481,12 +482,37 @@ std::error_code WalReplayer::apply_redo(const WalRecoveryPlan& plan)
 
 std::error_code WalReplayer::apply_undo(const WalRecoveryPlan& plan)
 {
-    for (const auto& record : plan.undo) {
-        last_undo_type_ = static_cast<WalRecordType>(record.header.type);
-        if (auto ec = apply_undo_record(record); ec) {
-            return ec;
+    if (plan.undo_spans.empty()) {
+        for (const auto& record : plan.undo) {
+            last_undo_type_ = static_cast<WalRecordType>(record.header.type);
+            if (auto ec = apply_undo_record(record); ec) {
+                return ec;
+            }
+        }
+        last_undo_type_.reset();
+        return {};
+    }
+
+    WalUndoWalker walker{plan};
+
+    while (auto work_item = walker.next()) {
+        if (work_item->owner_page_id != 0U) {
+            (void)ensure_page(context_, work_item->owner_page_id, PageType::Table);
+        }
+        for (auto overflow_page_id : work_item->overflow_page_ids) {
+            if (overflow_page_id != 0U) {
+                (void)ensure_page(context_, overflow_page_id, PageType::Overflow);
+            }
+        }
+
+        for (const auto& record : work_item->records) {
+            last_undo_type_ = static_cast<WalRecordType>(record.header.type);
+            if (auto ec = apply_undo_record(record); ec) {
+                return ec;
+            }
         }
     }
+
     last_undo_type_.reset();
     return {};
 }
