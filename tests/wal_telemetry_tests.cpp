@@ -22,6 +22,14 @@ WalWriterTelemetrySnapshot make_snapshot(std::uint64_t append_calls, std::uint64
     snapshot.max_flush_bytes = flush_calls * 256U;
     snapshot.total_flush_duration_ns = flush_calls * 2000U;
     snapshot.last_flush_duration_ns = flush_calls * 200U;
+    snapshot.retention_invocations = flush_calls;
+    snapshot.retention_failures = 0U;
+    snapshot.retention_scanned_segments = flush_calls * 2U;
+    snapshot.retention_candidate_segments = flush_calls;
+    snapshot.retention_pruned_segments = flush_calls;
+    snapshot.retention_archived_segments = flush_calls / 2U;
+    snapshot.retention_total_duration_ns = flush_calls * 500U;
+    snapshot.retention_last_duration_ns = flush_calls * 50U;
     return snapshot;
 }
 
@@ -48,6 +56,14 @@ TEST_CASE("WalTelemetryRegistry aggregates registered samplers")
     REQUIRE(total.total_flush_duration_ns == (2U + 4U) * 2000U);
     REQUIRE(total.last_append_duration_ns == 5U * 100U);
     REQUIRE(total.last_flush_duration_ns == 4U * 200U);
+    REQUIRE(total.retention_invocations == 6U);
+    REQUIRE(total.retention_failures == 0U);
+    REQUIRE(total.retention_scanned_segments == (2U + 4U) * 2U);
+    REQUIRE(total.retention_candidate_segments == 6U);
+    REQUIRE(total.retention_pruned_segments == 6U);
+    REQUIRE(total.retention_archived_segments == (2U + 4U) / 2U);
+    REQUIRE(total.retention_total_duration_ns == (2U + 4U) * 500U);
+    REQUIRE(total.retention_last_duration_ns == 4U * 50U);
 }
 
 TEST_CASE("WalTelemetryRegistry visit enumerates snapshots")
@@ -79,9 +95,11 @@ TEST_CASE("WalTelemetryRegistry visit enumerates snapshots")
     for (const auto& snapshot : snapshots) {
         total.append_calls += snapshot.append_calls;
         total.flush_calls += snapshot.flush_calls;
+        total.retention_invocations += snapshot.retention_invocations;
     }
     REQUIRE(total.append_calls == 3U);
     REQUIRE(total.flush_calls == 4U);
+    REQUIRE(total.retention_invocations == 4U);
 
     registry.unregister_sampler("writer_b");
     auto aggregated = registry.aggregate();

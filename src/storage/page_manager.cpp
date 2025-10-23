@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <chrono>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -90,6 +91,26 @@ static_assert(kOverflowChunkCapacity > 0U, "Overflow chunk capacity must be posi
 
 }  // namespace
 
+PageManager::OperationScope::OperationScope(const PageManager* manager, OperationKind kind) noexcept
+    : manager_{manager}
+    , kind_{kind}
+    , start_{std::chrono::steady_clock::now()}
+{
+}
+
+PageManager::OperationScope::~OperationScope()
+{
+    if (manager_ != nullptr) {
+        const auto duration = std::chrono::steady_clock::now() - start_;
+        manager_->record_operation(kind_, std::chrono::duration_cast<std::chrono::nanoseconds>(duration), success_);
+    }
+}
+
+void PageManager::OperationScope::set_success(bool value) noexcept
+{
+    success_ = value;
+}
+
 PageManager::PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer, Config config)
     : fsm_{fsm}
     , wal_writer_{std::move(wal_writer)}
@@ -99,6 +120,21 @@ PageManager::PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_write
     if (!wal_writer_) {
         throw std::invalid_argument{"PageManager requires a WalWriter instance"};
     }
+
+    telemetry_registry_ = config_.telemetry_registry;
+    telemetry_identifier_ = config_.telemetry_identifier;
+    if (telemetry_registry_ && !telemetry_identifier_.empty()) {
+        telemetry_registry_->register_page_manager(telemetry_identifier_, [this] {
+            return this->telemetry_snapshot();
+        });
+    }
+}
+
+PageManager::~PageManager()
+{
+    if (telemetry_registry_ && !telemetry_identifier_.empty()) {
+        telemetry_registry_->unregister_page_manager(telemetry_identifier_);
+    }
 }
 
 std::error_code PageManager::initialize_page(std::span<std::byte> page,
@@ -106,7 +142,12 @@ std::error_code PageManager::initialize_page(std::span<std::byte> page,
                                              std::uint32_t page_id,
                                              std::uint64_t base_lsn) const
 {
+    OperationScope telemetry_scope{this, OperationKind::Initialize};
+
+    const auto latch_start = std::chrono::steady_clock::now();
     PageLatchGuard latch_guard{&config_.latch_callbacks, page_id, PageLatchMode::Exclusive};
+    const auto latch_end = std::chrono::steady_clock::now();
+    record_latch(PageLatchMode::Exclusive, std::chrono::duration_cast<std::chrono::nanoseconds>(latch_end - latch_start), !latch_guard.status());
     if (auto latch_ec = latch_guard.status(); latch_ec) {
         return latch_ec;
     }
@@ -114,6 +155,7 @@ std::error_code PageManager::initialize_page(std::span<std::byte> page,
     if (!bored::storage::initialize_page(page, type, page_id, base_lsn, fsm_)) {
         return std::make_error_code(std::errc::invalid_argument);
     }
+    telemetry_scope.set_success();
     return {};
 }
 
@@ -174,6 +216,8 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
                                           std::uint64_t row_id,
                                           TupleInsertResult& out_result) const
 {
+    OperationScope telemetry_scope{this, OperationKind::Insert};
+
     if (payload.empty()) {
         return std::make_error_code(std::errc::invalid_argument);
     }
@@ -188,7 +232,10 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
         return std::make_error_code(std::errc::invalid_argument);
     }
 
+    const auto latch_start = std::chrono::steady_clock::now();
     PageLatchGuard latch_guard{&config_.latch_callbacks, header.page_id, PageLatchMode::Exclusive};
+    const auto latch_end = std::chrono::steady_clock::now();
+    record_latch(PageLatchMode::Exclusive, std::chrono::duration_cast<std::chrono::nanoseconds>(latch_end - latch_start), !latch_guard.status());
     if (auto latch_ec = latch_guard.status(); latch_ec) {
         return latch_ec;
     }
@@ -228,6 +275,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
         out_result.logical_length = payload.size();
         out_result.inline_length = payload.size();
         out_result.overflow_page_ids.clear();
+        telemetry_scope.set_success();
         return {};
     }
 
@@ -391,6 +439,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     out_result.logical_length = payload.size();
     out_result.inline_length = inline_length;
     out_result.overflow_page_ids = overflow_page_ids;
+    telemetry_scope.set_success();
     return {};
 }
 
@@ -399,13 +448,18 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
                                           std::uint64_t row_id,
                                           TupleDeleteResult& out_result) const
 {
+    OperationScope telemetry_scope{this, OperationKind::Delete};
+
     const auto page_const = as_const_span(page);
     const auto& header = page_header(page_const);
     if (!is_valid(header)) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 
+    const auto latch_start = std::chrono::steady_clock::now();
     PageLatchGuard latch_guard{&config_.latch_callbacks, header.page_id, PageLatchMode::Exclusive};
+    const auto latch_end = std::chrono::steady_clock::now();
+    record_latch(PageLatchMode::Exclusive, std::chrono::duration_cast<std::chrono::nanoseconds>(latch_end - latch_start), !latch_guard.status());
     if (auto latch_ec = latch_guard.status(); latch_ec) {
         return latch_ec;
     }
@@ -520,6 +574,7 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
     }
 
     out_result.wal = wal_result;
+    telemetry_scope.set_success();
     return {};
 }
 
@@ -529,6 +584,8 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
                                           std::uint64_t row_id,
                                           TupleUpdateResult& out_result) const
 {
+    OperationScope telemetry_scope{this, OperationKind::Update};
+
     if (new_payload.empty()) {
         return std::make_error_code(std::errc::invalid_argument);
     }
@@ -539,7 +596,10 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
         return std::make_error_code(std::errc::invalid_argument);
     }
 
+    const auto latch_start = std::chrono::steady_clock::now();
     PageLatchGuard latch_guard{&config_.latch_callbacks, header.page_id, PageLatchMode::Exclusive};
+    const auto latch_end = std::chrono::steady_clock::now();
+    record_latch(PageLatchMode::Exclusive, std::chrono::duration_cast<std::chrono::nanoseconds>(latch_end - latch_start), !latch_guard.status());
     if (auto latch_ec = latch_guard.status(); latch_ec) {
         return latch_ec;
     }
@@ -688,12 +748,15 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     out_result.slot = new_slot;
     out_result.wal = wal_result;
     out_result.old_length = old_length;
+    telemetry_scope.set_success();
     return {};
 }
 
 std::error_code PageManager::compact_page(std::span<std::byte> page,
                                           PageCompactionResult& out_result) const
 {
+    OperationScope telemetry_scope{this, OperationKind::Compact};
+
     out_result = {};
 
     const auto page_const = as_const_span(page);
@@ -702,7 +765,10 @@ std::error_code PageManager::compact_page(std::span<std::byte> page,
         return std::make_error_code(std::errc::invalid_argument);
     }
 
+    const auto latch_start = std::chrono::steady_clock::now();
     PageLatchGuard latch_guard{&config_.latch_callbacks, header.page_id, PageLatchMode::Exclusive};
+    const auto latch_end = std::chrono::steady_clock::now();
+    record_latch(PageLatchMode::Exclusive, std::chrono::duration_cast<std::chrono::nanoseconds>(latch_end - latch_start), !latch_guard.status());
     if (auto latch_ec = latch_guard.status(); latch_ec) {
         return latch_ec;
     }
@@ -743,6 +809,7 @@ std::error_code PageManager::compact_page(std::span<std::byte> page,
 
     if (!needs_compaction) {
         out_result.performed = false;
+        telemetry_scope.set_success();
         return {};
     }
 
@@ -784,7 +851,74 @@ std::error_code PageManager::compact_page(std::span<std::byte> page,
         }
     }
 
+    telemetry_scope.set_success();
     return {};
+}
+
+void PageManager::record_latch(PageLatchMode mode,
+                               std::chrono::nanoseconds wait,
+                               bool success) const
+{
+    if (!telemetry_registry_) {
+        return;
+    }
+
+    const auto wait_ns = wait.count() > 0 ? static_cast<std::uint64_t>(wait.count()) : 0ULL;
+
+    std::lock_guard guard{telemetry_mutex_};
+    auto& latch_metrics = mode == PageLatchMode::Shared ? telemetry_.shared_latch
+                                                        : telemetry_.exclusive_latch;
+    latch_metrics.attempts += 1U;
+    latch_metrics.total_wait_ns += wait_ns;
+    latch_metrics.last_wait_ns = wait_ns;
+    if (!success) {
+        latch_metrics.failures += 1U;
+    }
+}
+
+void PageManager::record_operation(OperationKind kind,
+                                   std::chrono::nanoseconds duration,
+                                   bool success) const
+{
+    if (!telemetry_registry_) {
+        return;
+    }
+
+    const auto duration_ns = duration.count() > 0 ? static_cast<std::uint64_t>(duration.count()) : 0ULL;
+
+    std::lock_guard guard{telemetry_mutex_};
+    auto& metrics = operation_metrics(kind);
+    metrics.attempts += 1U;
+    metrics.total_duration_ns += duration_ns;
+    metrics.last_duration_ns = duration_ns;
+    if (!success) {
+        metrics.failures += 1U;
+    }
+}
+
+OperationTelemetrySnapshot& PageManager::operation_metrics(OperationKind kind) const
+{
+    switch (kind) {
+        case OperationKind::Initialize:
+            return telemetry_.initialize;
+        case OperationKind::Insert:
+            return telemetry_.insert;
+        case OperationKind::Delete:
+            return telemetry_.remove;
+        case OperationKind::Update:
+            return telemetry_.update;
+        case OperationKind::Compact:
+            return telemetry_.compact;
+    }
+
+    // Defensive fallback to keep compilers happy; compact chosen arbitrarily.
+    return telemetry_.compact;
+}
+
+PageManagerTelemetrySnapshot PageManager::telemetry_snapshot() const
+{
+    std::lock_guard guard{telemetry_mutex_};
+    return telemetry_;
 }
 
 std::error_code PageManager::flush_wal() const

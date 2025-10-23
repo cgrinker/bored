@@ -1,0 +1,105 @@
+#pragma once
+
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+namespace bored::storage {
+
+struct OperationTelemetrySnapshot final {
+    std::uint64_t attempts = 0U;
+    std::uint64_t failures = 0U;
+    std::uint64_t total_duration_ns = 0U;
+    std::uint64_t last_duration_ns = 0U;
+};
+
+struct LatchTelemetrySnapshot final {
+    std::uint64_t attempts = 0U;
+    std::uint64_t failures = 0U;
+    std::uint64_t total_wait_ns = 0U;
+    std::uint64_t last_wait_ns = 0U;
+};
+
+struct PageManagerTelemetrySnapshot final {
+    OperationTelemetrySnapshot initialize{};
+    OperationTelemetrySnapshot insert{};
+    OperationTelemetrySnapshot remove{};
+    OperationTelemetrySnapshot update{};
+    OperationTelemetrySnapshot compact{};
+    LatchTelemetrySnapshot shared_latch{};
+    LatchTelemetrySnapshot exclusive_latch{};
+};
+
+struct CheckpointTelemetrySnapshot final {
+    std::uint64_t invocations = 0U;
+    std::uint64_t forced_requests = 0U;
+    std::uint64_t skipped_runs = 0U;
+    std::uint64_t emitted_checkpoints = 0U;
+    std::uint64_t emit_failures = 0U;
+    std::uint64_t flush_failures = 0U;
+    std::uint64_t retention_invocations = 0U;
+    std::uint64_t retention_failures = 0U;
+    std::uint64_t trigger_force = 0U;
+    std::uint64_t trigger_first = 0U;
+    std::uint64_t trigger_dirty = 0U;
+    std::uint64_t trigger_active = 0U;
+    std::uint64_t trigger_interval = 0U;
+    std::uint64_t trigger_lsn_gap = 0U;
+    std::uint64_t total_emit_duration_ns = 0U;
+    std::uint64_t last_emit_duration_ns = 0U;
+    std::uint64_t total_flush_duration_ns = 0U;
+    std::uint64_t last_flush_duration_ns = 0U;
+    std::uint64_t total_retention_duration_ns = 0U;
+    std::uint64_t last_retention_duration_ns = 0U;
+    std::uint64_t last_checkpoint_id = 0U;
+    std::uint64_t last_checkpoint_lsn = 0U;
+    std::uint64_t last_checkpoint_timestamp_ns = 0U;
+};
+
+struct WalRetentionTelemetrySnapshot final {
+    std::uint64_t invocations = 0U;
+    std::uint64_t failures = 0U;
+    std::uint64_t scanned_segments = 0U;
+    std::uint64_t candidate_segments = 0U;
+    std::uint64_t pruned_segments = 0U;
+    std::uint64_t archived_segments = 0U;
+    std::uint64_t total_duration_ns = 0U;
+    std::uint64_t last_duration_ns = 0U;
+};
+
+class StorageTelemetryRegistry final {
+public:
+    using PageManagerSampler = std::function<PageManagerTelemetrySnapshot()>;
+    using PageManagerVisitor = std::function<void(const std::string&, const PageManagerTelemetrySnapshot&)>;
+
+    using CheckpointSampler = std::function<CheckpointTelemetrySnapshot()>;
+    using CheckpointVisitor = std::function<void(const std::string&, const CheckpointTelemetrySnapshot&)>;
+
+    using WalRetentionSampler = std::function<WalRetentionTelemetrySnapshot()>;
+    using WalRetentionVisitor = std::function<void(const std::string&, const WalRetentionTelemetrySnapshot&)>;
+
+    void register_page_manager(std::string identifier, PageManagerSampler sampler);
+    void unregister_page_manager(const std::string& identifier);
+    PageManagerTelemetrySnapshot aggregate_page_managers() const;
+    void visit_page_managers(const PageManagerVisitor& visitor) const;
+
+    void register_checkpoint_scheduler(std::string identifier, CheckpointSampler sampler);
+    void unregister_checkpoint_scheduler(const std::string& identifier);
+    CheckpointTelemetrySnapshot aggregate_checkpoint_schedulers() const;
+    void visit_checkpoint_schedulers(const CheckpointVisitor& visitor) const;
+
+    void register_wal_retention(std::string identifier, WalRetentionSampler sampler);
+    void unregister_wal_retention(const std::string& identifier);
+    WalRetentionTelemetrySnapshot aggregate_wal_retention() const;
+    void visit_wal_retention(const WalRetentionVisitor& visitor) const;
+
+private:
+    mutable std::mutex mutex_{};
+    std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
+    std::unordered_map<std::string, CheckpointSampler> checkpoint_samplers_{};
+    std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
+};
+
+}  // namespace bored::storage

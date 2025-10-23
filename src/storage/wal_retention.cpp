@@ -3,6 +3,7 @@
 #include "bored/storage/wal_reader.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 #include <utility>
 
 namespace bored::storage {
@@ -62,8 +63,11 @@ bool WalRetentionManager::should_prune_by_time(const WalRetentionConfig& config,
     return age_hours >= config.retention_hours;
 }
 
-std::error_code WalRetentionManager::prune_segment(const WalRetentionConfig& config, const WalSegmentView& segment) const
+std::error_code WalRetentionManager::prune_segment(const WalRetentionConfig& config,
+                                                   const WalSegmentView& segment,
+                                                   bool& archived) const
 {
+    archived = false;
     if (config.archive_path.empty()) {
         std::error_code ec;
         std::filesystem::remove(segment.path, ec);
@@ -80,13 +84,22 @@ std::error_code WalRetentionManager::prune_segment(const WalRetentionConfig& con
 
     rename_ec.clear();
     std::filesystem::rename(segment.path, destination, rename_ec);
+    if (!rename_ec) {
+        archived = true;
+    }
     return rename_ec;
 }
 
-std::error_code WalRetentionManager::apply(const WalRetentionConfig& config, std::uint64_t current_segment_id) const
+std::error_code WalRetentionManager::apply(const WalRetentionConfig& config,
+                                           std::uint64_t current_segment_id,
+                                           WalRetentionStats* stats) const
 {
     if (!has_retention_policy(config)) {
         return {};
+    }
+
+    if (stats) {
+        *stats = WalRetentionStats{};
     }
 
     SegmentList segments;
@@ -99,6 +112,10 @@ std::error_code WalRetentionManager::apply(const WalRetentionConfig& config, std
 
     if (segments.empty()) {
         return {};
+    }
+
+    if (stats) {
+        stats->scanned_segments = static_cast<std::uint64_t>(segments.size());
     }
 
     std::vector<WalSegmentView> candidates;
@@ -115,12 +132,35 @@ std::error_code WalRetentionManager::apply(const WalRetentionConfig& config, std
         return {};
     }
 
+    if (stats) {
+        stats->candidate_segments = static_cast<std::uint64_t>(candidates.size());
+    }
+
+    std::unordered_set<std::uint64_t> pruned_ids;
+
+    const auto prune_with_stats = [&](const WalSegmentView& segment) -> std::error_code {
+        if (!pruned_ids.insert(segment.header.segment_id).second) {
+            return {};
+        }
+        bool archived = false;
+        if (auto ec = prune_segment(config, segment, archived); ec) {
+            return ec;
+        }
+        if (stats) {
+            stats->pruned_segments += 1U;
+            if (archived) {
+                stats->archived_segments += 1U;
+            }
+        }
+        return {};
+    };
+
     const auto retention_count = config.retention_segments;
     if (retention_count > 0U && candidates.size() > retention_count) {
         std::size_t keep_start = candidates.size() - retention_count;
         std::vector<WalSegmentView> prefix(candidates.begin(), candidates.begin() + keep_start);
         for (const auto& segment : prefix) {
-            if (auto ec = prune_segment(config, segment); ec) {
+            if (auto ec = prune_with_stats(segment); ec) {
                 return ec;
             }
         }
@@ -128,7 +168,7 @@ std::error_code WalRetentionManager::apply(const WalRetentionConfig& config, std
 
     for (const auto& segment : candidates) {
         if (should_prune_by_time(config, segment.path)) {
-            if (auto ec = prune_segment(config, segment); ec) {
+            if (auto ec = prune_with_stats(segment); ec) {
                 return ec;
             }
         }

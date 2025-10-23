@@ -29,6 +29,14 @@ struct WalWriterTelemetrySnapshot final {
     std::uint64_t max_flush_bytes = 0U;
     std::uint64_t total_flush_duration_ns = 0U;
     std::uint64_t last_flush_duration_ns = 0U;
+    std::uint64_t retention_invocations = 0U;
+    std::uint64_t retention_failures = 0U;
+    std::uint64_t retention_scanned_segments = 0U;
+    std::uint64_t retention_candidate_segments = 0U;
+    std::uint64_t retention_pruned_segments = 0U;
+    std::uint64_t retention_archived_segments = 0U;
+    std::uint64_t retention_total_duration_ns = 0U;
+    std::uint64_t retention_last_duration_ns = 0U;
 };
 
 struct WalWriterConfig final {

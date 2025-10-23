@@ -19,6 +19,14 @@ WalWriterTelemetrySnapshot& accumulate_snapshot(WalWriterTelemetrySnapshot& targ
     target.max_flush_bytes = std::max(target.max_flush_bytes, source.max_flush_bytes);
     target.total_flush_duration_ns += source.total_flush_duration_ns;
     target.last_flush_duration_ns = std::max(target.last_flush_duration_ns, source.last_flush_duration_ns);
+    target.retention_invocations += source.retention_invocations;
+    target.retention_failures += source.retention_failures;
+    target.retention_scanned_segments += source.retention_scanned_segments;
+    target.retention_candidate_segments += source.retention_candidate_segments;
+    target.retention_pruned_segments += source.retention_pruned_segments;
+    target.retention_archived_segments += source.retention_archived_segments;
+    target.retention_total_duration_ns += source.retention_total_duration_ns;
+    target.retention_last_duration_ns = std::max(target.retention_last_duration_ns, source.retention_last_duration_ns);
     return target;
 }
 

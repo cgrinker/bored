@@ -25,6 +25,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/wal_replayer.cpp
     src/storage/wal_retention.cpp
     src/storage/wal_telemetry_registry.cpp
+    src/storage/storage_telemetry_registry.cpp
 )
 
 target_include_directories(${PROJECT_NAME}_lib
@@ -68,6 +69,7 @@ if(BORED_ENABLE_TESTS)
         tests/wal_checkpoint_tests.cpp
         tests/checkpoint_scheduler_tests.cpp
         tests/lock_manager_tests.cpp
+        tests/storage_telemetry_tests.cpp
     )
 
     target_link_libraries(${PROJECT_NAME}_tests

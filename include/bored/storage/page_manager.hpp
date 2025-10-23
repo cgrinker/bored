@@ -2,17 +2,23 @@
 
 #include "bored/storage/page_latch.hpp"
 #include "bored/storage/page_operations.hpp"
+#include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_writer.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <system_error>
 #include <unordered_map>
 #include <vector>
 
 namespace bored::storage {
+
+class OperationScope;
 
 class PageManager final {
 public:
@@ -21,6 +27,8 @@ public:
         std::size_t overflow_inline_prefix = 256U;
         PageLatchCallbacks latch_callbacks{};
         std::function<void(const WalCompactionEntry&)> index_metadata_callback{};
+        StorageTelemetryRegistry* telemetry_registry = nullptr;
+        std::string telemetry_identifier{};
     };
 
     struct TupleInsertResult final {
@@ -53,6 +61,7 @@ public:
     };
 
     PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer, Config config = {});
+    ~PageManager();
 
     PageManager(const PageManager&) = delete;
     PageManager& operator=(const PageManager&) = delete;
@@ -91,7 +100,35 @@ public:
 
     [[nodiscard]] std::shared_ptr<WalWriter> wal_writer() const noexcept;
 
+    [[nodiscard]] PageManagerTelemetrySnapshot telemetry_snapshot() const;
+
 private:
+    enum class OperationKind {
+        Initialize,
+        Insert,
+        Delete,
+        Update,
+        Compact
+    };
+
+    friend class OperationScope;
+
+    class OperationScope final {
+    public:
+        OperationScope(const PageManager* manager, OperationKind kind) noexcept;
+        OperationScope(const OperationScope&) = delete;
+        OperationScope& operator=(const OperationScope&) = delete;
+        ~OperationScope();
+
+        void set_success(bool value = true) noexcept;
+
+    private:
+        const PageManager* manager_ = nullptr;
+        OperationKind kind_{OperationKind::Initialize};
+        std::chrono::steady_clock::time_point start_{};
+        bool success_ = false;
+    };
+
     FreeSpaceMap* fsm_ = nullptr;
     std::shared_ptr<WalWriter> wal_writer_{};
     Config config_{};
@@ -101,6 +138,10 @@ private:
         std::vector<std::byte> payload{};
     };
     mutable std::unordered_map<std::uint32_t, OverflowChunkCacheEntry> overflow_cache_{};
+    StorageTelemetryRegistry* telemetry_registry_ = nullptr;
+    std::string telemetry_identifier_{};
+    mutable PageManagerTelemetrySnapshot telemetry_{};
+    mutable std::mutex telemetry_mutex_{};
 
     [[nodiscard]] std::uint32_t allocate_overflow_page_id() const;
     [[nodiscard]] std::error_code build_overflow_truncate_payload(const WalTupleMeta& owner_meta,
@@ -108,6 +149,9 @@ private:
                                                                   std::vector<WalOverflowChunkMeta>& chunk_metas,
                                                                   std::vector<std::vector<std::byte>>& chunk_payloads,
                                                                   WalOverflowTruncateMeta& truncate_meta) const;
+    void record_latch(PageLatchMode mode, std::chrono::nanoseconds wait, bool success) const;
+    void record_operation(OperationKind kind, std::chrono::nanoseconds duration, bool success) const;
+    [[nodiscard]] OperationTelemetrySnapshot& operation_metrics(OperationKind kind) const;
 };
 
 }  // namespace bored::storage

@@ -3,6 +3,7 @@
 #include "bored/storage/wal_reader.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <system_error>
 #include <vector>
@@ -15,13 +16,22 @@ struct WalRetentionConfig final {
     std::filesystem::path archive_path{};
 };
 
+struct WalRetentionStats final {
+    std::uint64_t scanned_segments = 0U;
+    std::uint64_t candidate_segments = 0U;
+    std::uint64_t pruned_segments = 0U;
+    std::uint64_t archived_segments = 0U;
+};
+
 class WalRetentionManager final {
 public:
     WalRetentionManager(std::filesystem::path wal_directory,
                         std::string file_prefix,
                         std::string file_extension);
 
-    std::error_code apply(const WalRetentionConfig& config, std::uint64_t current_segment_id) const;
+    std::error_code apply(const WalRetentionConfig& config,
+                          std::uint64_t current_segment_id,
+                          WalRetentionStats* stats = nullptr) const;
 
 private:
     using SegmentList = std::vector<WalSegmentView>;
@@ -29,7 +39,9 @@ private:
     std::error_code gather_segments(SegmentList& segments) const;
     std::error_code ensure_archive_directory(const std::filesystem::path& path) const;
     bool should_prune_by_time(const WalRetentionConfig& config, const std::filesystem::path& path) const;
-    std::error_code prune_segment(const WalRetentionConfig& config, const WalSegmentView& segment) const;
+    std::error_code prune_segment(const WalRetentionConfig& config,
+                                  const WalSegmentView& segment,
+                                  bool& archived) const;
 
     std::filesystem::path wal_directory_{};
     std::string file_prefix_{};

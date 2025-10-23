@@ -424,7 +424,28 @@ std::error_code WalWriter::apply_retention()
     if (!retention_manager_) {
         return {};
     }
-    return retention_manager_->apply(config_.retention, current_segment_id_);
+    const auto retention_start = std::chrono::steady_clock::now();
+    WalRetentionStats stats{};
+    auto ec = retention_manager_->apply(config_.retention, current_segment_id_, &stats);
+    const auto retention_end = std::chrono::steady_clock::now();
+    const auto retention_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(retention_end - retention_start).count();
+    const auto duration_ns = static_cast<std::uint64_t>(retention_ns >= 0 ? retention_ns : 0);
+
+    {
+        std::lock_guard guard(telemetry_mutex_);
+        telemetry_.retention_invocations += 1U;
+        telemetry_.retention_scanned_segments += stats.scanned_segments;
+        telemetry_.retention_candidate_segments += stats.candidate_segments;
+        telemetry_.retention_pruned_segments += stats.pruned_segments;
+        telemetry_.retention_archived_segments += stats.archived_segments;
+        telemetry_.retention_total_duration_ns += duration_ns;
+        telemetry_.retention_last_duration_ns = duration_ns;
+        if (ec) {
+            telemetry_.retention_failures += 1U;
+        }
+    }
+
+    return ec;
 }
 
 }  // namespace bored::storage
