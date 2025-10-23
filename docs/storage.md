@@ -5,7 +5,7 @@ This document captures the first pass at the on-disk layout for the experimental
 ### Progress Snapshot (Oct 23, 2025)
 
 - **WAL pipeline 100%**: Writer, reader, recovery planning/replay, telemetry registry, checkpoint scheduler, retention manager, and compaction metadata logging are covered by Catch2 suites.
-- **Storage pages ~97%**: Core page operations, compaction with WAL slot relocation metadata, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, and lock-manager backed latch workflows are live; remaining work focuses on undo semantics for freshly inserted overflow tuples, observability, and benchmarking.
+- **Storage pages ~98%**: Core page operations, compaction with WAL slot relocation metadata, free-space persistence, overflow tuple WAL emission, cached before-image logging for overflow chains, and lock-manager backed latch workflows are live; remaining work targets observability and benchmarking.
 
 ## Page Format
 
@@ -131,7 +131,7 @@ Redo records always run in log order to rebuild page images, while undo records 
 ## Next Steps (Prioritised Backlog)
 
 1. Instrument storage and WAL paths with telemetry for latch wait time, checkpoint cadence, and retention pruning, surfacing the data through diagnostics endpoints.
-2. Finish the undo walkers for long-lived transactions, refine overflow insert before-image handling so aborts do not duplicate tuples, and add crash/restart drills that prove before-image replay across overflow chains.
+2. Finish the undo walkers for long-lived transactions and add crash/restart drills that prove before-image replay across overflow chains.
 3. Benchmark FSM refresh, retention pruning, and overflow replay using representative workloads to establish performance baselines and regression thresholds.
 4. Finalise operator-facing tooling and documentation for retention, checkpoint scheduling, and recovery workflows.
 
@@ -144,7 +144,7 @@ Redo records always run in log order to rebuild page images, while undo records 
 3. **Compaction & Index Metadata Logging** (✅ Oct 23, 2025)
   - `PageManager::compact_page` now emits `PageCompaction` records with relocation metadata and index refresh hints; `WalReplayer` replays and records the events for downstream index maintenance.
 4. **Undo Walkers & Crash Drills** (Following)
-  - Complete undo walker coverage for in-flight transactions, refine overflow insert before-image behaviour during abort, and add WAL-only restart tests that inspect page/header correctness.
+  - Complete undo walker coverage for in-flight transactions and add WAL-only restart tests that inspect page/header correctness.
 5. **Observability & Telemetry** (Following)
   - Capture and publish latch contention, checkpoint latency, and retention activity metrics for operators and regression dashboards.
 6. **Benchmarking & Tooling** (Later)

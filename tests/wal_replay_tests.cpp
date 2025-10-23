@@ -585,7 +585,7 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
-TEST_CASE("WalReplayer undo overflow insert leaves stub behind (current bug)")
+TEST_CASE("WalReplayer undo overflow insert removes stub")
 {
     auto io = make_async_io();
     auto wal_dir = make_temp_dir("bored_wal_replay_overflow_insert_undo_");

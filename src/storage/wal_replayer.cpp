@@ -152,13 +152,19 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
 std::error_code apply_tuple_delete(std::span<std::byte> page,
                                    const WalRecordHeader& header,
                                    const WalTupleMeta& meta,
-                                   FreeSpaceMap* fsm)
+                                   FreeSpaceMap* fsm,
+                                   bool force)
 {
     if (page_header(page).page_id != meta.page_id) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 
-    if (page_already_applied(page, header)) {
+    if (!force && page_already_applied(page, header)) {
+        return {};
+    }
+
+    auto tuple_view = read_tuple(as_const_span(page), meta.slot_index);
+    if (tuple_view.empty()) {
         return {};
     }
 
@@ -508,8 +514,8 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
-        return apply_tuple_delete(page, record.header, *meta, fsm);
+    auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+    return apply_tuple_delete(page, record.header, *meta, fsm, false);
     }
     case WalRecordType::TupleUpdate: {
         auto meta = decode_wal_tuple_update_meta(payload);
@@ -574,16 +580,16 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
-        return apply_tuple_delete(page, record.header, *meta, fsm);
+    auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+    return apply_tuple_delete(page, record.header, *meta, fsm, true);
     }
     case WalRecordType::TupleUpdate: {
         auto meta = decode_wal_tuple_update_meta(payload);
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
-        return apply_tuple_delete(page, record.header, meta->base, fsm);
+    auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+    return apply_tuple_delete(page, record.header, meta->base, fsm, false);
     }
     case WalRecordType::TupleBeforeImage: {
         auto before_view = decode_wal_tuple_before_image(payload);
