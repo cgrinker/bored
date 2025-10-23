@@ -50,6 +50,7 @@ target_link_libraries(${PROJECT_NAME}
 )
 
 option(BORED_ENABLE_TESTS "Build and enable tests" ON)
+option(BORED_ENABLE_BENCHMARKS "Build storage benchmarking harness" ON)
 
 if(BORED_ENABLE_TESTS)
     enable_testing()
@@ -84,4 +85,20 @@ if(BORED_ENABLE_TESTS)
     include(CTest)
     include(Catch)
     catch_discover_tests(${PROJECT_NAME}_tests)
+endif()
+
+if(BORED_ENABLE_BENCHMARKS)
+    add_executable(${PROJECT_NAME}_benchmarks
+        benchmarks/storage_benchmarks.cpp
+    )
+
+    target_link_libraries(${PROJECT_NAME}_benchmarks
+        PRIVATE
+            ${PROJECT_NAME}_lib
+    )
+
+    target_compile_features(${PROJECT_NAME}_benchmarks
+        PUBLIC
+            cxx_std_20
+    )
 endif()
