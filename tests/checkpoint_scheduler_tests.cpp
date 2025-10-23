@@ -64,14 +64,20 @@ TEST_CASE("CheckpointScheduler emits checkpoint when dirty page trigger reached"
 
     std::size_t retention_calls = 0U;
     WalRetentionConfig captured_retention{};
-    std::uint64_t captured_segment = 0U;
+    std::vector<std::uint64_t> captured_segments{};
 
     CheckpointScheduler scheduler{checkpoint_manager,
                                   scheduler_config,
-                                  [&](const WalRetentionConfig& config, std::uint64_t segment_id) -> std::error_code {
+                                  [&](const WalRetentionConfig& config, std::uint64_t segment_id, WalRetentionStats* stats) -> std::error_code {
                                       ++retention_calls;
                                       captured_retention = config;
-                                      captured_segment = segment_id;
+                                      captured_segments.push_back(segment_id);
+                                      if (stats) {
+                                          stats->scanned_segments = 7U;
+                                          stats->candidate_segments = 5U;
+                                          stats->pruned_segments = 3U;
+                                          stats->archived_segments = 1U;
+                                      }
                                       return {};
                                   }};
 
@@ -95,9 +101,32 @@ TEST_CASE("CheckpointScheduler emits checkpoint when dirty page trigger reached"
     REQUIRE(result.has_value());
     REQUIRE(scheduler.last_checkpoint_id() == 1U);
     REQUIRE(scheduler.next_checkpoint_id() == 2U);
-    REQUIRE(retention_calls == 1U);
-    REQUIRE(captured_segment == result->segment_id);
+
+    std::optional<WalAppendResult> second_result;
+    REQUIRE_FALSE(scheduler.maybe_run(now, provider, false, second_result));
+    REQUIRE(second_result.has_value());
+    REQUIRE(scheduler.last_checkpoint_id() == 2U);
+    REQUIRE(scheduler.next_checkpoint_id() == 3U);
+    REQUIRE(retention_calls == 2U);
+    REQUIRE(captured_segments.size() == 2U);
+    REQUIRE(captured_segments.front() == result->segment_id);
+    REQUIRE(captured_segments.back() == second_result->segment_id);
     REQUIRE(captured_retention.retention_segments == scheduler_config.retention.retention_segments);
+
+    const auto checkpoint_metrics = scheduler.telemetry_snapshot();
+    REQUIRE(checkpoint_metrics.invocations == 2U);
+    REQUIRE(checkpoint_metrics.emitted_checkpoints == 2U);
+    REQUIRE(checkpoint_metrics.trigger_first == 1U);
+    REQUIRE(checkpoint_metrics.trigger_dirty == 1U);
+    REQUIRE(checkpoint_metrics.last_checkpoint_id == scheduler.last_checkpoint_id());
+
+    const auto retention_metrics = scheduler.retention_telemetry_snapshot();
+    REQUIRE(retention_metrics.invocations == 2U);
+    REQUIRE(retention_metrics.failures == 0U);
+    REQUIRE(retention_metrics.scanned_segments == 14U);
+    REQUIRE(retention_metrics.candidate_segments == 10U);
+    REQUIRE(retention_metrics.pruned_segments == 6U);
+    REQUIRE(retention_metrics.archived_segments == 2U);
 
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
@@ -159,6 +188,14 @@ TEST_CASE("CheckpointScheduler honors interval and lsn gap triggers")
     REQUIRE_FALSE(scheduler.maybe_run(time_zero, provider, false, lsn_result));
     REQUIRE(lsn_result.has_value());
     REQUIRE(scheduler.last_checkpoint_id() == 2U);
+
+    const auto telemetry = scheduler.telemetry_snapshot();
+    REQUIRE(telemetry.invocations == 3U);
+    REQUIRE(telemetry.emitted_checkpoints == 2U);
+    REQUIRE(telemetry.skipped_runs == 1U);
+    REQUIRE(telemetry.trigger_first == 1U);
+    REQUIRE(telemetry.trigger_lsn_gap == 1U);
+    REQUIRE(telemetry.last_checkpoint_id == scheduler.last_checkpoint_id());
 
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();

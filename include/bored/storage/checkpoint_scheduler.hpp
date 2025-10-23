@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/storage/checkpoint_manager.hpp"
+#include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/wal_retention.hpp"
 
 #include <chrono>
@@ -9,6 +10,8 @@
 #include <memory>
 #include <optional>
 #include <system_error>
+#include <mutex>
+#include <string>
 #include <vector>
 
 namespace bored::storage {
@@ -29,14 +32,18 @@ public:
         std::uint64_t lsn_gap_trigger = 0U;
         bool flush_after_emit = true;
         WalRetentionConfig retention{};
+        StorageTelemetryRegistry* telemetry_registry = nullptr;
+        std::string telemetry_identifier{};
+        std::string retention_telemetry_identifier{};
     };
 
     using SnapshotProvider = std::function<std::error_code(CheckpointSnapshot&)>;
-    using RetentionHook = std::function<std::error_code(const WalRetentionConfig&, std::uint64_t)>;
+    using RetentionHook = std::function<std::error_code(const WalRetentionConfig&, std::uint64_t, WalRetentionStats*)>;
 
     CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager,
                         Config config = {},
                         RetentionHook retention_hook = {});
+    ~CheckpointScheduler();
 
     [[nodiscard]] std::error_code maybe_run(std::chrono::steady_clock::time_point now,
                                             const SnapshotProvider& provider,
@@ -52,18 +59,34 @@ public:
     [[nodiscard]] std::uint64_t next_checkpoint_id() const noexcept;
     [[nodiscard]] std::uint64_t last_checkpoint_id() const noexcept;
     [[nodiscard]] std::uint64_t last_checkpoint_lsn() const noexcept;
+    [[nodiscard]] CheckpointTelemetrySnapshot telemetry_snapshot() const;
+    [[nodiscard]] WalRetentionTelemetrySnapshot retention_telemetry_snapshot() const;
 
 private:
+    enum class TriggerReason {
+        None,
+        Force,
+        First,
+        DirtyPages,
+        ActiveTransactions,
+        Interval,
+        LsnGap
+    };
+
     [[nodiscard]] bool should_run(std::chrono::steady_clock::time_point now,
                                   const CheckpointSnapshot& snapshot,
                                   std::uint64_t current_lsn,
-                                  bool force) const;
+                                  bool force,
+                                  TriggerReason& reason) const;
 
     [[nodiscard]] std::shared_ptr<WalWriter> wal_writer() const noexcept;
 
     std::shared_ptr<CheckpointManager> checkpoint_manager_{};
     Config config_{};
     RetentionHook retention_hook_{};
+    StorageTelemetryRegistry* telemetry_registry_ = nullptr;
+    std::string telemetry_identifier_{};
+    std::string retention_telemetry_identifier_{};
 
     bool has_emitted_ = false;
     std::chrono::steady_clock::time_point last_checkpoint_time_{};
@@ -71,6 +94,9 @@ private:
     std::uint64_t last_checkpoint_id_ = 0U;
     std::uint64_t last_checkpoint_lsn_ = 0U;
     WalRetentionConfig retention_config_{};
+    mutable CheckpointTelemetrySnapshot telemetry_{};
+    mutable WalRetentionTelemetrySnapshot retention_telemetry_{};
+    mutable std::mutex telemetry_mutex_{};
 };
 
 }  // namespace bored::storage
