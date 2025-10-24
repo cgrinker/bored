@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <system_error>
 #include <vector>
@@ -23,11 +24,16 @@ enum class CatalogMutationKind {
     Delete
 };
 
-struct CatalogWalRecordStaging final {
+struct CatalogWalRecordFragment final {
     storage::WalRecordType type = storage::WalRecordType::CatalogInsert;
     storage::WalRecordFlag flags = storage::WalRecordFlag::None;
     std::uint32_t page_id = 0U;
     std::vector<std::byte> payload{};
+};
+
+struct CatalogWalRecordStaging final {
+    std::vector<CatalogWalRecordFragment> records{};
+    std::uint64_t commit_lsn = 0U;
 };
 
 struct CatalogStagedMutation final {
@@ -40,11 +46,13 @@ struct CatalogStagedMutation final {
 
 struct CatalogMutatorConfig final {
     CatalogTransaction* transaction = nullptr;
+    std::function<std::uint64_t()> commit_lsn_provider{};
 };
 
 struct CatalogMutationBatch final {
     std::vector<CatalogStagedMutation> mutations{};
     std::vector<std::optional<CatalogWalRecordStaging>> wal_records{};
+    std::uint64_t commit_lsn = 0U;
 };
 
 class CatalogMutator final {
@@ -92,6 +100,7 @@ private:
     void register_transaction_hooks();
 
     CatalogTransaction* transaction_ = nullptr;
+    std::function<std::uint64_t()> commit_lsn_provider_{};
     std::vector<CatalogStagedMutation> staged_{};
     std::vector<std::optional<CatalogWalRecordStaging>> wal_records_{};
     std::optional<CatalogMutationBatch> published_batch_{};

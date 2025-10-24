@@ -3,9 +3,11 @@
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
 #include "bored/storage/wal_format.hpp"
+#include "bored/storage/wal_payloads.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <string_view>
 #include <vector>
@@ -135,17 +137,21 @@ TEST_CASE("Catalog mutator wal staging aligns with tuple mutations")
     CHECK_FALSE(mutator.has_published_batch());
 
     auto& wal = mutator.ensure_wal_record(0);
-    wal.type = bored::storage::WalRecordType::CatalogInsert;
-    wal.flags = bored::storage::WalRecordFlag::HasPayload;
-    wal.page_id = kCatalogTablesPageId;
-    wal.payload = mutator.staged_mutations()[0].after->payload;
+    CatalogWalRecordFragment fragment{};
+    fragment.type = bored::storage::WalRecordType::CatalogInsert;
+    fragment.flags = bored::storage::WalRecordFlag::HasPayload;
+    fragment.page_id = kCatalogTablesPageId;
+    fragment.payload = mutator.staged_mutations()[0].after->payload;
+    wal.records.push_back(std::move(fragment));
 
     const auto& wal_records = mutator.staged_wal_records();
     REQUIRE(wal_records[0].has_value());
-    CHECK(wal_records[0]->type == bored::storage::WalRecordType::CatalogInsert);
-    CHECK(wal_records[0]->flags == bored::storage::WalRecordFlag::HasPayload);
-    CHECK(wal_records[0]->page_id == kCatalogTablesPageId);
-    CHECK(wal_records[0]->payload.size() == mutator.staged_mutations()[0].after->payload.size());
+    REQUIRE(wal_records[0]->records.size() == 1U);
+    CHECK(wal_records[0]->records[0].type == bored::storage::WalRecordType::CatalogInsert);
+    CHECK(wal_records[0]->records[0].flags == bored::storage::WalRecordFlag::HasPayload);
+    CHECK(wal_records[0]->records[0].page_id == kCatalogTablesPageId);
+    CHECK(wal_records[0]->records[0].payload.size() == mutator.staged_mutations()[0].after->payload.size());
+    CHECK(wal_records[0]->commit_lsn == 0U);
     CHECK_FALSE(mutator.has_published_batch());
 
     SECTION("clear wal record resets entry")
@@ -186,12 +192,123 @@ TEST_CASE("Catalog mutator publishes staged batch on commit")
     CHECK(batch.mutations[0].row_id == 12000U);
     CHECK(batch.mutations[0].relation_id == kCatalogTablesRelationId);
     REQUIRE(batch.wal_records.size() == 1U);
-    CHECK_FALSE(batch.wal_records[0].has_value());
+    REQUIRE(batch.wal_records[0].has_value());
+    CHECK(batch.commit_lsn == 0U);
+    CHECK(batch.wal_records[0]->commit_lsn == batch.commit_lsn);
+    REQUIRE(batch.wal_records[0]->records.size() == 1U);
+
+    const auto& fragment = batch.wal_records[0]->records[0];
+    CHECK(fragment.type == bored::storage::WalRecordType::CatalogInsert);
+    auto meta = bored::storage::decode_wal_tuple_meta(std::span<const std::byte>(fragment.payload.data(), fragment.payload.size()));
+    REQUIRE(meta);
+    CHECK(meta->page_id == kCatalogTablesPageId);
+    CHECK(meta->row_id == 12000U);
+    auto expected_payload = make_payload("commit");
+    CHECK(meta->tuple_length == expected_payload.size());
 
     auto consumed = mutator.consume_published_batch();
     CHECK(consumed.mutations.size() == 1U);
     CHECK(consumed.wal_records.size() == 1U);
     CHECK_FALSE(mutator.has_published_batch());
+}
+
+TEST_CASE("Catalog mutator commit captures before image for deletes")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{811U};
+    bored::txn::SnapshotManagerStub snapshot_manager{};
+    CatalogTransaction transaction({&allocator, &snapshot_manager});
+
+    CatalogMutator mutator({&transaction});
+
+    CatalogTupleDescriptor existing{};
+    existing.xmin = 42U;
+    existing.xmax = 0U;
+    auto before_payload = make_payload("drop");
+    mutator.stage_delete(kCatalogTablesRelationId, 7777U, existing, before_payload);
+
+    REQUIRE_FALSE(transaction.commit());
+
+    const auto& batch = mutator.published_batch();
+    REQUIRE(batch.wal_records.size() == 1U);
+    REQUIRE(batch.wal_records[0].has_value());
+    const auto& records = batch.wal_records[0]->records;
+    REQUIRE(records.size() == 2U);
+    CHECK(records[0].type == bored::storage::WalRecordType::TupleBeforeImage);
+    CHECK(records[1].type == bored::storage::WalRecordType::CatalogDelete);
+
+    auto before_view = bored::storage::decode_wal_tuple_before_image(std::span<const std::byte>(records[0].payload.data(), records[0].payload.size()));
+    REQUIRE(before_view);
+    CHECK(before_view->meta.page_id == kCatalogTablesPageId);
+    CHECK(before_view->meta.row_id == 7777U);
+    CHECK(before_view->tuple_payload.size() == before_payload.size());
+    CHECK(std::equal(before_payload.begin(), before_payload.end(), before_view->tuple_payload.begin()));
+
+    auto delete_meta = bored::storage::decode_wal_tuple_meta(std::span<const std::byte>(records[1].payload.data(), records[1].payload.size()));
+    REQUIRE(delete_meta);
+    CHECK(delete_meta->tuple_length == 0U);
+    CHECK(delete_meta->row_id == 7777U);
+}
+
+TEST_CASE("Catalog mutator commit captures before image and update record")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{821U};
+    bored::txn::SnapshotManagerStub snapshot_manager{};
+    CatalogTransaction transaction({&allocator, &snapshot_manager});
+
+    CatalogMutator mutator({&transaction});
+
+    CatalogTupleDescriptor existing{};
+    existing.xmin = 55U;
+    existing.xmax = 0U;
+    auto before_payload = make_payload("old_name");
+    auto after_payload = make_payload("new_name");
+    mutator.stage_update(kCatalogTablesRelationId,
+                         8888U,
+                         existing,
+                         before_payload,
+                         CatalogTupleBuilder::for_update(transaction, existing),
+                         after_payload);
+
+    REQUIRE_FALSE(transaction.commit());
+
+    const auto& batch = mutator.published_batch();
+    REQUIRE(batch.wal_records.size() == 1U);
+    REQUIRE(batch.wal_records[0].has_value());
+    const auto& records = batch.wal_records[0]->records;
+    REQUIRE(records.size() == 2U);
+    CHECK(records[0].type == bored::storage::WalRecordType::TupleBeforeImage);
+    CHECK(records[1].type == bored::storage::WalRecordType::CatalogUpdate);
+
+    auto before_view = bored::storage::decode_wal_tuple_before_image(std::span<const std::byte>(records[0].payload.data(), records[0].payload.size()));
+    REQUIRE(before_view);
+    CHECK(before_view->meta.row_id == 8888U);
+    CHECK(before_view->tuple_payload.size() == before_payload.size());
+
+    auto update_meta = bored::storage::decode_wal_tuple_update_meta(std::span<const std::byte>(records[1].payload.data(), records[1].payload.size()));
+    REQUIRE(update_meta);
+    CHECK(update_meta->base.row_id == 8888U);
+    CHECK(update_meta->base.tuple_length == after_payload.size());
+    CHECK(update_meta->old_length == before_payload.size());
+}
+
+TEST_CASE("Catalog mutator binds commit lsn from provider")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{831U};
+    bored::txn::SnapshotManagerStub snapshot_manager{};
+    CatalogTransaction transaction({&allocator, &snapshot_manager});
+
+    const std::uint64_t expected_lsn = 0xABCDEFULL;
+    CatalogMutator mutator({&transaction, [expected_lsn]() { return expected_lsn; }});
+
+    auto descriptor = CatalogTupleBuilder::for_insert(transaction);
+    mutator.stage_insert(kCatalogTablesRelationId, 14000U, descriptor, make_payload("lsn"));
+
+    REQUIRE_FALSE(transaction.commit());
+
+    const auto& batch = mutator.published_batch();
+    CHECK(batch.commit_lsn == expected_lsn);
+    REQUIRE(batch.wal_records[0].has_value());
+    CHECK(batch.wal_records[0]->commit_lsn == expected_lsn);
 }
 
 TEST_CASE("Catalog mutator abort discards staged batch")
