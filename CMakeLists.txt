@@ -19,6 +19,7 @@ add_library(${PROJECT_NAME}_lib
     src/catalog/catalog_ddl.cpp
     src/catalog/catalog_cache.cpp
     src/catalog/catalog_telemetry.cpp
+    src/catalog/catalog_checkpoint_registry.cpp
     src/catalog/catalog_mutator.cpp
     src/catalog/catalog_accessor.cpp
     src/catalog/catalog_transaction.cpp
@@ -78,7 +79,8 @@ if(BORED_ENABLE_TESTS)
         tests/catalog_bootstrap_tests.cpp
         tests/catalog_ddl_tests.cpp
         tests/catalog_cache_tests.cpp
-        tests/catalog_mutator_tests.cpp
+    tests/catalog_mutator_tests.cpp
+    tests/catalog_checkpoint_registry_tests.cpp
         tests/catalog_mvcc_tests.cpp
         tests/catalog_integration_tests.cpp
         tests/ddl_validation_tests.cpp

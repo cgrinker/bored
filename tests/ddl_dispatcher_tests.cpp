@@ -6,8 +6,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
 #include <memory>
+#include <span>
 #include <stdexcept>
+#include <system_error>
+#include <vector>
 
 using namespace bored;
 using namespace bored::ddl;
@@ -206,4 +210,75 @@ TEST_CASE("DdlCommandDispatcher surfaces missing handlers")
     CHECK(snapshot.verbs[index].attempts == 1U);
     CHECK(snapshot.verbs[index].failures == 1U);
     CHECK(snapshot.failures.handler_missing == 1U);
+}
+
+TEST_CASE("DdlCommandDispatcher notifies catalog dirty relation hook")
+{
+    DispatcherHarness harness;
+
+    bool hook_invoked = false;
+    std::vector<catalog::RelationId> captured_relations;
+    std::uint64_t captured_lsn = 0U;
+
+    DdlCommandDispatcher dispatcher({
+        .transaction_factory = harness.transaction_factory,
+        .mutator_factory = harness.mutator_factory,
+        .accessor_factory = harness.accessor_factory,
+        .identifier_allocator = &harness.allocator,
+        .commit_lsn_provider = [] { return 42ULL; },
+        .catalog_dirty_hook = [&](std::span<const catalog::RelationId> relations, std::uint64_t lsn) -> std::error_code {
+            hook_invoked = true;
+            captured_relations.assign(relations.begin(), relations.end());
+            captured_lsn = lsn;
+            return {};
+        }
+    });
+
+    dispatcher.register_handler<CreateSchemaRequest>([](DdlCommandContext& ctx, const CreateSchemaRequest&) {
+        auto descriptor = catalog::CatalogTupleBuilder::for_insert(ctx.transaction);
+        std::vector<std::byte> payload{std::byte{0x1}};
+        ctx.mutator->stage_insert(catalog::kCatalogTablesRelationId, 77U, descriptor, std::move(payload));
+        return make_success();
+    });
+
+    DdlCommand command = make_create_schema();
+    const auto response = dispatcher.dispatch(command);
+
+    CHECK(response.success);
+    CHECK(hook_invoked);
+    REQUIRE(captured_relations.size() == 1U);
+    CHECK(captured_relations.front() == catalog::kCatalogTablesRelationId);
+    CHECK(captured_lsn == 42ULL);
+}
+
+TEST_CASE("DdlCommandDispatcher propagates dirty relation hook failures")
+{
+    DispatcherHarness harness;
+
+    bool aborted = false;
+
+    DdlCommandDispatcher dispatcher({
+        .transaction_factory = harness.transaction_factory,
+        .mutator_factory = harness.mutator_factory,
+        .accessor_factory = harness.accessor_factory,
+        .identifier_allocator = &harness.allocator,
+        .catalog_dirty_hook = [](std::span<const catalog::RelationId>, std::uint64_t) {
+            return std::make_error_code(std::errc::operation_not_permitted);
+        }
+    });
+
+    dispatcher.register_handler<CreateSchemaRequest>([&](DdlCommandContext& ctx, const CreateSchemaRequest&) {
+        auto descriptor = catalog::CatalogTupleBuilder::for_insert(ctx.transaction);
+        std::vector<std::byte> payload{std::byte{0x2}};
+        ctx.mutator->stage_insert(catalog::kCatalogTablesRelationId, 88U, descriptor, std::move(payload));
+        ctx.transaction.register_abort_hook([&]() { aborted = true; });
+        return make_success();
+    });
+
+    DdlCommand command = make_create_schema();
+    const auto response = dispatcher.dispatch(command);
+
+    CHECK_FALSE(response.success);
+    CHECK(response.error == make_error_code(DdlErrc::ExecutionFailed));
+    CHECK(aborted);
 }

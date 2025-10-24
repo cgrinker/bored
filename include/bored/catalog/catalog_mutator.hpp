@@ -104,6 +104,9 @@ public:
     [[nodiscard]] const std::optional<CatalogWalRecordStaging>& wal_record(std::size_t index) const;
     void clear_wal_record(std::size_t index) noexcept;
 
+    using PublishListener = std::function<std::error_code(const CatalogMutationBatch&)>;
+    void set_publish_listener(PublishListener listener);
+
     static CatalogMutationTelemetrySnapshot telemetry() noexcept;
     static void reset_telemetry() noexcept;
 
@@ -117,6 +120,7 @@ private:
     std::vector<CatalogStagedMutation> staged_{};
     std::vector<std::optional<CatalogWalRecordStaging>> wal_records_{};
     std::optional<CatalogMutationBatch> published_batch_{};
+    PublishListener publish_listener_{};
 };
 
 struct CatalogTupleBuilder final {

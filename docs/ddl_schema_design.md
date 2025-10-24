@@ -45,7 +45,7 @@
   - [x] Implement `CREATE TABLE` with column definitions, type validation (primitive types), and catalog identifier allocation.
   - [x] Support `ALTER TABLE` operations: rename table, add column (appends column metadata), drop column (marks metadata as dropped, no physical reclaim yet).
   - [x] Implement `DROP TABLE` with retention-aware cleanup hooks (signal retention manager, flag table metadata for pruning).
-  - [ ] Extend checkpoint scheduler integration to account for DDL-driven dirty catalog pages.
+  - [x] Extend checkpoint scheduler integration to account for DDL-driven dirty catalog pages (DDL dispatcher publishes mutated catalog relations to the catalog checkpoint registry feeding checkpoint snapshots).
   - Tests: integration tests using `CatalogMutator` stubs to verify catalog state after each verb, crash drills for mid-flight table creation with undo coverage.
 
 - **Milestone 2: Index Definition & Dependency Enforcement (1-2 sprints)**

@@ -1,6 +1,7 @@
 #include "bored/ddl/ddl_handlers.hpp"
 
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
+#include "bored/catalog/catalog_checkpoint_registry.hpp"
 #include "bored/catalog/catalog_ddl.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/catalog/catalog_cache.hpp"
@@ -12,6 +13,7 @@
 #include "bored/ddl/ddl_errors.hpp"
 #include "bored/ddl/ddl_validation.hpp"
 #include "bored/txn/transaction_types.hpp"
+#include "bored/storage/wal_payloads.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -240,8 +242,9 @@ CatalogColumnDescriptor decode_column(const std::vector<std::byte>& payload)
 }
 
 struct DispatcherHarness final {
-    explicit DispatcherHarness(DropTableCleanupHook drop_hook = {})
+    explicit DispatcherHarness(DropTableCleanupHook drop_hook = {}, catalog::CatalogCheckpointRegistry* checkpoint_registry = nullptr)
         : drop_table_cleanup_hook_{std::move(drop_hook)}
+        , checkpoint_registry_{checkpoint_registry}
         , dispatcher_(make_dispatcher_config())
     {
         CatalogCache::instance().reset();
@@ -348,6 +351,12 @@ private:
         config.telemetry_registry = &telemetry_registry_;
         config.telemetry_identifier = "ddl.handlers";
         config.drop_table_cleanup_hook = drop_table_cleanup_hook_;
+        config.catalog_dirty_hook = [this](std::span<const catalog::RelationId> relations, std::uint64_t commit_lsn) -> std::error_code {
+            if (checkpoint_registry_ == nullptr) {
+                return {};
+            }
+            return checkpoint_registry_->record_relations(relations, commit_lsn);
+        };
         return config;
     }
 
@@ -356,6 +365,7 @@ private:
     txn::SnapshotManagerStub snapshot_manager_{make_snapshot()};
     DdlTelemetryRegistry telemetry_registry_{};
     DropTableCleanupHook drop_table_cleanup_hook_{};
+    catalog::CatalogCheckpointRegistry* checkpoint_registry_ = nullptr;
     DdlCommandDispatcher dispatcher_;
 };
 
@@ -380,6 +390,67 @@ TEST_CASE("Create schema handler stages schema insert")
     CHECK(descriptor.database_id == catalog::kSystemDatabaseId);
     CHECK(descriptor.name == request.name);
     CHECK(harness.allocator.schema_ids > 8'000U);
+}
+
+TEST_CASE("DDL handlers register dirty catalog pages")
+{
+    SECTION("Create schema marks schema page dirty")
+    {
+        catalog::CatalogCheckpointRegistry registry;
+        DispatcherHarness harness({}, &registry);
+        harness.seed_database("system");
+
+        CreateSchemaRequest request{};
+        request.database_id = catalog::kSystemDatabaseId;
+        request.name = "analytics";
+
+        DdlCommand command = request;
+        REQUIRE(harness.dispatch(command).success);
+
+        std::vector<storage::WalCheckpointDirtyPageEntry> entries;
+        registry.snapshot_into(entries);
+        REQUIRE(entries.size() == 1U);
+        CHECK(entries[0].page_id == catalog::kCatalogSchemasPageId);
+    }
+
+    SECTION("Create table marks tables and columns pages dirty")
+    {
+        catalog::CatalogCheckpointRegistry registry;
+        DispatcherHarness harness({}, &registry);
+        harness.seed_database("system");
+        const auto schema_id = catalog::SchemaId{42U};
+        harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+
+        CreateTableRequest request{};
+        request.schema_id = schema_id;
+        request.name = "events";
+
+        catalog::ColumnDefinition id_column{};
+        id_column.name = "id";
+        id_column.type = catalog::CatalogColumnType::Int64;
+        request.columns.push_back(id_column);
+
+        catalog::ColumnDefinition ts_column{};
+        ts_column.name = "created_at";
+    ts_column.type = catalog::CatalogColumnType::Utf8;
+        request.columns.push_back(ts_column);
+
+        DdlCommand command = request;
+        REQUIRE(harness.dispatch(command).success);
+
+        std::vector<storage::WalCheckpointDirtyPageEntry> entries;
+        registry.snapshot_into(entries);
+        REQUIRE(entries.size() == 2U);
+
+        std::vector<std::uint32_t> pages;
+        pages.reserve(entries.size());
+        for (const auto& entry : entries) {
+            pages.push_back(entry.page_id);
+        }
+        std::sort(pages.begin(), pages.end());
+        CHECK(std::binary_search(pages.begin(), pages.end(), catalog::kCatalogColumnsPageId));
+        CHECK(std::binary_search(pages.begin(), pages.end(), catalog::kCatalogTablesPageId));
+    }
 }
 
 TEST_CASE("Create schema respects IF NOT EXISTS")

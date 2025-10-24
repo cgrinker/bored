@@ -22,6 +22,7 @@ public:
         DdlTelemetryRegistry* telemetry_registry = nullptr;
         std::string telemetry_identifier;
         DropTableCleanupHook drop_table_cleanup_hook{};
+        CatalogDirtyRelationHook catalog_dirty_hook{};
     };
 
     explicit DdlCommandDispatcher(Config config);

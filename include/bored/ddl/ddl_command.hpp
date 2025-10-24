@@ -104,6 +104,8 @@ using DropTableCleanupHook = std::function<std::error_code(const DropTableReques
                                                            std::span<const catalog::CatalogColumnDescriptor>,
                                                            catalog::CatalogMutator&)>;
 
+using CatalogDirtyRelationHook = std::function<std::error_code(std::span<const catalog::RelationId>, std::uint64_t)>;
+
 struct CreateIndexRequest final {
     catalog::SchemaId schema_id{};
     std::string table_name{};
@@ -147,6 +149,7 @@ struct DdlCommandContext final {
     catalog::CatalogMutator* mutator = nullptr;
     catalog::CatalogAccessor* accessor = nullptr;
     DropTableCleanupHook drop_table_cleanup{};
+    CatalogDirtyRelationHook dirty_relation_notifier{};
 };
 
 namespace detail {

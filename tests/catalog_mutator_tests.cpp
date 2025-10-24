@@ -312,6 +312,50 @@ TEST_CASE("Catalog mutator binds commit lsn from provider")
     CHECK(batch.wal_records[0]->commit_lsn == expected_lsn);
 }
 
+TEST_CASE("Catalog mutator publish listener observes batches")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{841U};
+    bored::txn::SnapshotManagerStub snapshot_manager{};
+    CatalogTransaction transaction({&allocator, &snapshot_manager});
+
+    const std::uint64_t expected_lsn = 0x1234ULL;
+    CatalogMutator mutator({&transaction, [expected_lsn]() { return expected_lsn; }});
+
+    bool listener_invoked = false;
+    mutator.set_publish_listener([&](const CatalogMutationBatch& batch) -> std::error_code {
+        listener_invoked = true;
+        CHECK(batch.mutations.size() == 1U);
+        CHECK(batch.commit_lsn == expected_lsn);
+        return {};
+    });
+
+    auto descriptor = CatalogTupleBuilder::for_insert(transaction);
+    mutator.stage_insert(kCatalogTablesRelationId, 16000U, descriptor, make_payload("listener"));
+
+    REQUIRE_FALSE(transaction.commit());
+    CHECK(listener_invoked);
+}
+
+TEST_CASE("Catalog mutator publish listener failure aborts commit")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{851U};
+    bored::txn::SnapshotManagerStub snapshot_manager{};
+    CatalogTransaction transaction({&allocator, &snapshot_manager});
+
+    CatalogMutator mutator({&transaction});
+    mutator.set_publish_listener([](const CatalogMutationBatch&) {
+        return std::make_error_code(std::errc::permission_denied);
+    });
+
+    auto descriptor = CatalogTupleBuilder::for_insert(transaction);
+    mutator.stage_insert(kCatalogTablesRelationId, 17000U, descriptor, make_payload("fail-listener"));
+
+    const auto ec = transaction.commit();
+    CHECK(ec == std::make_error_code(std::errc::permission_denied));
+    CHECK(transaction.is_aborted());
+    CHECK_FALSE(mutator.has_published_batch());
+}
+
 TEST_CASE("Catalog mutator abort discards staged batch")
 {
     bored::txn::TransactionIdAllocatorStub allocator{901U};

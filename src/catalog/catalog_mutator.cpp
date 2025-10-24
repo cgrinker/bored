@@ -2,6 +2,7 @@
 
 #include "bored/catalog/catalog_accessor.hpp"
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
+#include "bored/catalog/catalog_pages.hpp"
 #include "bored/storage/wal_payloads.hpp"
 
 #include <array>
@@ -34,26 +35,6 @@ std::atomic<std::uint64_t> g_aborted_mutations{0U};
 [[nodiscard]] std::span<const std::byte> as_const_span(const std::vector<std::byte>& buffer) noexcept
 {
     return {buffer.data(), buffer.size()};
-}
-
-[[nodiscard]] std::optional<std::uint32_t> relation_page_id(RelationId relation_id) noexcept
-{
-    if (relation_id == kCatalogDatabasesRelationId) {
-        return kCatalogDatabasesPageId;
-    }
-    if (relation_id == kCatalogSchemasRelationId) {
-        return kCatalogSchemasPageId;
-    }
-    if (relation_id == kCatalogTablesRelationId) {
-        return kCatalogTablesPageId;
-    }
-    if (relation_id == kCatalogColumnsRelationId) {
-        return kCatalogColumnsPageId;
-    }
-    if (relation_id == kCatalogIndexesRelationId) {
-        return kCatalogIndexesPageId;
-    }
-    return std::nullopt;
 }
 
 [[nodiscard]] bool payload_fits(std::size_t length) noexcept
@@ -374,6 +355,11 @@ void CatalogMutator::clear_wal_record(std::size_t index) noexcept
     }
 }
 
+void CatalogMutator::set_publish_listener(PublishListener listener)
+{
+    publish_listener_ = std::move(listener);
+}
+
 std::error_code CatalogMutator::publish_staged_batch()
 {
     if (staged_.empty()) {
@@ -383,7 +369,7 @@ std::error_code CatalogMutator::publish_staged_batch()
     }
 
     for (std::size_t index = 0; index < staged_.size(); ++index) {
-        const auto page_id_opt = relation_page_id(staged_[index].relation_id);
+        const auto page_id_opt = catalog_relation_page(staged_[index].relation_id);
         if (!page_id_opt) {
             g_publish_failures.fetch_add(1U, std::memory_order_relaxed);
             return std::make_error_code(std::errc::invalid_argument);
@@ -418,6 +404,13 @@ std::error_code CatalogMutator::publish_staged_batch()
     g_published_batches.fetch_add(1U, std::memory_order_relaxed);
     g_published_mutations.fetch_add(batch.mutations.size(), std::memory_order_relaxed);
     g_published_wal_records.fetch_add(wal_record_count, std::memory_order_relaxed);
+
+    if (publish_listener_) {
+        if (auto ec = publish_listener_(batch)) {
+            g_publish_failures.fetch_add(1U, std::memory_order_relaxed);
+            return ec;
+        }
+    }
 
     std::array<RelationId, 5U> mutated_relations{};
     std::size_t mutated_count = 0U;

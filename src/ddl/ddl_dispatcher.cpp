@@ -4,8 +4,11 @@
 #include "bored/catalog/catalog_mutator.hpp"
 #include "bored/catalog/catalog_transaction.hpp"
 
+#include <algorithm>
+#include <span>
 #include <stdexcept>
 #include <system_error>
+#include <vector>
 
 namespace bored::ddl {
 
@@ -132,6 +135,27 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
         mutator = std::make_unique<catalog::CatalogMutator>(mutator_config);
     }
 
+    if (mutator && config_.catalog_dirty_hook) {
+        auto hook = config_.catalog_dirty_hook;
+        mutator->set_publish_listener([hook](const catalog::CatalogMutationBatch& batch) -> std::error_code {
+            if (batch.mutations.empty()) {
+                return {};
+            }
+
+            std::vector<catalog::RelationId> relations;
+            relations.reserve(batch.mutations.size());
+            for (const auto& mutation : batch.mutations) {
+                const auto already_recorded = std::find(relations.begin(), relations.end(), mutation.relation_id) != relations.end();
+                if (!already_recorded) {
+                    relations.push_back(mutation.relation_id);
+                }
+            }
+
+            std::span<const catalog::RelationId> relation_span(relations.data(), relations.size());
+            return hook(relation_span, batch.commit_lsn);
+        });
+    }
+
     std::unique_ptr<catalog::CatalogAccessor> accessor;
     if (config_.accessor_factory) {
         accessor = config_.accessor_factory(*transaction);
@@ -141,6 +165,7 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
     context.mutator = mutator.get();
     context.accessor = accessor.get();
     context.drop_table_cleanup = config_.drop_table_cleanup_hook;
+    context.dirty_relation_notifier = config_.catalog_dirty_hook;
 
     TransactionScope scope{*transaction};
 
