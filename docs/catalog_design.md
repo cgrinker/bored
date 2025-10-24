@@ -100,7 +100,7 @@
 	- [x] **Task 1.4:** Integrate catalog snapshot flow with the transaction id allocator and snapshot manager stubs.
 	- [x] **Task 1.5:** Implement concurrency-focused tests covering parallel readers, snapshot edge cases, and catalog tuple visibility transitions.
 	- [x] **Task 1.6:** Extend recovery tests to validate redo/undo handling of in-flight catalog tuples under MVCC.
-- **Milestone 2: DDL Mutation Path (1-2 sprints)**
+- **Milestone 2: DDL Mutation Path (1-2 sprints)** _(Status: Complete)_
 	- [x] **Task 2.1:** Finalise `CatalogMutator` API surface for insert/update/delete staging, including tuple version builders and undo scaffolding.
 	- [x] **Task 2.2:** Implement mutation staging buffers that record new tuple payloads alongside WAL descriptors pending commit.
 	- [x] **Task 2.3:** Integrate mutation path with transaction commit/abort hooks to publish or discard staged versions atomically.
@@ -109,7 +109,7 @@
 	- [x] **Task 2.6:** Update catalog accessor caches and invalidation mechanisms triggered by committed catalog mutations.
 	- [x] **Task 2.7:** Build integration tests covering create/drop/alter cycles, rollback scenarios, and retention manager interaction.
 	- [x] **Task 2.8:** Document DDL mutation lifecycle, catalog locking expectations, and troubleshooting guidance in `docs/catalog_design.md` and operator docs.
-- **Milestone 3: Caching, Telemetry, and Hardening (1 sprint)**
+- **Milestone 3: Caching, Telemetry, and Hardening (1 sprint)** _(Status: Complete)_
 	- [x] Add shared catalog cache with invalidation on commit and retention-aware eviction policy.
 	- [x] Emit catalog mutation and cache-hit telemetry into existing registries.
 	- Conduct crash drills covering mid-flight DDL, id allocator rollbacks, and catalog corruption detection. (Mid-flight DDL crash drill covered by `Wal crash drill restores catalog tuple before image`; id allocator rollback covered by `Wal crash drill rolls back catalog id allocator counters`; corruption detection covered by `Wal crash drill detects catalog before image corruption`.)
