@@ -44,6 +44,26 @@
 - `CatalogMutator`: staged updates for DDL statements, producing WAL entries and new tuple versions.
 - `CatalogBootstrapper`: initializes catalog segments and system relations during cluster start.
 
+## DDL Mutation Lifecycle
+1. **Staging** – DDL helpers (`stage_create_*`, manual `CatalogMutator::stage_*`) encode tuple payloads using `catalog_encoding`, capture MVCC metadata via `CatalogTupleBuilder`, and enqueue mutations plus pending WAL fragments. Staging is in-memory and fully rollbackable until commit.
+2. **Validation** – Identifier allocation must succeed (either supplied IDs or allocator-generated). Column ordinals and names are verified before payloads are recorded. Invalid input short-circuits with `std::errc::invalid_argument`.
+3. **Commit Hooks** – `CatalogMutator` registers commit/abort callbacks with `CatalogTransaction`. On commit it synthesises WAL fragments for each mutation, binds the commit LSN from the provider, and publishes a `CatalogMutationBatch`; abort clears staged mutations without touching storage.
+4. **Durability** – The caller must persist `CatalogMutationBatch` contents: (a) append WAL fragments through the storage writer, (b) apply tuple payloads to catalog pages, and (c) flush WAL before acknowledging success. Before-images are already packaged for delete/update records to support undo.
+5. **Cache Invalidation** – When a batch publishes, per-relation epochs are bumped. `CatalogAccessor` compares cached epoch values before returning results and will rescan relations when an epoch changes.
+6. **Recovery** – WAL replay first applies catalog records so that subsequent page/table recovery always sees up-to-date metadata. Before-images produced during delete/update are used to undo failed transactions.
+
+### Locking Expectations
+- DDL callers must coordinate with higher layers to obtain database/schema/table-exclusive locks prior to mutation. The catalog layer assumes the transaction already holds an appropriate lock to prevent concurrent conflicting DDL.
+- Concurrent reader transactions continue to use snapshots: staged but uncommitted tuples remain invisible until commit sets a commit LSN and updated visibility flags propagate.
+- Future integration with global lock manager should honour these expectations: create/alter/drop must obtain exclusive access, while read-only catalog access can proceed with shared or intent locks.
+
+### Troubleshooting Guidance
+- **Commit failures** – Inspect the `std::error_code` returned by `CatalogTransaction::commit()`. For invalid arguments review the staged request parameters; for `value_too_large` errors validate tuple sizes against catalog tuple layout maximums.
+- **Missing changes after commit** – Ensure the caller consumed the published batch and wrote both WAL fragments and tuple payloads. `CatalogMutator::has_published_batch()` remains `true` until `consume_published_batch()` is invoked.
+- **Stale reads** – If `CatalogAccessor` surfaces old metadata, verify the consumer is reusing an accessor after DDL and consider refreshing the surrounding transaction snapshot, since epochs only govern cache contents for the current snapshot.
+- **Identifier collisions** – Failures allocating identifiers typically indicate allocator exhaustion or misuse. Confirm the allocator ranges (`catalog_bootstrap_ids.hpp`) and retention policies for recycling dropped IDs.
+- **Recovery mismatch** – During crash recovery, replay catalog segments before user relations. If catalog replay complains about tuple corruption, validate WAL retention policies have not pruned active segments.
+
 ## Storage Identifiers
 - `DatabaseId`, `RelationId`, `SchemaId`, `ColumnId`, `IndexId` defined as strongly-typed wrappers around 64-bit integers.
 - Central allocator issues ids through WAL-protected counter pages; retention manager tracks id reuse after drops.
@@ -85,7 +105,7 @@
 	- [x] **Task 2.5:** Wire simple DDL handlers (create schema/table/index) to use `CatalogMutator`, including identifier allocation flows.
 	- [x] **Task 2.6:** Update catalog accessor caches and invalidation mechanisms triggered by committed catalog mutations.
 	- [x] **Task 2.7:** Build integration tests covering create/drop/alter cycles, rollback scenarios, and retention manager interaction.
-	- [ ] **Task 2.8:** Document DDL mutation lifecycle, catalog locking expectations, and troubleshooting guidance in `docs/catalog_design.md` and operator docs.
+	- [x] **Task 2.8:** Document DDL mutation lifecycle, catalog locking expectations, and troubleshooting guidance in `docs/catalog_design.md` and operator docs.
 - **Milestone 3: Caching, Telemetry, and Hardening (1 sprint)**
 	- Add shared catalog cache with invalidation on commit and retention-aware eviction policy.
 	- Emit catalog mutation and cache-hit telemetry into existing registries.
