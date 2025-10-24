@@ -16,9 +16,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <system_error>
 #include <vector>
 
 using bored::storage::AsyncIo;
@@ -43,6 +46,15 @@ using bored::storage::WalIndexMaintenanceAction;
 using bored::storage::any;
 
 namespace {
+
+struct alignas(8) CatalogAllocatorState final {
+    std::uint64_t next_schema_id = 0U;
+    std::uint64_t next_table_id = 0U;
+    std::uint64_t next_index_id = 0U;
+    std::uint64_t next_column_id = 0U;
+};
+
+static_assert(sizeof(CatalogAllocatorState) == 32U, "CatalogAllocatorState expected to be 32 bytes");
 
 std::shared_ptr<AsyncIo> make_async_io()
 {
@@ -1107,6 +1119,247 @@ TEST_CASE("Wal crash drill restores catalog tuple before image")
     auto replay_header = bored::storage::page_header(replay_span);
     auto baseline_header = bored::storage::page_header(baseline_span);
     CHECK(replay_header.tuple_count == baseline_header.tuple_count);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("Wal crash drill rolls back catalog id allocator counters")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_catalog_allocator_crash_drill_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 128U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t allocator_page_id = 11U;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Meta, allocator_page_id));
+
+    constexpr std::uint64_t allocator_row_id = 5'000U;
+    CatalogAllocatorState baseline_state{};
+    baseline_state.next_schema_id = 10'000U;
+    baseline_state.next_table_id = 20'000U;
+    baseline_state.next_index_id = 30'000U;
+    baseline_state.next_column_id = 40'000U;
+
+    std::vector<std::byte> baseline_payload(sizeof(CatalogAllocatorState));
+    std::memcpy(baseline_payload.data(), &baseline_state, sizeof(CatalogAllocatorState));
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span,
+                                       std::span<const std::byte>(baseline_payload.data(), baseline_payload.size()),
+                                       allocator_row_id,
+                                       insert_result));
+
+    WalRecordDescriptor commit{};
+    commit.type = WalRecordType::Commit;
+    commit.page_id = allocator_page_id;
+    commit.flags = bored::storage::WalRecordFlag::None;
+    commit.payload = {};
+    bored::storage::WalAppendResult commit_append{};
+    REQUIRE_FALSE(wal_writer->append_record(commit, commit_append));
+
+    const auto committed_page = page_buffer;
+
+    CatalogAllocatorState updated_state = baseline_state;
+    updated_state.next_schema_id += 7U;
+    updated_state.next_table_id += 13U;
+    updated_state.next_index_id += 17U;
+    updated_state.next_column_id += 23U;
+
+    std::vector<std::byte> updated_payload(sizeof(CatalogAllocatorState));
+    std::memcpy(updated_payload.data(), &updated_state, sizeof(CatalogAllocatorState));
+
+    PageManager::TupleUpdateResult update_result{};
+    REQUIRE_FALSE(manager.update_tuple(page_span,
+                                       insert_result.slot.index,
+                                       std::span<const std::byte>(updated_payload.data(), updated_payload.size()),
+                                       allocator_row_id,
+                                       update_result));
+
+    const auto crash_page = page_buffer;
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+    REQUIRE_FALSE(plan.redo.empty());
+    REQUIRE_FALSE(plan.undo.empty());
+
+    auto before_it = std::find_if(plan.undo.begin(), plan.undo.end(), [](const WalRecoveryRecord& record) {
+        return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage;
+    });
+    REQUIRE(before_it != plan.undo.end());
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Meta, &replay_fsm};
+    context.set_page(allocator_page_id, std::span<const std::byte>(crash_page.data(), crash_page.size()));
+
+    WalReplayer replayer{context};
+
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    auto replay_page = context.get_page(allocator_page_id);
+    auto tuple_span = bored::storage::read_tuple(std::span<const std::byte>(replay_page.data(), replay_page.size()), insert_result.slot.index);
+    REQUIRE(tuple_span.size() == sizeof(CatalogAllocatorState));
+
+    CatalogAllocatorState restored_state{};
+    std::memcpy(&restored_state, tuple_span.data(), tuple_span.size());
+
+    CHECK(restored_state.next_schema_id == baseline_state.next_schema_id);
+    CHECK(restored_state.next_table_id == baseline_state.next_table_id);
+    CHECK(restored_state.next_index_id == baseline_state.next_index_id);
+    CHECK(restored_state.next_column_id == baseline_state.next_column_id);
+
+    auto replay_header = bored::storage::page_header(std::span<const std::byte>(replay_page.data(), replay_page.size()));
+    auto committed_header = bored::storage::page_header(std::span<const std::byte>(committed_page.data(), committed_page.size()));
+    CHECK(replay_header.tuple_count == committed_header.tuple_count);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("Wal crash drill detects catalog before image corruption")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_catalog_corruption_crash_drill_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 128U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = 12U;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Meta, page_id));
+
+    constexpr std::uint64_t row_id = 6'000U;
+    CatalogAllocatorState baseline_state{};
+    baseline_state.next_schema_id = 50'000U;
+    baseline_state.next_table_id = 60'000U;
+    baseline_state.next_index_id = 70'000U;
+    baseline_state.next_column_id = 80'000U;
+
+    std::vector<std::byte> baseline_payload(sizeof(CatalogAllocatorState));
+    std::memcpy(baseline_payload.data(), &baseline_state, sizeof(CatalogAllocatorState));
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span,
+                                       std::span<const std::byte>(baseline_payload.data(), baseline_payload.size()),
+                                       row_id,
+                                       insert_result));
+
+    WalRecordDescriptor commit{};
+    commit.type = WalRecordType::Commit;
+    commit.page_id = page_id;
+    commit.flags = bored::storage::WalRecordFlag::None;
+    commit.payload = {};
+    bored::storage::WalAppendResult commit_append{};
+    REQUIRE_FALSE(wal_writer->append_record(commit, commit_append));
+
+    const auto committed_page = page_buffer;
+
+    CatalogAllocatorState updated_state = baseline_state;
+    updated_state.next_schema_id += 3U;
+    updated_state.next_table_id += 5U;
+    updated_state.next_index_id += 7U;
+    updated_state.next_column_id += 11U;
+
+    std::vector<std::byte> updated_payload(sizeof(CatalogAllocatorState));
+    std::memcpy(updated_payload.data(), &updated_state, sizeof(CatalogAllocatorState));
+
+    PageManager::TupleUpdateResult update_result{};
+    REQUIRE_FALSE(manager.update_tuple(page_span,
+                                       insert_result.slot.index,
+                                       std::span<const std::byte>(updated_payload.data(), updated_payload.size()),
+                                       row_id,
+                                       update_result));
+
+    const auto crash_page = page_buffer;
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+    REQUIRE_FALSE(plan.redo.empty());
+    REQUIRE_FALSE(plan.undo.empty());
+
+    auto before_it = std::find_if(plan.undo.begin(), plan.undo.end(), [](const WalRecoveryRecord& record) {
+        return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage;
+    });
+    REQUIRE(before_it != plan.undo.end());
+
+    WalRecoveryPlan corrupted_plan = plan;
+    auto corrupt_it = std::find_if(corrupted_plan.undo.begin(), corrupted_plan.undo.end(), [](const WalRecoveryRecord& record) {
+        return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage;
+    });
+    REQUIRE(corrupt_it != corrupted_plan.undo.end());
+    REQUIRE(corrupt_it->payload.size() > sizeof(bored::storage::WalTupleBeforeImageHeader));
+    corrupt_it->payload.resize(sizeof(bored::storage::WalTupleBeforeImageHeader) - 8U);
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Meta, &replay_fsm};
+    context.set_page(page_id, std::span<const std::byte>(crash_page.data(), crash_page.size()));
+
+    WalReplayer replayer{context};
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+
+    auto undo_error = replayer.apply_undo(corrupted_plan);
+    REQUIRE(undo_error);
+    CHECK(undo_error == std::make_error_code(std::errc::invalid_argument));
+    auto last_type = replayer.last_undo_type();
+    REQUIRE(last_type);
+    CHECK(*last_type == WalRecordType::TupleBeforeImage);
+
+    auto mutated_page = context.get_page(page_id);
+    auto mutated_span = bored::storage::read_tuple(std::span<const std::byte>(mutated_page.data(), mutated_page.size()), insert_result.slot.index);
+    REQUIRE(mutated_span.size() == sizeof(CatalogAllocatorState));
+    CatalogAllocatorState mutated_state{};
+    std::memcpy(&mutated_state, mutated_span.data(), mutated_span.size());
+    CHECK(mutated_state.next_table_id == updated_state.next_table_id);
+
+    FreeSpaceMap clean_fsm;
+    WalReplayContext clean_context{PageType::Meta, &clean_fsm};
+    clean_context.set_page(page_id, std::span<const std::byte>(crash_page.data(), crash_page.size()));
+    WalReplayer clean_replayer{clean_context};
+    REQUIRE_FALSE(clean_replayer.apply_redo(plan));
+    REQUIRE_FALSE(clean_replayer.apply_undo(plan));
+    CHECK_FALSE(clean_replayer.last_undo_type());
+
+    auto replay_page = clean_context.get_page(page_id);
+    auto tuple_span = bored::storage::read_tuple(std::span<const std::byte>(replay_page.data(), replay_page.size()), insert_result.slot.index);
+    REQUIRE(tuple_span.size() == sizeof(CatalogAllocatorState));
+    CatalogAllocatorState restored_state{};
+    std::memcpy(&restored_state, tuple_span.data(), tuple_span.size());
+
+    CHECK(restored_state.next_schema_id == baseline_state.next_schema_id);
+    CHECK(restored_state.next_table_id == baseline_state.next_table_id);
+    CHECK(restored_state.next_index_id == baseline_state.next_index_id);
+    CHECK(restored_state.next_column_id == baseline_state.next_column_id);
+
+    auto replay_header = bored::storage::page_header(std::span<const std::byte>(replay_page.data(), replay_page.size()));
+    auto committed_header = bored::storage::page_header(std::span<const std::byte>(committed_page.data(), committed_page.size()));
+    CHECK(replay_header.tuple_count == committed_header.tuple_count);
 
     (void)std::filesystem::remove_all(wal_dir);
 }
