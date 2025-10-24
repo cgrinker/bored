@@ -614,6 +614,30 @@ TEST_CASE("Drop table removes table and columns")
     CHECK(harness.columns().empty());
 }
 
+TEST_CASE("Drop table fails while dependent indexes exist")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{5U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    const catalog::RelationId table_id{13'100U};
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{21'100U}, table_id, "id", 1U);
+    harness.seed_index(catalog::IndexId{31'000U}, table_id, "metrics_idx", 77U);
+
+    DropTableRequest request{};
+    request.schema_id = schema_id;
+    request.name = "metrics";
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    CHECK_FALSE(response.success);
+    CHECK(response.error == make_error_code(DdlErrc::ValidationFailed));
+    CHECK_FALSE(harness.tables().empty());
+    CHECK_FALSE(harness.indexes().empty());
+}
+
 TEST_CASE("Drop table IF EXISTS suppresses missing errors")
 {
     DispatcherHarness harness;

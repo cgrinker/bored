@@ -5,6 +5,7 @@
 #include "bored/catalog/catalog_ddl.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/ddl/ddl_errors.hpp"
+#include "bored/ddl/ddl_dependency_graph.hpp"
 #include "bored/ddl/ddl_validation.hpp"
 
 #include <algorithm>
@@ -471,6 +472,11 @@ DdlCommandResponse handle_drop_schema(DdlCommandContext& context, const DropSche
         return make_failure(make_error_code(DdlErrc::ValidationFailed), "schema contains tables");
     }
 
+    const DdlDependencyGraph dependencies{*context.accessor};
+    if (dependencies.schema_has_indexes(schema->schema_id)) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "schema contains indexes");
+    }
+
     auto payload = serialize_schema(*schema);
     context.mutator->stage_delete(catalog::kCatalogSchemasRelationId, schema->schema_id.value, schema->tuple, std::move(payload));
     return make_success();
@@ -583,6 +589,11 @@ DdlCommandResponse handle_drop_table(DdlCommandContext& context, const DropTable
             return make_success();
         }
         return make_failure(make_error_code(DdlErrc::TableNotFound), "table not found");
+    }
+
+    const DdlDependencyGraph dependencies{*context.accessor};
+    if (dependencies.table_has_indexes(table->relation_id)) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "table has dependent indexes");
     }
 
     auto columns = context.accessor->columns(table->relation_id);

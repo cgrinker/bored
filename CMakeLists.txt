@@ -13,6 +13,7 @@ add_library(${PROJECT_NAME}_lib
     src/ddl/ddl_validation.cpp
     src/ddl/ddl_telemetry.cpp
     src/ddl/ddl_dispatcher.cpp
+    src/ddl/ddl_dependency_graph.cpp
     src/ddl/ddl_handlers.cpp
     src/catalog/catalog_bootstrapper.cpp
     src/catalog/catalog_encoding.cpp
