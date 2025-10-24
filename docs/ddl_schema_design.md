@@ -44,7 +44,7 @@
   - [x] Implement `CREATE SCHEMA`/`DROP SCHEMA` with dependency checks ensuring schemas cannot be dropped while containing tables.
   - [x] Implement `CREATE TABLE` with column definitions, type validation (primitive types), and catalog identifier allocation.
   - [x] Support `ALTER TABLE` operations: rename table, add column (appends column metadata), drop column (marks metadata as dropped, no physical reclaim yet).
-  - [ ] Implement `DROP TABLE` with retention-aware cleanup hooks (signal retention manager, flag table metadata for pruning).
+  - [x] Implement `DROP TABLE` with retention-aware cleanup hooks (signal retention manager, flag table metadata for pruning).
   - [ ] Extend checkpoint scheduler integration to account for DDL-driven dirty catalog pages.
   - Tests: integration tests using `CatalogMutator` stubs to verify catalog state after each verb, crash drills for mid-flight table creation with undo coverage.
 

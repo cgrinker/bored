@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -24,6 +25,8 @@ using catalog::CatalogColumnDescriptor;
 using catalog::CatalogMutator;
 using catalog::CatalogSchemaDescriptor;
 using catalog::CatalogTableDescriptor;
+using catalog::CatalogTupleBuilder;
+using catalog::CatalogTupleDescriptor;
 
 DdlCommandResponse make_context_failure(std::string message)
 {
@@ -117,6 +120,235 @@ std::vector<std::byte> serialize_column(const CatalogColumnDescriptor& column)
     descriptor.ordinal_position = column.ordinal_position;
     descriptor.name = column.name;
     return catalog::serialize_catalog_column(descriptor);
+}
+
+[[nodiscard]] std::size_t max_column_ordinal(const std::vector<CatalogColumnDescriptor>& columns) noexcept
+{
+    std::size_t max_value = 0U;
+    for (const auto& column : columns) {
+        max_value = std::max<std::size_t>(max_value, column.ordinal_position);
+    }
+    return max_value;
+}
+
+[[nodiscard]] CatalogColumnDescriptor* find_column(std::vector<CatalogColumnDescriptor>& columns,
+                                                   std::string_view name)
+{
+    for (auto& column : columns) {
+        if (column.name == name) {
+            return &column;
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] const CatalogColumnDescriptor* find_column(const std::vector<CatalogColumnDescriptor>& columns,
+                                                         std::string_view name)
+{
+    for (const auto& column : columns) {
+        if (column.name == name) {
+            return &column;
+        }
+    }
+    return nullptr;
+}
+
+bool column_name_available(const std::vector<CatalogColumnDescriptor>& columns, std::string_view name)
+{
+    return find_column(columns, name) == nullptr;
+}
+
+std::error_code stage_table_rename(DdlCommandContext& context,
+                                   CatalogTableDescriptor& table,
+                                   std::string_view new_name)
+{
+    auto before_payload = serialize_table(table);
+
+    CatalogTableDescriptor updated = table;
+    updated.tuple = CatalogTupleBuilder::for_update(context.transaction, table.tuple);
+    updated.name = new_name;
+
+    auto after_payload = serialize_table(updated);
+    context.mutator->stage_update(catalog::kCatalogTablesRelationId,
+                                  table.relation_id.value,
+                                  table.tuple,
+                                  std::move(before_payload),
+                                  updated.tuple,
+                                  std::move(after_payload));
+
+    table = std::move(updated);
+    return {};
+}
+
+std::error_code stage_column_rename(DdlCommandContext& context,
+                                    CatalogColumnDescriptor& column,
+                                    std::string_view new_name)
+{
+    auto before_payload = serialize_column(column);
+
+    CatalogColumnDescriptor updated = column;
+    updated.tuple = CatalogTupleBuilder::for_update(context.transaction, column.tuple);
+    updated.name = new_name;
+
+    auto after_payload = serialize_column(updated);
+    context.mutator->stage_update(catalog::kCatalogColumnsRelationId,
+                                  column.column_id.value,
+                                  column.tuple,
+                                  std::move(before_payload),
+                                  updated.tuple,
+                                  std::move(after_payload));
+
+    column = std::move(updated);
+    return {};
+}
+
+std::error_code stage_column_add(DdlCommandContext& context,
+                                 std::vector<CatalogColumnDescriptor>& columns,
+                                 const AlterTableAddColumn& action,
+                                 catalog::RelationId relation_id,
+                                 std::uint16_t& next_ordinal)
+{
+    if (auto ec = validate_identifier(action.column.name); ec) {
+        return ec;
+    }
+    if (!column_name_available(columns, action.column.name)) {
+        if (action.if_not_exists) {
+            return {};
+        }
+        return make_error_code(DdlErrc::ValidationFailed);
+    }
+    if (action.column.column_type == catalog::CatalogColumnType::Unknown) {
+        return make_error_code(DdlErrc::ValidationFailed);
+    }
+
+    catalog::ColumnDefinition column_def = action.column;
+    if (!column_def.column_id) {
+        column_def.column_id = context.allocator.allocate_column_id();
+    }
+    if (!column_def.column_id->is_valid()) {
+        return make_error_code(DdlErrc::ExecutionFailed);
+    }
+
+    const auto ordinal = column_def.ordinal.value_or(next_ordinal);
+    if (ordinal == 0U) {
+        return make_error_code(DdlErrc::ValidationFailed);
+    }
+
+    for (const auto& existing : columns) {
+        if (existing.ordinal_position == ordinal) {
+            return make_error_code(DdlErrc::ValidationFailed);
+        }
+    }
+
+    CatalogColumnDescriptor descriptor{};
+    descriptor.tuple = CatalogTupleBuilder::for_insert(context.transaction);
+    descriptor.column_id = *column_def.column_id;
+    descriptor.relation_id = relation_id;
+    descriptor.column_type = column_def.column_type;
+    descriptor.ordinal_position = ordinal;
+    descriptor.name = column_def.name;
+
+    auto payload = serialize_column(descriptor);
+    context.mutator->stage_insert(catalog::kCatalogColumnsRelationId,
+                                  descriptor.column_id.value,
+                                  descriptor.tuple,
+                                  std::move(payload));
+
+    columns.push_back(descriptor);
+    next_ordinal = static_cast<std::uint16_t>(std::max<std::uint16_t>(next_ordinal, static_cast<std::uint16_t>(ordinal + 1U)));
+    return {};
+}
+
+std::error_code stage_column_drop(DdlCommandContext& context,
+                                  std::vector<CatalogColumnDescriptor>& columns,
+                                  const AlterTableDropColumn& action)
+{
+    auto* column = find_column(columns, action.column_name);
+    if (column == nullptr) {
+        if (action.if_exists) {
+            return {};
+        }
+        return make_error_code(DdlErrc::ValidationFailed);
+    }
+
+    auto payload = serialize_column(*column);
+    const auto column_id = column->column_id;
+    context.mutator->stage_delete(catalog::kCatalogColumnsRelationId,
+                                  column_id.value,
+                                  column->tuple,
+                                  std::move(payload));
+
+    columns.erase(std::remove_if(columns.begin(), columns.end(), [&](const CatalogColumnDescriptor& entry) {
+                        return entry.column_id == column_id;
+                    }),
+                    columns.end());
+    return {};
+}
+
+std::error_code stage_alter_actions(DdlCommandContext& context,
+                                    CatalogTableDescriptor& table,
+                                    std::vector<CatalogColumnDescriptor>& columns,
+                                    const std::vector<AlterTableAction>& actions)
+{
+    std::uint16_t next_ordinal = static_cast<std::uint16_t>(max_column_ordinal(columns) + 1U);
+
+    for (const auto& action : actions) {
+        if (std::holds_alternative<AlterTableRenameTable>(action)) {
+            const auto& rename = std::get<AlterTableRenameTable>(action);
+            if (auto ec = validate_identifier(rename.new_table_name); ec) {
+                return ec;
+            }
+            if (table.name == rename.new_table_name) {
+                continue;
+            }
+            if (auto existing = find_table(*context.accessor, table.schema_id, rename.new_table_name); existing) {
+                return make_error_code(DdlErrc::TableAlreadyExists);
+            }
+            if (auto ec = stage_table_rename(context, table, rename.new_table_name); ec) {
+                return ec;
+            }
+            continue;
+        }
+
+        if (std::holds_alternative<AlterTableRenameColumn>(action)) {
+            const auto& rename = std::get<AlterTableRenameColumn>(action);
+            if (auto ec = validate_identifier(rename.new_column_name); ec) {
+                return ec;
+            }
+            if (rename.column_name == rename.new_column_name) {
+                continue;
+            }
+            auto* column = find_column(columns, rename.column_name);
+            if (column == nullptr) {
+                return make_error_code(DdlErrc::ValidationFailed);
+            }
+            if (!column_name_available(columns, rename.new_column_name)) {
+                return make_error_code(DdlErrc::ValidationFailed);
+            }
+            if (auto ec = stage_column_rename(context, *column, rename.new_column_name); ec) {
+                return ec;
+            }
+            continue;
+        }
+
+        if (std::holds_alternative<AlterTableAddColumn>(action)) {
+            const auto& add = std::get<AlterTableAddColumn>(action);
+            if (auto ec = stage_column_add(context, columns, add, table.relation_id, next_ordinal); ec) {
+                return ec;
+            }
+            continue;
+        }
+
+        if (std::holds_alternative<AlterTableDropColumn>(action)) {
+            const auto& drop = std::get<AlterTableDropColumn>(action);
+            if (auto ec = stage_column_drop(context, columns, drop); ec) {
+                return ec;
+            }
+            continue;
+        }
+    }
+
+    return {};
 }
 
 DdlCommandResponse handle_create_schema(DdlCommandContext& context, const CreateSchemaRequest& request)
@@ -310,7 +542,15 @@ DdlCommandResponse handle_drop_table(DdlCommandContext& context, const DropTable
         return make_failure(make_error_code(DdlErrc::TableNotFound), "table not found");
     }
 
-    const auto columns = context.accessor->columns(table->relation_id);
+    auto columns = context.accessor->columns(table->relation_id);
+
+    if (context.drop_table_cleanup) {
+        const auto column_span = std::span<const catalog::CatalogColumnDescriptor>(columns.data(), columns.size());
+        if (auto ec = context.drop_table_cleanup(request, *table, column_span, *context.mutator); ec) {
+            return make_failure(ec, ec.message());
+        }
+    }
+
     for (const auto& column : columns) {
         auto column_payload = serialize_column(column);
         context.mutator->stage_delete(catalog::kCatalogColumnsRelationId,
@@ -328,6 +568,46 @@ DdlCommandResponse handle_drop_table(DdlCommandContext& context, const DropTable
     return make_success();
 }
 
+DdlCommandResponse handle_alter_table(DdlCommandContext& context, const AlterTableRequest& request)
+{
+    if (context.mutator == nullptr) {
+        return make_context_failure("ddl alter table missing catalog mutator");
+    }
+    if (context.accessor == nullptr) {
+        return make_context_failure("ddl alter table missing catalog accessor");
+    }
+
+    if (!request.schema_id.is_valid()) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "target schema id is invalid");
+    }
+
+    if (auto ec = validate_identifier(request.name); ec) {
+        return make_failure(ec, "table name is invalid");
+    }
+
+    auto schema = context.accessor->schema(request.schema_id);
+    if (!schema) {
+        return make_failure(make_error_code(DdlErrc::SchemaNotFound), "schema not found");
+    }
+
+    auto table_opt = find_table(*context.accessor, request.schema_id, request.name);
+    if (!table_opt) {
+        return make_failure(make_error_code(DdlErrc::TableNotFound), "table not found");
+    }
+
+    CatalogTableDescriptor table = *table_opt;
+    auto columns = context.accessor->columns(table.relation_id);
+
+    if (auto ec = stage_alter_actions(context, table, columns, request.actions); ec) {
+        if (!ec) {
+            return make_failure(make_error_code(DdlErrc::ExecutionFailed), "alter table failed");
+        }
+        return make_failure(ec, ec.message());
+    }
+
+    return make_success();
+}
+
 }  // namespace
 
 void register_catalog_handlers(DdlCommandDispatcher& dispatcher)
@@ -336,6 +616,7 @@ void register_catalog_handlers(DdlCommandDispatcher& dispatcher)
     dispatcher.register_handler<DropSchemaRequest>(handle_drop_schema);
     dispatcher.register_handler<CreateTableRequest>(handle_create_table);
     dispatcher.register_handler<DropTableRequest>(handle_drop_table);
+    dispatcher.register_handler<AlterTableRequest>(handle_alter_table);
 }
 
 }  // namespace bored::ddl

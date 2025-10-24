@@ -21,6 +21,7 @@ public:
         std::function<std::uint64_t()> commit_lsn_provider;
         DdlTelemetryRegistry* telemetry_registry = nullptr;
         std::string telemetry_identifier;
+        DropTableCleanupHook drop_table_cleanup_hook{};
     };
 
     explicit DdlCommandDispatcher(Config config);

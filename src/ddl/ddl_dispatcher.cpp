@@ -140,6 +140,7 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
     DdlCommandContext context{*transaction, *config_.identifier_allocator};
     context.mutator = mutator.get();
     context.accessor = accessor.get();
+    context.drop_table_cleanup = config_.drop_table_cleanup_hook;
 
     TransactionScope scope{*transaction};
 

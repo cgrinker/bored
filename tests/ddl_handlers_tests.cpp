@@ -22,6 +22,8 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <system_error>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -197,9 +199,50 @@ std::vector<std::byte> make_column_payload(catalog::ColumnId column_id,
     return catalog::serialize_catalog_column(descriptor);
 }
 
+CatalogSchemaDescriptor decode_schema(const std::vector<std::byte>& payload)
+{
+    auto view = catalog::decode_catalog_schema(std::span<const std::byte>(payload.data(), payload.size()));
+    REQUIRE(view);
+    CatalogSchemaDescriptor descriptor{};
+    descriptor.tuple = view->tuple;
+    descriptor.schema_id = view->schema_id;
+    descriptor.database_id = view->database_id;
+    descriptor.name = view->name;
+    return descriptor;
+}
+
+CatalogTableDescriptor decode_table(const std::vector<std::byte>& payload)
+{
+    auto view = catalog::decode_catalog_table(std::span<const std::byte>(payload.data(), payload.size()));
+    REQUIRE(view);
+    CatalogTableDescriptor descriptor{};
+    descriptor.tuple = view->tuple;
+    descriptor.relation_id = view->relation_id;
+    descriptor.schema_id = view->schema_id;
+    descriptor.table_type = view->table_type;
+    descriptor.root_page_id = view->root_page_id;
+    descriptor.name = view->name;
+    return descriptor;
+}
+
+CatalogColumnDescriptor decode_column(const std::vector<std::byte>& payload)
+{
+    auto view = catalog::decode_catalog_column(std::span<const std::byte>(payload.data(), payload.size()));
+    REQUIRE(view);
+    CatalogColumnDescriptor descriptor{};
+    descriptor.tuple = view->tuple;
+    descriptor.column_id = view->column_id;
+    descriptor.relation_id = view->relation_id;
+    descriptor.column_type = view->column_type;
+    descriptor.ordinal_position = view->ordinal_position;
+    descriptor.name = view->name;
+    return descriptor;
+}
+
 struct DispatcherHarness final {
-    DispatcherHarness()
-        : dispatcher_(make_dispatcher_config())
+    explicit DispatcherHarness(DropTableCleanupHook drop_hook = {})
+        : drop_table_cleanup_hook_{std::move(drop_hook)}
+        , dispatcher_(make_dispatcher_config())
     {
         CatalogCache::instance().reset();
         register_catalog_handlers(dispatcher_);
@@ -245,6 +288,26 @@ struct DispatcherHarness final {
         return storage_.relation(catalog::kCatalogColumnsRelationId);
     }
 
+    [[nodiscard]] std::vector<CatalogTableDescriptor> list_tables() const
+    {
+        std::vector<CatalogTableDescriptor> result;
+        for (const auto& [_, payload] : tables()) {
+            (void)_;
+            result.push_back(decode_table(payload));
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::vector<CatalogColumnDescriptor> list_columns() const
+    {
+        std::vector<CatalogColumnDescriptor> result;
+        for (const auto& [_, payload] : columns()) {
+            (void)_;
+            result.push_back(decode_column(payload));
+        }
+        return result;
+    }
+
     StubIdentifierAllocator allocator{};
 
 private:
@@ -284,6 +347,7 @@ private:
         config.commit_lsn_provider = [] { return 0ULL; };
         config.telemetry_registry = &telemetry_registry_;
         config.telemetry_identifier = "ddl.handlers";
+        config.drop_table_cleanup_hook = drop_table_cleanup_hook_;
         return config;
     }
 
@@ -291,48 +355,9 @@ private:
     txn::TransactionIdAllocatorStub txn_allocator_{5'000U};
     txn::SnapshotManagerStub snapshot_manager_{make_snapshot()};
     DdlTelemetryRegistry telemetry_registry_{};
+    DropTableCleanupHook drop_table_cleanup_hook_{};
     DdlCommandDispatcher dispatcher_;
 };
-
-CatalogSchemaDescriptor decode_schema(const std::vector<std::byte>& payload)
-{
-    auto view = catalog::decode_catalog_schema(std::span<const std::byte>(payload.data(), payload.size()));
-    REQUIRE(view);
-    CatalogSchemaDescriptor descriptor{};
-    descriptor.tuple = view->tuple;
-    descriptor.schema_id = view->schema_id;
-    descriptor.database_id = view->database_id;
-    descriptor.name = view->name;
-    return descriptor;
-}
-
-CatalogTableDescriptor decode_table(const std::vector<std::byte>& payload)
-{
-    auto view = catalog::decode_catalog_table(std::span<const std::byte>(payload.data(), payload.size()));
-    REQUIRE(view);
-    CatalogTableDescriptor descriptor{};
-    descriptor.tuple = view->tuple;
-    descriptor.relation_id = view->relation_id;
-    descriptor.schema_id = view->schema_id;
-    descriptor.table_type = view->table_type;
-    descriptor.root_page_id = view->root_page_id;
-    descriptor.name = view->name;
-    return descriptor;
-}
-
-CatalogColumnDescriptor decode_column(const std::vector<std::byte>& payload)
-{
-    auto view = catalog::decode_catalog_column(std::span<const std::byte>(payload.data(), payload.size()));
-    REQUIRE(view);
-    CatalogColumnDescriptor descriptor{};
-    descriptor.tuple = view->tuple;
-    descriptor.column_id = view->column_id;
-    descriptor.relation_id = view->relation_id;
-    descriptor.column_type = view->column_type;
-    descriptor.ordinal_position = view->ordinal_position;
-    descriptor.name = view->name;
-    return descriptor;
-}
 
 }  // namespace
 
@@ -475,6 +500,197 @@ TEST_CASE("Drop table IF EXISTS suppresses missing errors")
     const auto response = harness.dispatch(command);
 
     CHECK(response.success);
+}
+
+TEST_CASE("Drop table invokes cleanup hook prior to deletion")
+{
+    std::size_t cleanup_invocations = 0U;
+    std::vector<std::string> observed_columns;
+    const catalog::RelationId expected_table{26'000U};
+
+    DropTableCleanupHook hook = [&, expected_table](const DropTableRequest& request,
+                                                   const catalog::CatalogTableDescriptor& table,
+                                                   std::span<const catalog::CatalogColumnDescriptor> columns,
+                                                   catalog::CatalogMutator& mutator) -> std::error_code {
+        ++cleanup_invocations;
+        CHECK(request.name == "metrics");
+        CHECK(table.relation_id == expected_table);
+        CHECK(&mutator != nullptr);
+        observed_columns.clear();
+        for (const auto& column : columns) {
+            observed_columns.emplace_back(column.name);
+        }
+        return {};
+    };
+
+    DispatcherHarness harness(std::move(hook));
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{7U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(expected_table, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{21'010U}, expected_table, "id", 1U);
+    harness.seed_column(catalog::ColumnId{21'011U}, expected_table, "name", 2U);
+
+    DropTableRequest request{};
+    request.schema_id = schema_id;
+    request.name = "metrics";
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    CHECK(cleanup_invocations == 1U);
+    REQUIRE(observed_columns.size() == 2U);
+    CHECK(std::find(observed_columns.begin(), observed_columns.end(), "id") != observed_columns.end());
+    CHECK(std::find(observed_columns.begin(), observed_columns.end(), "name") != observed_columns.end());
+    CHECK(harness.tables().empty());
+    CHECK(harness.columns().empty());
+}
+
+TEST_CASE("Drop table propagates cleanup hook failure")
+{
+    const auto failure = std::make_error_code(std::errc::operation_not_permitted);
+
+    DropTableCleanupHook hook = [failure](const DropTableRequest&,
+                                         const catalog::CatalogTableDescriptor&,
+                                         std::span<const catalog::CatalogColumnDescriptor>,
+                                         catalog::CatalogMutator&) -> std::error_code {
+        return failure;
+    };
+
+    DispatcherHarness harness(std::move(hook));
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{8U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    const catalog::RelationId table_id{27'000U};
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{21'020U}, table_id, "id", 1U);
+    harness.seed_column(catalog::ColumnId{21'021U}, table_id, "name", 2U);
+
+    DropTableRequest request{};
+    request.schema_id = schema_id;
+    request.name = "metrics";
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    CHECK_FALSE(response.success);
+    CHECK(response.error == failure);
+    CHECK(harness.tables().size() == 1U);
+    CHECK(harness.columns().size() == 2U);
+}
+
+TEST_CASE("Alter table rename table updates catalog entry")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{7U};
+    const catalog::RelationId table_id{14'000U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+
+    AlterTableRequest request{};
+    request.schema_id = schema_id;
+    request.name = "metrics";
+    request.actions = {AlterTableRenameTable{"metrics_v2"}};
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    const auto tables = harness.list_tables();
+    REQUIRE(tables.size() == 1U);
+    CHECK(tables.front().name == "metrics_v2");
+}
+
+TEST_CASE("Alter table add column stages new column")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{8U};
+    const catalog::RelationId table_id{15'000U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+
+    AlterTableRequest request{};
+    request.schema_id = schema_id;
+    request.name = "metrics";
+    request.actions = {AlterTableAddColumn{catalog::ColumnDefinition{"state", catalog::CatalogColumnType::Utf8}, false}};
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    const auto columns = harness.list_columns();
+    REQUIRE(columns.size() == 1U);
+    CHECK(columns.front().name == "state");
+    CHECK(columns.front().relation_id == table_id);
+}
+
+TEST_CASE("Alter table drop column removes metadata")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{9U};
+    const catalog::RelationId table_id{16'000U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{22'000U}, table_id, "obsolete", 1U);
+
+    AlterTableRequest request{};
+    request.schema_id = schema_id;
+    request.name = "metrics";
+    request.actions = {AlterTableDropColumn{"obsolete", false}};
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    CHECK(harness.columns().empty());
+}
+
+TEST_CASE("Alter table rename column updates column metadata")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{10U};
+    const catalog::RelationId table_id{17'000U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{23'000U}, table_id, "old_name", 1U);
+
+    AlterTableRequest request{};
+    request.schema_id = schema_id;
+    request.name = "metrics";
+    request.actions = {AlterTableRenameColumn{"old_name", "new_name"}};
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    const auto columns = harness.list_columns();
+    REQUIRE(columns.size() == 1U);
+    CHECK(columns.front().name == "new_name");
+}
+
+TEST_CASE("Alter table drop column missing without IF EXISTS fails")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{11U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(catalog::RelationId{18'000U}, schema_id, "metrics");
+
+    AlterTableRequest request{};
+    request.schema_id = schema_id;
+    request.name = "metrics";
+    request.actions = {AlterTableDropColumn{"missing", false}};
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    CHECK_FALSE(response.success);
+    CHECK(response.error == make_error_code(DdlErrc::ValidationFailed));
 }
 
 }  // namespace

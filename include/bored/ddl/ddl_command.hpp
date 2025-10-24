@@ -2,11 +2,15 @@
 
 #include "bored/catalog/catalog_ddl.hpp"
 #include "bored/catalog/catalog_ids.hpp"
+#include "bored/catalog/catalog_relations.hpp"
 #include "bored/ddl/ddl_errors.hpp"
 
+#include <functional>
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <span>
 #include <variant>
 #include <vector>
 
@@ -95,6 +99,11 @@ struct AlterTableRequest final {
     std::vector<AlterTableAction> actions{};
 };
 
+using DropTableCleanupHook = std::function<std::error_code(const DropTableRequest&,
+                                                           const catalog::CatalogTableDescriptor&,
+                                                           std::span<const catalog::CatalogColumnDescriptor>,
+                                                           catalog::CatalogMutator&)>;
+
 struct CreateIndexRequest final {
     catalog::SchemaId schema_id{};
     std::string table_name{};
@@ -137,6 +146,7 @@ struct DdlCommandContext final {
     catalog::CatalogIdentifierAllocator& allocator;
     catalog::CatalogMutator* mutator = nullptr;
     catalog::CatalogAccessor* accessor = nullptr;
+    DropTableCleanupHook drop_table_cleanup{};
 };
 
 namespace detail {
