@@ -13,6 +13,7 @@ add_library(${PROJECT_NAME}_lib
     src/catalog/catalog_encoding.cpp
     src/catalog/catalog_ddl.cpp
     src/catalog/catalog_cache.cpp
+    src/catalog/catalog_telemetry.cpp
     src/catalog/catalog_mutator.cpp
     src/catalog/catalog_accessor.cpp
     src/catalog/catalog_transaction.cpp

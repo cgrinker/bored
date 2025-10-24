@@ -55,6 +55,15 @@ struct CatalogMutationBatch final {
     std::uint64_t commit_lsn = 0U;
 };
 
+struct CatalogMutationTelemetrySnapshot final {
+    std::uint64_t published_batches = 0U;
+    std::uint64_t published_mutations = 0U;
+    std::uint64_t published_wal_records = 0U;
+    std::uint64_t publish_failures = 0U;
+    std::uint64_t aborted_batches = 0U;
+    std::uint64_t aborted_mutations = 0U;
+};
+
 class CatalogMutator final {
 public:
     explicit CatalogMutator(CatalogMutatorConfig config);
@@ -95,9 +104,13 @@ public:
     [[nodiscard]] const std::optional<CatalogWalRecordStaging>& wal_record(std::size_t index) const;
     void clear_wal_record(std::size_t index) noexcept;
 
+    static CatalogMutationTelemetrySnapshot telemetry() noexcept;
+    static void reset_telemetry() noexcept;
+
 private:
     std::error_code publish_staged_batch();
     void register_transaction_hooks();
+    void record_abort() noexcept;
 
     CatalogTransaction* transaction_ = nullptr;
     std::function<std::uint64_t()> commit_lsn_provider_{};

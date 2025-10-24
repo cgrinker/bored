@@ -5,6 +5,7 @@
 #include "bored/storage/wal_payloads.hpp"
 
 #include <array>
+#include <atomic>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
@@ -14,6 +15,13 @@
 namespace bored::catalog {
 
 namespace {
+
+std::atomic<std::uint64_t> g_published_batches{0U};
+std::atomic<std::uint64_t> g_published_mutations{0U};
+std::atomic<std::uint64_t> g_published_wal_records{0U};
+std::atomic<std::uint64_t> g_publish_failures{0U};
+std::atomic<std::uint64_t> g_aborted_batches{0U};
+std::atomic<std::uint64_t> g_aborted_mutations{0U};
 
 [[nodiscard]] CatalogTupleVersion make_version(CatalogTupleDescriptor descriptor, std::vector<std::byte> payload)
 {
@@ -377,6 +385,7 @@ std::error_code CatalogMutator::publish_staged_batch()
     for (std::size_t index = 0; index < staged_.size(); ++index) {
         const auto page_id_opt = relation_page_id(staged_[index].relation_id);
         if (!page_id_opt) {
+            g_publish_failures.fetch_add(1U, std::memory_order_relaxed);
             return std::make_error_code(std::errc::invalid_argument);
         }
 
@@ -384,6 +393,7 @@ std::error_code CatalogMutator::publish_staged_batch()
         wal_entry.records.clear();
 
         if (auto ec = build_wal_records_for_mutation(staged_[index], *page_id_opt, wal_entry); ec) {
+            g_publish_failures.fetch_add(1U, std::memory_order_relaxed);
             return ec;
         }
     }
@@ -397,6 +407,17 @@ std::error_code CatalogMutator::publish_staged_batch()
             entry->commit_lsn = batch.commit_lsn;
         }
     }
+
+    std::uint64_t wal_record_count = 0U;
+    for (const auto& entry : batch.wal_records) {
+        if (entry) {
+            wal_record_count += entry->records.size();
+        }
+    }
+
+    g_published_batches.fetch_add(1U, std::memory_order_relaxed);
+    g_published_mutations.fetch_add(batch.mutations.size(), std::memory_order_relaxed);
+    g_published_wal_records.fetch_add(wal_record_count, std::memory_order_relaxed);
 
     std::array<RelationId, 5U> mutated_relations{};
     std::size_t mutated_count = 0U;
@@ -432,8 +453,40 @@ void CatalogMutator::register_transaction_hooks()
         return this->publish_staged_batch();
     });
     transaction_->register_abort_hook([this]() {
+        this->record_abort();
         this->clear();
     });
+}
+
+CatalogMutationTelemetrySnapshot CatalogMutator::telemetry() noexcept
+{
+    CatalogMutationTelemetrySnapshot snapshot{};
+    snapshot.published_batches = g_published_batches.load(std::memory_order_relaxed);
+    snapshot.published_mutations = g_published_mutations.load(std::memory_order_relaxed);
+    snapshot.published_wal_records = g_published_wal_records.load(std::memory_order_relaxed);
+    snapshot.publish_failures = g_publish_failures.load(std::memory_order_relaxed);
+    snapshot.aborted_batches = g_aborted_batches.load(std::memory_order_relaxed);
+    snapshot.aborted_mutations = g_aborted_mutations.load(std::memory_order_relaxed);
+    return snapshot;
+}
+
+void CatalogMutator::reset_telemetry() noexcept
+{
+    g_published_batches.store(0U, std::memory_order_relaxed);
+    g_published_mutations.store(0U, std::memory_order_relaxed);
+    g_published_wal_records.store(0U, std::memory_order_relaxed);
+    g_publish_failures.store(0U, std::memory_order_relaxed);
+    g_aborted_batches.store(0U, std::memory_order_relaxed);
+    g_aborted_mutations.store(0U, std::memory_order_relaxed);
+}
+
+void CatalogMutator::record_abort() noexcept
+{
+    if (staged_.empty()) {
+        return;
+    }
+    g_aborted_batches.fetch_add(1U, std::memory_order_relaxed);
+    g_aborted_mutations.fetch_add(staged_.size(), std::memory_order_relaxed);
 }
 
 CatalogTupleDescriptor CatalogTupleBuilder::for_insert(const CatalogTransaction& transaction,

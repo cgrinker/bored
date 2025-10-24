@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace bored::storage;
@@ -95,6 +96,22 @@ WalRetentionTelemetrySnapshot make_retention_snapshot(std::uint64_t base)
     return snapshot;
 }
 
+CatalogTelemetrySnapshot make_catalog_snapshot(std::uint64_t base)
+{
+    CatalogTelemetrySnapshot snapshot{};
+    snapshot.cache_hits = (base + 1U) * 10U;
+    snapshot.cache_misses = (base + 2U) * 5U;
+    snapshot.cache_relations = static_cast<std::size_t>((base + 3U));
+    snapshot.cache_total_bytes = static_cast<std::size_t>((base + 4U) * 1024U);
+    snapshot.published_batches = base + 5U;
+    snapshot.published_mutations = base + 6U;
+    snapshot.published_wal_records = base + 7U;
+    snapshot.publish_failures = base + 8U;
+    snapshot.aborted_batches = base + 9U;
+    snapshot.aborted_mutations = base + 10U;
+    return snapshot;
+}
+
 }  // namespace
 
 TEST_CASE("StorageTelemetryRegistry aggregates page managers")
@@ -173,22 +190,46 @@ TEST_CASE("StorageTelemetryRegistry aggregates WAL retention samplers")
     REQUIRE(total.last_duration_ns == ((7U + 7U) * 5U));
 }
 
+TEST_CASE("StorageTelemetryRegistry aggregates catalog telemetry")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_catalog("catalog_a", [] { return make_catalog_snapshot(1U); });
+    registry.register_catalog("catalog_b", [] { return make_catalog_snapshot(4U); });
+
+    const auto total = registry.aggregate_catalog();
+
+    REQUIRE(total.cache_hits == ((1U + 1U) * 10U + (4U + 1U) * 10U));
+    REQUIRE(total.cache_misses == ((1U + 2U) * 5U + (4U + 2U) * 5U));
+    REQUIRE(total.cache_relations == static_cast<std::size_t>((1U + 3U) + (4U + 3U)));
+    REQUIRE(total.cache_total_bytes == static_cast<std::size_t>(((1U + 4U) + (4U + 4U)) * 1024U));
+    REQUIRE(total.published_batches == ((1U + 5U) + (4U + 5U)));
+    REQUIRE(total.published_mutations == ((1U + 6U) + (4U + 6U)));
+    REQUIRE(total.published_wal_records == ((1U + 7U) + (4U + 7U)));
+    REQUIRE(total.publish_failures == ((1U + 8U) + (4U + 8U)));
+    REQUIRE(total.aborted_batches == ((1U + 9U) + (4U + 9U)));
+    REQUIRE(total.aborted_mutations == ((1U + 10U) + (4U + 10U)));
+}
+
 TEST_CASE("StorageTelemetryRegistry unregisters samplers")
 {
     StorageTelemetryRegistry registry;
     registry.register_page_manager("pm", [] { return make_page_snapshot(1U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint_snapshot(1U); });
     registry.register_wal_retention("ret", [] { return make_retention_snapshot(1U); });
+    registry.register_catalog("cat", [] { return make_catalog_snapshot(2U); });
 
     registry.unregister_page_manager("pm");
     registry.unregister_checkpoint_scheduler("ckpt");
     registry.unregister_wal_retention("ret");
+    registry.unregister_catalog("cat");
 
     auto pm_total = registry.aggregate_page_managers();
     auto ckpt_total = registry.aggregate_checkpoint_schedulers();
     auto ret_total = registry.aggregate_wal_retention();
+    auto cat_total = registry.aggregate_catalog();
 
     REQUIRE(pm_total.initialize.attempts == 0U);
     REQUIRE(ckpt_total.invocations == 0U);
     REQUIRE(ret_total.invocations == 0U);
+    REQUIRE(cat_total.cache_hits == 0U);
 }

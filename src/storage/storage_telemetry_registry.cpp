@@ -78,6 +78,21 @@ WalRetentionTelemetrySnapshot& accumulate(WalRetentionTelemetrySnapshot& target,
     return target;
 }
 
+CatalogTelemetrySnapshot& accumulate(CatalogTelemetrySnapshot& target, const CatalogTelemetrySnapshot& source)
+{
+    target.cache_hits += source.cache_hits;
+    target.cache_misses += source.cache_misses;
+    target.cache_relations += source.cache_relations;
+    target.cache_total_bytes += source.cache_total_bytes;
+    target.published_batches += source.published_batches;
+    target.published_mutations += source.published_mutations;
+    target.published_wal_records += source.published_wal_records;
+    target.publish_failures += source.publish_failures;
+    target.aborted_batches += source.aborted_batches;
+    target.aborted_mutations += source.aborted_mutations;
+    return target;
+}
+
 template <typename Snapshot>
 Snapshot aggregate_snapshots(const std::vector<std::function<Snapshot()>>& samplers)
 {
@@ -234,6 +249,57 @@ void StorageTelemetryRegistry::visit_wal_retention(const WalRetentionVisitor& vi
         std::lock_guard guard(mutex_);
         entries.reserve(wal_retention_samplers_.size());
         for (const auto& [identifier, sampler] : wal_retention_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_catalog(std::string identifier, CatalogSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    catalog_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_catalog(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    catalog_samplers_.erase(identifier);
+}
+
+CatalogTelemetrySnapshot StorageTelemetryRegistry::aggregate_catalog() const
+{
+    std::vector<CatalogSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(catalog_samplers_.size());
+        for (const auto& [_, sampler] : catalog_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<CatalogTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_catalog(const CatalogVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, CatalogSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(catalog_samplers_.size());
+        for (const auto& [identifier, sampler] : catalog_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }

@@ -350,3 +350,62 @@ TEST_CASE("Catalog mutator commit invalidates accessor caches")
     const auto after_epoch = CatalogAccessor::current_epoch(kCatalogTablesRelationId);
     CHECK(after_epoch > before_epoch);
 }
+
+TEST_CASE("CatalogMutator telemetry tracks published aborted and failed batches")
+{
+    CatalogMutator::reset_telemetry();
+
+    bored::txn::TransactionIdAllocatorStub allocator{10'000U};
+    bored::txn::SnapshotManagerStub snapshot_manager{};
+    CatalogTransaction transaction({&allocator, &snapshot_manager});
+
+    const std::uint64_t commit_lsn = 0xFFU;
+    CatalogMutator mutator({&transaction, [commit_lsn]() { return commit_lsn; }});
+
+    CatalogTableDescriptor table_descriptor{};
+    table_descriptor.tuple = CatalogTupleBuilder::for_insert(transaction);
+    table_descriptor.relation_id = RelationId{12'345U};
+    table_descriptor.schema_id = kSystemSchemaId;
+    table_descriptor.table_type = CatalogTableType::Heap;
+    table_descriptor.root_page_id = 777U;
+    table_descriptor.name = "telemetry";
+    auto payload = serialize_catalog_table(table_descriptor);
+
+    mutator.stage_insert(kCatalogTablesRelationId, table_descriptor.relation_id.value, table_descriptor.tuple, std::move(payload));
+    REQUIRE_FALSE(transaction.commit());
+
+    auto telemetry = CatalogMutator::telemetry();
+    REQUIRE(telemetry.published_batches == 1U);
+    REQUIRE(telemetry.published_mutations == 1U);
+    REQUIRE(telemetry.published_wal_records >= 1U);
+    REQUIRE(telemetry.publish_failures == 0U);
+    REQUIRE(telemetry.aborted_batches == 0U);
+
+    bored::txn::TransactionIdAllocatorStub abort_allocator{11'000U};
+    bored::txn::SnapshotManagerStub abort_snapshot_manager{};
+    CatalogTransaction abort_tx({&abort_allocator, &abort_snapshot_manager});
+    CatalogMutator abort_mutator({&abort_tx});
+    auto abort_descriptor = CatalogTupleBuilder::for_insert(abort_tx);
+    abort_mutator.stage_insert(kCatalogTablesRelationId, 22'000U, abort_descriptor, make_payload("abort"));
+    REQUIRE_FALSE(abort_tx.abort());
+
+    telemetry = CatalogMutator::telemetry();
+    REQUIRE(telemetry.aborted_batches == 1U);
+    REQUIRE(telemetry.aborted_mutations == 1U);
+
+    bored::txn::TransactionIdAllocatorStub failure_allocator{12'000U};
+    bored::txn::SnapshotManagerStub failure_snapshot_manager{};
+    CatalogTransaction failure_tx({&failure_allocator, &failure_snapshot_manager});
+    CatalogMutator failure_mutator({&failure_tx});
+    auto failure_descriptor = CatalogTupleBuilder::for_insert(failure_tx);
+    failure_mutator.stage_insert(RelationId{999'999U}, 30'000U, failure_descriptor, make_payload("fail"));
+
+    auto failure_ec = failure_tx.commit();
+    REQUIRE(failure_ec == std::make_error_code(std::errc::invalid_argument));
+
+    telemetry = CatalogMutator::telemetry();
+    REQUIRE(telemetry.publish_failures == 1U);
+    REQUIRE(telemetry.published_batches == 1U);
+    REQUIRE(telemetry.aborted_batches == 2U);
+    REQUIRE(telemetry.aborted_mutations == 2U);
+}

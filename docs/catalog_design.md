@@ -75,6 +75,7 @@
 - **WAL Writer:** Catalog tuples logged with dedicated record type; headers include relation id and tuple payload checksum.
 - **Page Manager:** Provides catalog-specific page format helpers and ensures LSN updates propagate to free-space map.
 - **Telemetry:** Emit catalog mutation counters and cache hit ratios into `StorageTelemetryRegistry`.
+	- Catalog cache and mutator expose telemetry via `register_catalog_telemetry`, feeding `StorageTelemetryRegistry` aggregations and diagnostics surfaces.
 
 ## Testing Strategy
 - Unit tests for tuple visibility rules and MVCC filtering.
@@ -110,7 +111,7 @@
 	- [x] **Task 2.8:** Document DDL mutation lifecycle, catalog locking expectations, and troubleshooting guidance in `docs/catalog_design.md` and operator docs.
 - **Milestone 3: Caching, Telemetry, and Hardening (1 sprint)**
 	- [x] Add shared catalog cache with invalidation on commit and retention-aware eviction policy.
-	- Emit catalog mutation and cache-hit telemetry into existing registries.
+	- [x] Emit catalog mutation and cache-hit telemetry into existing registries.
 	- Conduct crash drills covering mid-flight DDL, id allocator rollbacks, and catalog corruption detection.
 	- Tests: cache eviction correctness, telemetry smoke tests, recovery validation.
 

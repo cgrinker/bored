@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -69,6 +70,19 @@ struct WalRetentionTelemetrySnapshot final {
     std::uint64_t last_duration_ns = 0U;
 };
 
+struct CatalogTelemetrySnapshot final {
+    std::uint64_t cache_hits = 0U;
+    std::uint64_t cache_misses = 0U;
+    std::size_t cache_relations = 0U;
+    std::size_t cache_total_bytes = 0U;
+    std::uint64_t published_batches = 0U;
+    std::uint64_t published_mutations = 0U;
+    std::uint64_t published_wal_records = 0U;
+    std::uint64_t publish_failures = 0U;
+    std::uint64_t aborted_batches = 0U;
+    std::uint64_t aborted_mutations = 0U;
+};
+
 class StorageTelemetryRegistry final {
 public:
     using PageManagerSampler = std::function<PageManagerTelemetrySnapshot()>;
@@ -79,6 +93,9 @@ public:
 
     using WalRetentionSampler = std::function<WalRetentionTelemetrySnapshot()>;
     using WalRetentionVisitor = std::function<void(const std::string&, const WalRetentionTelemetrySnapshot&)>;
+
+    using CatalogSampler = std::function<CatalogTelemetrySnapshot()>;
+    using CatalogVisitor = std::function<void(const std::string&, const CatalogTelemetrySnapshot&)>;
 
     void register_page_manager(std::string identifier, PageManagerSampler sampler);
     void unregister_page_manager(const std::string& identifier);
@@ -95,11 +112,17 @@ public:
     WalRetentionTelemetrySnapshot aggregate_wal_retention() const;
     void visit_wal_retention(const WalRetentionVisitor& visitor) const;
 
+    void register_catalog(std::string identifier, CatalogSampler sampler);
+    void unregister_catalog(const std::string& identifier);
+    CatalogTelemetrySnapshot aggregate_catalog() const;
+    void visit_catalog(const CatalogVisitor& visitor) const;
+
 private:
     mutable std::mutex mutex_{};
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
     std::unordered_map<std::string, CheckpointSampler> checkpoint_samplers_{};
     std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
+    std::unordered_map<std::string, CatalogSampler> catalog_samplers_{};
 };
 
 }  // namespace bored::storage

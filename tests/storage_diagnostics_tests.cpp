@@ -42,6 +42,22 @@ WalRetentionTelemetrySnapshot make_retention(std::uint64_t seed)
     return snapshot;
 }
 
+CatalogTelemetrySnapshot make_catalog(std::uint64_t seed)
+{
+    CatalogTelemetrySnapshot snapshot{};
+    snapshot.cache_hits = (seed + 1U) * 10U;
+    snapshot.cache_misses = (seed + 2U) * 4U;
+    snapshot.cache_relations = static_cast<std::size_t>(seed + 3U);
+    snapshot.cache_total_bytes = static_cast<std::size_t>((seed + 4U) * 512U);
+    snapshot.published_batches = seed + 5U;
+    snapshot.published_mutations = seed + 6U;
+    snapshot.published_wal_records = seed + 7U;
+    snapshot.publish_failures = seed + 8U;
+    snapshot.aborted_batches = seed + 9U;
+    snapshot.aborted_mutations = seed + 10U;
+    return snapshot;
+}
+
 }  // namespace
 
 TEST_CASE("collect_storage_diagnostics aggregates totals and details")
@@ -52,6 +68,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     registry.register_checkpoint_scheduler("ckpt_a", [] { return make_checkpoint(2U); });
     registry.register_checkpoint_scheduler("ckpt_b", [] { return make_checkpoint(4U); });
     registry.register_wal_retention("ret_a", [] { return make_retention(3U); });
+    registry.register_catalog("cat_a", [] { return make_catalog(1U); });
+    registry.register_catalog("cat_b", [] { return make_catalog(4U); });
 
     const StorageDiagnosticsOptions options{};
     const auto doc = collect_storage_diagnostics(registry, options);
@@ -62,6 +80,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.checkpoints.total.emitted_checkpoints == ((2U + 2U) + (4U + 2U)));
     REQUIRE(doc.retention.details.size() == 1U);
     REQUIRE(doc.retention.total.pruned_segments == (3U + 2U));
+    REQUIRE(doc.catalog.details.size() == 2U);
+    REQUIRE(doc.catalog.total.cache_hits == ((1U + 1U) * 10U + (4U + 1U) * 10U));
     REQUIRE(doc.collected_at.time_since_epoch().count() != 0);
 
     REQUIRE(doc.page_managers.details.front().identifier == "pm_a");
@@ -74,17 +94,20 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     registry.register_page_manager("pm", [] { return make_page_manager(1U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(1U); });
     registry.register_wal_retention("ret", [] { return make_retention(1U); });
+    registry.register_catalog("cat", [] { return make_catalog(2U); });
 
     StorageDiagnosticsOptions options{};
     options.include_page_manager_details = false;
     options.include_checkpoint_details = false;
     options.include_retention_details = false;
+    options.include_catalog_details = false;
 
     const auto doc = collect_storage_diagnostics(registry, options);
 
     REQUIRE(doc.page_managers.details.empty());
     REQUIRE(doc.checkpoints.details.empty());
     REQUIRE(doc.retention.details.empty());
+    REQUIRE(doc.catalog.details.empty());
 }
 
 TEST_CASE("storage_diagnostics_to_json serialises expected fields")
@@ -93,6 +116,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     registry.register_page_manager("pm", [] { return make_page_manager(3U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(5U); });
     registry.register_wal_retention("ret", [] { return make_retention(7U); });
+    registry.register_catalog("cat", [] { return make_catalog(4U); });
 
     const auto doc = collect_storage_diagnostics(registry);
     const auto json = storage_diagnostics_to_json(doc);
@@ -102,5 +126,6 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"pm\"") != std::string::npos);
     REQUIRE(json.find("\"checkpoints\"") != std::string::npos);
     REQUIRE(json.find("\"retention\"") != std::string::npos);
+    REQUIRE(json.find("\"catalog\"") != std::string::npos);
     REQUIRE(json.find("\"pruned_segments\":9") != std::string::npos);
 }
