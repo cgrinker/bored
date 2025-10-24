@@ -34,9 +34,9 @@
 ## Milestones
 
 - **Milestone 0: DDL Infrastructure Bootstrap (1 sprint)**
-  - [ ] Define DDL request/response structs covering planned verbs with extensible metadata (options, IF EXISTS, etc.).
+  - [x] Define DDL request/response structs covering planned verbs with extensible metadata (options, IF EXISTS, etc.).
   - [ ] Implement DDL command dispatcher that acquires a `CatalogTransaction`, invokes verb-specific executors, and translates errors to client responses.
-  - [ ] Provide validation helpers for common checks (name syntax, schema existence, duplicate detection) returning `std::error_code` flavors aligned with storage errors.
+  - [x] Provide validation helpers for common checks (name syntax, schema existence, duplicate detection) returning `std::error_code` flavors aligned with storage errors.
   - [ ] Integrate dispatcher with telemetry registry (basic counters for each verb and failure mode).
   - Tests: unit tests for dispatcher plumbing, validation helpers, and telemetry counter increments.
 
