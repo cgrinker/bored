@@ -1,5 +1,6 @@
 #include "bored/catalog/catalog_mutator.hpp"
 
+#include "bored/catalog/catalog_accessor.hpp"
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
 #include "bored/storage/wal_payloads.hpp"
 
@@ -396,6 +397,29 @@ std::error_code CatalogMutator::publish_staged_batch()
             entry->commit_lsn = batch.commit_lsn;
         }
     }
+
+    std::array<RelationId, 5U> mutated_relations{};
+    std::size_t mutated_count = 0U;
+    auto record_relation = [&mutated_relations, &mutated_count](RelationId relation_id) {
+        if (!relation_id.is_valid()) {
+            return;
+        }
+        for (std::size_t index = 0U; index < mutated_count; ++index) {
+            if (mutated_relations[index] == relation_id) {
+                return;
+            }
+        }
+        mutated_relations[mutated_count++] = relation_id;
+    };
+
+    for (const auto& mutation : batch.mutations) {
+        record_relation(mutation.relation_id);
+    }
+
+    for (std::size_t index = 0U; index < mutated_count; ++index) {
+        CatalogAccessor::invalidate_relation(mutated_relations[index]);
+    }
+
     published_batch_ = std::move(batch);
     staged_.clear();
     wal_records_.clear();

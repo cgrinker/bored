@@ -157,6 +157,66 @@ TEST_CASE("Catalog accessor caches relation scans and filters visibility")
     CHECK(scan_counts[kCatalogColumnsRelationId.value] == 1U);
 }
 
+TEST_CASE("Catalog accessor cache invalidation reloads relation data")
+{
+    bored::txn::Snapshot snapshot{};
+    snapshot.xmin = 5U;
+    snapshot.xmax = 20U;
+
+    bored::txn::TransactionIdAllocatorStub allocator{200U};
+    bored::txn::SnapshotManagerStub manager{snapshot};
+    CatalogTransaction transaction({&allocator, &manager});
+
+    RelationStorage storage;
+    std::unordered_map<std::uint64_t, std::size_t> scan_counts;
+
+    auto scanner = [&storage, &scan_counts](RelationId relation_id, const CatalogAccessor::TupleCallback& callback) {
+        ++scan_counts[relation_id.value];
+        auto it = storage.tuples.find(relation_id.value);
+        if (it == storage.tuples.end()) {
+            return;
+        }
+        for (const auto& buffer : it->second) {
+            callback(std::span<const std::byte>(buffer.data(), buffer.size()));
+        }
+    };
+
+    CatalogDatabaseDescriptor database{tuple_descriptor(4U, 0U), kSystemDatabaseId, kSystemSchemaId, "system"};
+    storage.add(kCatalogDatabasesRelationId, serialize_catalog_database(database));
+
+    CatalogSchemaDescriptor base_schema{tuple_descriptor(4U, 0U), SchemaId{50U}, kSystemDatabaseId, "base"};
+    storage.add(kCatalogSchemasRelationId, serialize_catalog_schema(base_schema));
+
+    CatalogAccessor accessor({&transaction, scanner});
+
+    auto schemas_initial = accessor.schemas(kSystemDatabaseId);
+    REQUIRE(schemas_initial.size() == 1U);
+    CHECK(schemas_initial.front().name == "base");
+    CHECK(scan_counts[kCatalogSchemasRelationId.value] == 1U);
+
+    CatalogSchemaDescriptor new_schema{tuple_descriptor(18U, 0U), SchemaId{60U}, kSystemDatabaseId, "analytics"};
+    storage.add(kCatalogSchemasRelationId, serialize_catalog_schema(new_schema));
+
+    bored::txn::Snapshot refreshed{};
+    refreshed.xmin = 5U;
+    refreshed.xmax = 50U;
+    manager.set_snapshot(refreshed);
+    transaction.refresh_snapshot();
+
+    CatalogAccessor::invalidate_relation(kCatalogSchemasRelationId);
+
+    auto schemas_after = accessor.schemas(kSystemDatabaseId);
+    REQUIRE(schemas_after.size() == 2U);
+    std::vector<std::string> schema_names;
+    schema_names.reserve(schemas_after.size());
+    for (const auto& schema_descriptor : schemas_after) {
+        schema_names.emplace_back(schema_descriptor.name.begin(), schema_descriptor.name.end());
+    }
+    CHECK(std::find(schema_names.begin(), schema_names.end(), "base") != schema_names.end());
+    CHECK(std::find(schema_names.begin(), schema_names.end(), "analytics") != schema_names.end());
+    CHECK(scan_counts[kCatalogSchemasRelationId.value] == 2U);
+}
+
 TEST_CASE("Catalog accessor snapshot differences affect visibility")
 {
     RelationStorage storage;

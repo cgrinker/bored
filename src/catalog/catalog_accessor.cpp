@@ -1,5 +1,6 @@
 #include "bored/catalog/catalog_accessor.hpp"
 
+#include <atomic>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -7,6 +8,28 @@
 namespace bored::catalog {
 
 namespace {
+
+std::atomic<std::uint64_t> g_databases_epoch{1U};
+std::atomic<std::uint64_t> g_schemas_epoch{1U};
+std::atomic<std::uint64_t> g_tables_epoch{1U};
+std::atomic<std::uint64_t> g_columns_epoch{1U};
+
+std::atomic<std::uint64_t>* epoch_for_relation(RelationId relation_id) noexcept
+{
+    if (relation_id == kCatalogDatabasesRelationId) {
+        return &g_databases_epoch;
+    }
+    if (relation_id == kCatalogSchemasRelationId) {
+        return &g_schemas_epoch;
+    }
+    if (relation_id == kCatalogTablesRelationId) {
+        return &g_tables_epoch;
+    }
+    if (relation_id == kCatalogColumnsRelationId) {
+        return &g_columns_epoch;
+    }
+    return nullptr;
+}
 
 std::string make_string(std::string_view value)
 {
@@ -119,11 +142,39 @@ std::vector<CatalogColumnDescriptor> CatalogAccessor::columns(RelationId relatio
     return result;
 }
 
+void CatalogAccessor::invalidate_all() noexcept
+{
+    g_databases_epoch.fetch_add(1U, std::memory_order_acq_rel);
+    g_schemas_epoch.fetch_add(1U, std::memory_order_acq_rel);
+    g_tables_epoch.fetch_add(1U, std::memory_order_acq_rel);
+    g_columns_epoch.fetch_add(1U, std::memory_order_acq_rel);
+}
+
+void CatalogAccessor::invalidate_relation(RelationId relation_id) noexcept
+{
+    if (auto* epoch = epoch_for_relation(relation_id); epoch != nullptr) {
+        epoch->fetch_add(1U, std::memory_order_acq_rel);
+    }
+}
+
+std::uint64_t CatalogAccessor::current_epoch(RelationId relation_id) noexcept
+{
+    if (auto* epoch = epoch_for_relation(relation_id); epoch != nullptr) {
+        return epoch->load(std::memory_order_acquire);
+    }
+    return 0U;
+}
+
 void CatalogAccessor::ensure_databases_loaded() const
 {
-    if (databases_loaded_) {
+    const auto current_epoch = g_databases_epoch.load(std::memory_order_acquire);
+    if (databases_loaded_ && databases_epoch_ == current_epoch) {
         return;
     }
+
+    databases_.clear();
+    database_index_.clear();
+    database_name_index_.clear();
 
     scanner_(kCatalogDatabasesRelationId, [this](std::span<const std::byte> tuple_span) {
         auto view = decode_catalog_database(tuple_span);
@@ -147,15 +198,20 @@ void CatalogAccessor::ensure_databases_loaded() const
     });
 
     databases_loaded_ = true;
+    databases_epoch_ = current_epoch;
 }
 
 void CatalogAccessor::ensure_schemas_loaded() const
 {
-    if (schemas_loaded_) {
+    const auto current_epoch = g_schemas_epoch.load(std::memory_order_acquire);
+    if (schemas_loaded_ && schemas_epoch_ == current_epoch) {
         return;
     }
 
     ensure_databases_loaded();
+
+    schemas_.clear();
+    schema_index_.clear();
 
     scanner_(kCatalogSchemasRelationId, [this](std::span<const std::byte> tuple_span) {
         auto view = decode_catalog_schema(tuple_span);
@@ -178,15 +234,21 @@ void CatalogAccessor::ensure_schemas_loaded() const
     });
 
     schemas_loaded_ = true;
+    schemas_epoch_ = current_epoch;
 }
 
 void CatalogAccessor::ensure_tables_loaded() const
 {
-    if (tables_loaded_) {
+    const auto current_epoch = g_tables_epoch.load(std::memory_order_acquire);
+    if (tables_loaded_ && tables_epoch_ == current_epoch) {
         return;
     }
 
     ensure_schemas_loaded();
+
+    tables_.clear();
+    table_index_.clear();
+    tables_by_schema_.clear();
 
     scanner_(kCatalogTablesRelationId, [this](std::span<const std::byte> tuple_span) {
         auto view = decode_catalog_table(tuple_span);
@@ -212,15 +274,20 @@ void CatalogAccessor::ensure_tables_loaded() const
     });
 
     tables_loaded_ = true;
+    tables_epoch_ = current_epoch;
 }
 
 void CatalogAccessor::ensure_columns_loaded() const
 {
-    if (columns_loaded_) {
+    const auto current_epoch = g_columns_epoch.load(std::memory_order_acquire);
+    if (columns_loaded_ && columns_epoch_ == current_epoch) {
         return;
     }
 
     ensure_tables_loaded();
+
+    columns_.clear();
+    columns_by_relation_.clear();
 
     scanner_(kCatalogColumnsRelationId, [this](std::span<const std::byte> tuple_span) {
         auto view = decode_catalog_column(tuple_span);
@@ -245,6 +312,7 @@ void CatalogAccessor::ensure_columns_loaded() const
     });
 
     columns_loaded_ = true;
+    columns_epoch_ = current_epoch;
 }
 
 }  // namespace bored::catalog

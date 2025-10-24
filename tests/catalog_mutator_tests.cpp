@@ -1,4 +1,5 @@
 #include "bored/catalog/catalog_mutator.hpp"
+#include "bored/catalog/catalog_accessor.hpp"
 #include "bored/catalog/catalog_mvcc.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
@@ -329,4 +330,23 @@ TEST_CASE("Catalog mutator abort discards staged batch")
     CHECK(transaction.is_aborted());
     CHECK(mutator.empty());
     CHECK_FALSE(mutator.has_published_batch());
+}
+
+TEST_CASE("Catalog mutator commit invalidates accessor caches")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{911U};
+    bored::txn::SnapshotManagerStub snapshot_manager{};
+    CatalogTransaction transaction({&allocator, &snapshot_manager});
+
+    CatalogMutator mutator({&transaction});
+
+    auto descriptor = CatalogTupleBuilder::for_insert(transaction);
+    mutator.stage_insert(kCatalogTablesRelationId, 15000U, descriptor, make_payload("invalidate"));
+
+    const auto before_epoch = CatalogAccessor::current_epoch(kCatalogTablesRelationId);
+
+    REQUIRE_FALSE(transaction.commit());
+
+    const auto after_epoch = CatalogAccessor::current_epoch(kCatalogTablesRelationId);
+    CHECK(after_epoch > before_epoch);
 }

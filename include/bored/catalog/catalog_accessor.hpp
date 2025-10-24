@@ -4,6 +4,7 @@
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/catalog/catalog_transaction.hpp"
 
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <span>
@@ -38,6 +39,10 @@ public:
     [[nodiscard]] std::vector<CatalogTableDescriptor> tables(SchemaId schema_id) const;
 
     [[nodiscard]] std::vector<CatalogColumnDescriptor> columns(RelationId relation_id) const;
+
+    static void invalidate_all() noexcept;
+    static void invalidate_relation(RelationId relation_id) noexcept;
+    [[nodiscard]] static std::uint64_t current_epoch(RelationId relation_id) noexcept;
 
 private:
     struct DatabaseEntry final {
@@ -92,6 +97,11 @@ private:
     mutable bool columns_loaded_ = false;
     mutable std::vector<ColumnEntry> columns_{};
     mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> columns_by_relation_{};
+
+    mutable std::uint64_t databases_epoch_ = 0U;
+    mutable std::uint64_t schemas_epoch_ = 0U;
+    mutable std::uint64_t tables_epoch_ = 0U;
+    mutable std::uint64_t columns_epoch_ = 0U;
 
     void ensure_databases_loaded() const;
     void ensure_schemas_loaded() const;
