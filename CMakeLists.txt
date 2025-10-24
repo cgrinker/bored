@@ -9,6 +9,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(${PROJECT_NAME}_lib
     src/greeter.cpp
+    src/ddl/ddl_errors.cpp
+    src/ddl/ddl_validation.cpp
+    src/ddl/ddl_telemetry.cpp
+    src/ddl/ddl_dispatcher.cpp
     src/catalog/catalog_bootstrapper.cpp
     src/catalog/catalog_encoding.cpp
     src/catalog/catalog_ddl.cpp
@@ -71,11 +75,13 @@ if(BORED_ENABLE_TESTS)
         tests/async_io_tests.cpp
         tests/async_io_ioring_tests.cpp
         tests/catalog_bootstrap_tests.cpp
-    tests/catalog_ddl_tests.cpp
+        tests/catalog_ddl_tests.cpp
         tests/catalog_cache_tests.cpp
         tests/catalog_mutator_tests.cpp
         tests/catalog_mvcc_tests.cpp
         tests/catalog_integration_tests.cpp
+        tests/ddl_validation_tests.cpp
+        tests/ddl_dispatcher_tests.cpp
         tests/page_manager_tests.cpp
         tests/free_space_map_tests.cpp
         tests/wal_writer_tests.cpp

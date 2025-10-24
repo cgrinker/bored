@@ -10,6 +10,11 @@
 #include <variant>
 #include <vector>
 
+namespace bored::catalog {
+class CatalogAccessor;
+class CatalogMutator;
+}
+
 namespace bored::ddl {
 
 enum class DdlVerb : std::uint8_t {
@@ -130,6 +135,8 @@ struct DdlCommandResponse final {
 struct DdlCommandContext final {
     catalog::CatalogTransaction& transaction;
     catalog::CatalogIdentifierAllocator& allocator;
+    catalog::CatalogMutator* mutator = nullptr;
+    catalog::CatalogAccessor* accessor = nullptr;
 };
 
 namespace detail {
