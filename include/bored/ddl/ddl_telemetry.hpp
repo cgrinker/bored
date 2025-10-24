@@ -18,6 +18,8 @@ struct DdlVerbTelemetrySnapshot final {
     std::uint64_t attempts = 0U;
     std::uint64_t successes = 0U;
     std::uint64_t failures = 0U;
+    std::uint64_t total_duration_ns = 0U;
+    std::uint64_t last_duration_ns = 0U;
 };
 
 struct DdlFailureTelemetrySnapshot final {
@@ -37,6 +39,7 @@ public:
     void record_attempt(DdlVerb verb) noexcept;
     void record_success(DdlVerb verb) noexcept;
     void record_failure(DdlVerb verb, std::error_code error) noexcept;
+    void record_duration(DdlVerb verb, std::uint64_t duration_ns) noexcept;
 
     [[nodiscard]] DdlTelemetrySnapshot snapshot() const noexcept;
     void reset() noexcept;
@@ -47,6 +50,8 @@ private:
     std::array<std::atomic<std::uint64_t>, verb_count> attempts_{};
     std::array<std::atomic<std::uint64_t>, verb_count> successes_{};
     std::array<std::atomic<std::uint64_t>, verb_count> failures_{};
+    std::array<std::atomic<std::uint64_t>, verb_count> total_duration_ns_{};
+    std::array<std::atomic<std::uint64_t>, verb_count> last_duration_ns_{};
 
     std::atomic<std::uint64_t> handler_missing_{0U};
     std::atomic<std::uint64_t> validation_failures_{0U};

@@ -24,6 +24,8 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <system_error>
 #include <utility>
 #include <unordered_map>
@@ -289,6 +291,11 @@ struct DispatcherHarness final {
     DdlCommandResponse dispatch(const DdlCommand& command)
     {
         return dispatcher_.dispatch(command);
+    }
+
+    [[nodiscard]] const DdlCommandTelemetry& telemetry() const noexcept
+    {
+        return dispatcher_.telemetry();
     }
 
     void seed_database(std::string_view name)
@@ -728,6 +735,63 @@ TEST_CASE("Drop table cascade invokes index cleanup hook")
     REQUIRE(response.success);
     CHECK(cleanup_invocations == 1U);
     CHECK(harness.indexes().empty());
+}
+
+TEST_CASE("Index telemetry tracks build durations and failures")
+{
+    using namespace std::chrono_literals;
+
+    CreateIndexStorageHook create_hook = [&](const CreateIndexRequest& request,
+                                            const catalog::CatalogTableDescriptor& table,
+                                            const catalog::CatalogColumnDescriptor& column,
+                                            CreateIndexStoragePlan& plan) -> std::error_code {
+        CHECK(request.index_name == "metrics_idx");
+        CHECK(table.name == "metrics");
+        CHECK(column.name == "id");
+        std::this_thread::sleep_for(50us);
+        plan.root_page_id = 9'999U;
+        plan.finalize = [](const catalog::CreateIndexResult&, catalog::CatalogMutator&) -> std::error_code {
+            return {};
+        };
+        return {};
+    };
+
+    DispatcherHarness harness({}, nullptr, std::move(create_hook));
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{12U};
+    const catalog::RelationId table_id{31'500U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{40'000U}, table_id, "id", 1U);
+
+    CreateIndexRequest create{};
+    create.schema_id = schema_id;
+    create.table_name = "metrics";
+    create.index_name = "metrics_idx";
+    create.column_names = {"id"};
+
+    DdlCommand command = create;
+    REQUIRE(harness.dispatch(command).success);
+
+    const auto create_index = static_cast<std::size_t>(DdlVerb::CreateIndex);
+    auto snapshot = harness.telemetry().snapshot();
+    CHECK(snapshot.verbs[create_index].attempts == 1U);
+    CHECK(snapshot.verbs[create_index].successes == 1U);
+    CHECK(snapshot.verbs[create_index].failures == 0U);
+    CHECK(snapshot.verbs[create_index].last_duration_ns > 0U);
+    CHECK(snapshot.verbs[create_index].total_duration_ns >= snapshot.verbs[create_index].last_duration_ns);
+
+    // Attempt duplicate index to trigger failure metrics.
+    DdlCommand duplicate = create;
+    const auto duplicate_response = harness.dispatch(duplicate);
+    CHECK_FALSE(duplicate_response.success);
+
+    snapshot = harness.telemetry().snapshot();
+    CHECK(snapshot.verbs[create_index].attempts == 2U);
+    CHECK(snapshot.verbs[create_index].successes == 1U);
+    CHECK(snapshot.verbs[create_index].failures == 1U);
+    CHECK(snapshot.failures.other_failures >= 1U);
+    CHECK(snapshot.verbs[create_index].total_duration_ns >= snapshot.verbs[create_index].last_duration_ns);
 }
 
 TEST_CASE("Drop table IF EXISTS suppresses missing errors")

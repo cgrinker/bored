@@ -5,6 +5,7 @@
 #include "bored/catalog/catalog_transaction.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <span>
 #include <stdexcept>
 #include <system_error>
@@ -103,25 +104,36 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
     const auto verb = command_verb(command);
     telemetry_.record_attempt(verb);
 
+    const auto start = std::chrono::steady_clock::now();
+    const auto record_duration = [&](void) {
+        const auto end = std::chrono::steady_clock::now();
+        const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+        telemetry_.record_duration(verb, static_cast<std::uint64_t>(duration < 0 ? 0 : duration));
+    };
+
     if (config_.identifier_allocator == nullptr) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
+        record_duration();
         return make_internal_failure("DDL dispatcher missing identifier allocator");
     }
 
     if (!config_.transaction_factory) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
+        record_duration();
         return make_internal_failure("DDL dispatcher missing transaction factory");
     }
 
     auto transaction = config_.transaction_factory();
     if (!transaction) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
+        record_duration();
         return make_internal_failure("DDL dispatcher failed to acquire transaction");
     }
 
     auto handler = find_handler(command);
     if (handler == nullptr) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::HandlerMissing));
+        record_duration();
         return make_failure(make_error_code(DdlErrc::HandlerMissing), "no handler registered for DDL verb");
     }
 
@@ -177,19 +189,23 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
     } catch (const std::exception& ex) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
         (void)scope.abort();
+        record_duration();
         return make_failure(make_error_code(DdlErrc::ExecutionFailed), ex.what());
     } catch (...) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
         (void)scope.abort();
+        record_duration();
         return make_failure(make_error_code(DdlErrc::ExecutionFailed), "unknown DDL execution failure");
     }
 
     if (response.success) {
         if (auto ec = scope.commit()) {
             telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
+            record_duration();
             return make_failure(make_error_code(DdlErrc::ExecutionFailed), ec.message());
         }
         telemetry_.record_success(verb);
+        record_duration();
         return response;
     }
 
@@ -200,6 +216,7 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
     }
     telemetry_.record_failure(verb, error);
     (void)scope.abort();
+    record_duration();
     return response;
 }
 

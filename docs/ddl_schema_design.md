@@ -53,7 +53,8 @@
   - [x] Implement `DROP INDEX` ensuring no dependent constraints (future-proof hook) and cleaning index metadata (handler stages catalog delete and now invokes a storage cleanup hook; dependency hooks remain stubbed for future constraint plumbing).
   - [x] Wire index creation into storage hooks: reserve index root pages, seed WAL records for index metadata, register with retention manager (DDL handler now requires storage hook plans to provide root pages and execute post-stage finalisers for retention/WAL wiring).
   - [x] Introduce dependency graph helper and cascade logic so table drops automatically remove dependent indexes and `DROP SCHEMA ... CASCADE` tears down member tables (and their indexes) before removing the schema descriptor.
-  - [ ] Emit index-focused telemetry (build duration, failure counts) and add crash drills for interrupted index creation (before-image coverage).
+  - [x] Emit index-focused telemetry (create/drop attempts, successes/failures, total/last build durations).
+  - [ ] Add crash drills for interrupted index creation (before-image coverage).
   - Tests: end-to-end DDL sequences for index create/drop with catalog replay validation and recovery drills.
 
 - **Milestone 3: Hardening, Rollback, and Diagnostics (1 sprint)**

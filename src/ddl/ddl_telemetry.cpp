@@ -17,6 +17,8 @@ void accumulate(DdlVerbTelemetrySnapshot& target, const DdlVerbTelemetrySnapshot
     target.attempts += source.attempts;
     target.successes += source.successes;
     target.failures += source.failures;
+    target.total_duration_ns += source.total_duration_ns;
+    target.last_duration_ns = std::max(target.last_duration_ns, source.last_duration_ns);
 }
 
 void accumulate(DdlFailureTelemetrySnapshot& target, const DdlFailureTelemetrySnapshot& source) noexcept
@@ -64,6 +66,13 @@ void DdlCommandTelemetry::record_failure(DdlVerb verb, std::error_code error) no
     }
 }
 
+void DdlCommandTelemetry::record_duration(DdlVerb verb, std::uint64_t duration_ns) noexcept
+{
+    const auto index = to_index(verb);
+    total_duration_ns_[index].fetch_add(duration_ns, std::memory_order_relaxed);
+    last_duration_ns_[index].store(duration_ns, std::memory_order_relaxed);
+}
+
 DdlTelemetrySnapshot DdlCommandTelemetry::snapshot() const noexcept
 {
     DdlTelemetrySnapshot snapshot{};
@@ -71,6 +80,8 @@ DdlTelemetrySnapshot DdlCommandTelemetry::snapshot() const noexcept
         snapshot.verbs[i].attempts = attempts_[i].load(std::memory_order_relaxed);
         snapshot.verbs[i].successes = successes_[i].load(std::memory_order_relaxed);
         snapshot.verbs[i].failures = failures_[i].load(std::memory_order_relaxed);
+        snapshot.verbs[i].total_duration_ns = total_duration_ns_[i].load(std::memory_order_relaxed);
+        snapshot.verbs[i].last_duration_ns = last_duration_ns_[i].load(std::memory_order_relaxed);
     }
 
     snapshot.failures.handler_missing = handler_missing_.load(std::memory_order_relaxed);
@@ -86,6 +97,8 @@ void DdlCommandTelemetry::reset() noexcept
         attempts_[i].store(0U, std::memory_order_relaxed);
         successes_[i].store(0U, std::memory_order_relaxed);
         failures_[i].store(0U, std::memory_order_relaxed);
+        total_duration_ns_[i].store(0U, std::memory_order_relaxed);
+        last_duration_ns_[i].store(0U, std::memory_order_relaxed);
     }
 
     handler_missing_.store(0U, std::memory_order_relaxed);
