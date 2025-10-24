@@ -37,6 +37,7 @@ namespace {
 using catalog::CatalogAccessor;
 using catalog::CatalogCache;
 using catalog::CatalogColumnDescriptor;
+using catalog::CatalogIndexDescriptor;
 using catalog::CatalogMutationBatch;
 using catalog::CatalogSchemaDescriptor;
 using catalog::CatalogTableDescriptor;
@@ -201,6 +202,19 @@ std::vector<std::byte> make_column_payload(catalog::ColumnId column_id,
     return catalog::serialize_catalog_column(descriptor);
 }
 
+std::vector<std::byte> make_index_payload(catalog::IndexId index_id,
+                                          catalog::RelationId relation_id,
+                                          std::string_view name)
+{
+    catalog::CatalogIndexDescriptor descriptor{};
+    descriptor.tuple = make_seed_descriptor();
+    descriptor.index_id = index_id;
+    descriptor.relation_id = relation_id;
+    descriptor.index_type = catalog::CatalogIndexType::BTree;
+    descriptor.name = name;
+    return catalog::serialize_catalog_index(descriptor);
+}
+
 CatalogSchemaDescriptor decode_schema(const std::vector<std::byte>& payload)
 {
     auto view = catalog::decode_catalog_schema(std::span<const std::byte>(payload.data(), payload.size()));
@@ -241,6 +255,19 @@ CatalogColumnDescriptor decode_column(const std::vector<std::byte>& payload)
     return descriptor;
 }
 
+CatalogIndexDescriptor decode_index(const std::vector<std::byte>& payload)
+{
+    auto view = catalog::decode_catalog_index(std::span<const std::byte>(payload.data(), payload.size()));
+    REQUIRE(view);
+    CatalogIndexDescriptor descriptor{};
+    descriptor.tuple = view->tuple;
+    descriptor.index_id = view->index_id;
+    descriptor.relation_id = view->relation_id;
+    descriptor.index_type = view->index_type;
+    descriptor.name = view->name;
+    return descriptor;
+}
+
 struct DispatcherHarness final {
     explicit DispatcherHarness(DropTableCleanupHook drop_hook = {}, catalog::CatalogCheckpointRegistry* checkpoint_registry = nullptr)
         : drop_table_cleanup_hook_{std::move(drop_hook)}
@@ -276,6 +303,11 @@ struct DispatcherHarness final {
         storage_.seed(catalog::kCatalogColumnsRelationId, column_id.value, make_column_payload(column_id, relation_id, name, ordinal));
     }
 
+    void seed_index(catalog::IndexId index_id, catalog::RelationId relation_id, std::string_view name)
+    {
+        storage_.seed(catalog::kCatalogIndexesRelationId, index_id.value, make_index_payload(index_id, relation_id, name));
+    }
+
     [[nodiscard]] const InMemoryCatalogStorage::Relation& schemas() const
     {
         return storage_.relation(catalog::kCatalogSchemasRelationId);
@@ -289,6 +321,11 @@ struct DispatcherHarness final {
     [[nodiscard]] const InMemoryCatalogStorage::Relation& columns() const
     {
         return storage_.relation(catalog::kCatalogColumnsRelationId);
+    }
+
+    [[nodiscard]] const InMemoryCatalogStorage::Relation& indexes() const
+    {
+        return storage_.relation(catalog::kCatalogIndexesRelationId);
     }
 
     [[nodiscard]] std::vector<CatalogTableDescriptor> list_tables() const
@@ -307,6 +344,16 @@ struct DispatcherHarness final {
         for (const auto& [_, payload] : columns()) {
             (void)_;
             result.push_back(decode_column(payload));
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::vector<CatalogIndexDescriptor> list_indexes() const
+    {
+        std::vector<CatalogIndexDescriptor> result;
+        for (const auto& [_, payload] : indexes()) {
+            (void)_;
+            result.push_back(decode_index(payload));
         }
         return result;
     }
@@ -649,6 +696,64 @@ TEST_CASE("Drop table propagates cleanup hook failure")
     CHECK(response.error == failure);
     CHECK(harness.tables().size() == 1U);
     CHECK(harness.columns().size() == 2U);
+}
+
+TEST_CASE("Drop index removes catalog metadata")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{12U};
+    const catalog::RelationId table_id{28'000U};
+    const catalog::IndexId index_id{31'000U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_index(index_id, table_id, "metrics_idx");
+
+    DropIndexRequest request{};
+    request.schema_id = schema_id;
+    request.index_name = "metrics_idx";
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    CHECK(harness.indexes().empty());
+}
+
+TEST_CASE("Drop index IF EXISTS suppresses missing errors")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{13U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+
+    DropIndexRequest request{};
+    request.schema_id = schema_id;
+    request.index_name = "missing_idx";
+    request.if_exists = true;
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    CHECK(response.success);
+}
+
+TEST_CASE("Drop index missing without IF EXISTS fails")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{14U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+
+    DropIndexRequest request{};
+    request.schema_id = schema_id;
+    request.index_name = "missing_idx";
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    CHECK_FALSE(response.success);
+    CHECK(response.error == make_error_code(DdlErrc::IndexNotFound));
 }
 
 TEST_CASE("Alter table rename table updates catalog entry")

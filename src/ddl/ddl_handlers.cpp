@@ -122,6 +122,17 @@ std::vector<std::byte> serialize_column(const CatalogColumnDescriptor& column)
     return catalog::serialize_catalog_column(descriptor);
 }
 
+std::vector<std::byte> serialize_index(const CatalogIndexDescriptor& index)
+{
+    catalog::CatalogIndexDescriptor descriptor{};
+    descriptor.tuple = index.tuple;
+    descriptor.index_id = index.index_id;
+    descriptor.relation_id = index.relation_id;
+    descriptor.index_type = index.index_type;
+    descriptor.name = index.name;
+    return catalog::serialize_catalog_index(descriptor);
+}
+
 [[nodiscard]] std::size_t max_column_ordinal(const std::vector<CatalogColumnDescriptor>& columns) noexcept
 {
     std::size_t max_value = 0U;
@@ -163,6 +174,17 @@ bool index_name_available(const std::vector<CatalogIndexDescriptor>& indexes, st
     return std::none_of(indexes.begin(), indexes.end(), [&](const CatalogIndexDescriptor& index) {
         return index.name == name;
     });
+}
+
+[[nodiscard]] const CatalogIndexDescriptor* find_index(const std::vector<CatalogIndexDescriptor>& indexes,
+                                                       std::string_view name) noexcept
+{
+    for (const auto& index : indexes) {
+        if (index.name == name) {
+            return &index;
+        }
+    }
+    return nullptr;
 }
 
 std::error_code stage_table_rename(DdlCommandContext& context,
@@ -706,6 +728,48 @@ DdlCommandResponse handle_create_index(DdlCommandContext& context, const CreateI
     return make_success(std::move(payload));
 }
 
+DdlCommandResponse handle_drop_index(DdlCommandContext& context, const DropIndexRequest& request)
+{
+    if (context.mutator == nullptr) {
+        return make_context_failure("ddl drop index missing catalog mutator");
+    }
+    if (context.accessor == nullptr) {
+        return make_context_failure("ddl drop index missing catalog accessor");
+    }
+
+    if (!request.schema_id.is_valid()) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "target schema id is invalid");
+    }
+
+    if (auto ec = validate_identifier(request.index_name); ec) {
+        return make_failure(ec, "index name is invalid");
+    }
+
+    auto schema = context.accessor->schema(request.schema_id);
+    if (!schema) {
+        return make_failure(make_error_code(DdlErrc::SchemaNotFound), "schema not found");
+    }
+
+    auto indexes = context.accessor->indexes_for_schema(request.schema_id);
+    const auto* descriptor = find_index(indexes, request.index_name);
+    if (descriptor == nullptr) {
+        if (request.if_exists) {
+            return make_success();
+        }
+        return make_failure(make_error_code(DdlErrc::IndexNotFound), "index not found");
+    }
+
+    // Placeholder for dependency checks (constraints, physical presence) when those hooks land.
+
+    auto payload = serialize_index(*descriptor);
+    context.mutator->stage_delete(catalog::kCatalogIndexesRelationId,
+                                  descriptor->index_id.value,
+                                  descriptor->tuple,
+                                  std::move(payload));
+
+    return make_success();
+}
+
 }  // namespace
 
 void register_catalog_handlers(DdlCommandDispatcher& dispatcher)
@@ -716,6 +780,7 @@ void register_catalog_handlers(DdlCommandDispatcher& dispatcher)
     dispatcher.register_handler<DropTableRequest>(handle_drop_table);
     dispatcher.register_handler<AlterTableRequest>(handle_alter_table);
     dispatcher.register_handler<CreateIndexRequest>(handle_create_index);
+    dispatcher.register_handler<DropIndexRequest>(handle_drop_index);
 }
 
 }  // namespace bored::ddl
