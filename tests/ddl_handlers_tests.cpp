@@ -204,13 +204,15 @@ std::vector<std::byte> make_column_payload(catalog::ColumnId column_id,
 
 std::vector<std::byte> make_index_payload(catalog::IndexId index_id,
                                           catalog::RelationId relation_id,
-                                          std::string_view name)
+                                          std::string_view name,
+                                          std::uint32_t root_page_id)
 {
     catalog::CatalogIndexDescriptor descriptor{};
     descriptor.tuple = make_seed_descriptor();
     descriptor.index_id = index_id;
     descriptor.relation_id = relation_id;
     descriptor.index_type = catalog::CatalogIndexType::BTree;
+    descriptor.root_page_id = root_page_id;
     descriptor.name = name;
     return catalog::serialize_catalog_index(descriptor);
 }
@@ -264,14 +266,20 @@ CatalogIndexDescriptor decode_index(const std::vector<std::byte>& payload)
     descriptor.index_id = view->index_id;
     descriptor.relation_id = view->relation_id;
     descriptor.index_type = view->index_type;
+    descriptor.root_page_id = view->root_page_id;
     descriptor.name = view->name;
     return descriptor;
 }
 
 struct DispatcherHarness final {
-    explicit DispatcherHarness(DropTableCleanupHook drop_hook = {}, catalog::CatalogCheckpointRegistry* checkpoint_registry = nullptr)
+    explicit DispatcherHarness(DropTableCleanupHook drop_hook = {},
+                               catalog::CatalogCheckpointRegistry* checkpoint_registry = nullptr,
+                               CreateIndexStorageHook create_index_hook = {},
+                               DropIndexCleanupHook drop_index_hook = {})
         : drop_table_cleanup_hook_{std::move(drop_hook)}
         , checkpoint_registry_{checkpoint_registry}
+        , create_index_storage_hook_{std::move(create_index_hook)}
+        , drop_index_cleanup_hook_{std::move(drop_index_hook)}
         , dispatcher_(make_dispatcher_config())
     {
         CatalogCache::instance().reset();
@@ -303,9 +311,9 @@ struct DispatcherHarness final {
         storage_.seed(catalog::kCatalogColumnsRelationId, column_id.value, make_column_payload(column_id, relation_id, name, ordinal));
     }
 
-    void seed_index(catalog::IndexId index_id, catalog::RelationId relation_id, std::string_view name)
+    void seed_index(catalog::IndexId index_id, catalog::RelationId relation_id, std::string_view name, std::uint32_t root_page_id)
     {
-        storage_.seed(catalog::kCatalogIndexesRelationId, index_id.value, make_index_payload(index_id, relation_id, name));
+        storage_.seed(catalog::kCatalogIndexesRelationId, index_id.value, make_index_payload(index_id, relation_id, name, root_page_id));
     }
 
     [[nodiscard]] const InMemoryCatalogStorage::Relation& schemas() const
@@ -404,6 +412,8 @@ private:
             }
             return checkpoint_registry_->record_relations(relations, commit_lsn);
         };
+        config.create_index_storage_hook = create_index_storage_hook_;
+        config.drop_index_cleanup_hook = drop_index_cleanup_hook_;
         return config;
     }
 
@@ -413,6 +423,8 @@ private:
     DdlTelemetryRegistry telemetry_registry_{};
     DropTableCleanupHook drop_table_cleanup_hook_{};
     catalog::CatalogCheckpointRegistry* checkpoint_registry_ = nullptr;
+    CreateIndexStorageHook create_index_storage_hook_{};
+    DropIndexCleanupHook drop_index_cleanup_hook_{};
     DdlCommandDispatcher dispatcher_;
 };
 
@@ -698,6 +710,55 @@ TEST_CASE("Drop table propagates cleanup hook failure")
     CHECK(harness.columns().size() == 2U);
 }
 
+TEST_CASE("Create index storage hook reserves root page")
+{
+    const std::uint32_t expected_root_page = 9'001U;
+    bool prepare_invoked = false;
+    bool finalize_invoked = false;
+
+    CreateIndexStorageHook create_hook = [&](const CreateIndexRequest& request,
+                                            const catalog::CatalogTableDescriptor& table,
+                                            const catalog::CatalogColumnDescriptor& column,
+                                            CreateIndexStoragePlan& plan) -> std::error_code {
+        prepare_invoked = true;
+        CHECK(request.index_name == "metrics_idx");
+        CHECK(table.name == "metrics");
+        CHECK(column.name == "id");
+        plan.root_page_id = expected_root_page;
+        plan.finalize = [&, expected_root_page](const catalog::CreateIndexResult& result, catalog::CatalogMutator&) -> std::error_code {
+            finalize_invoked = true;
+            CHECK(result.root_page_id == expected_root_page);
+            return {};
+        };
+        return {};
+    };
+
+    DispatcherHarness harness({}, nullptr, std::move(create_hook));
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{11U};
+    const catalog::RelationId table_id{29'000U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{30'000U}, table_id, "id", 1U);
+
+    CreateIndexRequest request{};
+    request.schema_id = schema_id;
+    request.table_name = "metrics";
+    request.index_name = "metrics_idx";
+    request.column_names = {"id"};
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    CHECK(prepare_invoked);
+    CHECK(finalize_invoked);
+
+    const auto indexes = harness.list_indexes();
+    REQUIRE(indexes.size() == 1U);
+    CHECK(indexes.front().root_page_id == expected_root_page);
+}
+
 TEST_CASE("Drop index removes catalog metadata")
 {
     DispatcherHarness harness;
@@ -707,7 +768,7 @@ TEST_CASE("Drop index removes catalog metadata")
     const catalog::IndexId index_id{31'000U};
     harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
     harness.seed_table(table_id, schema_id, "metrics");
-    harness.seed_index(index_id, table_id, "metrics_idx");
+    harness.seed_index(index_id, table_id, "metrics_idx", 123U);
 
     DropIndexRequest request{};
     request.schema_id = schema_id;
@@ -717,6 +778,41 @@ TEST_CASE("Drop index removes catalog metadata")
     const auto response = harness.dispatch(command);
 
     REQUIRE(response.success);
+    CHECK(harness.indexes().empty());
+}
+
+TEST_CASE("Drop index invokes cleanup hook before deletion")
+{
+    bool cleanup_invoked = false;
+    const std::uint32_t seeded_root_page = 7'777U;
+
+    DropIndexCleanupHook drop_hook = [&](const DropIndexRequest& request,
+                                        const catalog::CatalogIndexDescriptor& descriptor,
+                                        catalog::CatalogMutator&) -> std::error_code {
+        cleanup_invoked = true;
+        CHECK(request.index_name == "metrics_idx");
+        CHECK(descriptor.root_page_id == seeded_root_page);
+        return {};
+    };
+
+    DispatcherHarness harness({}, nullptr, {}, std::move(drop_hook));
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{12U};
+    const catalog::RelationId table_id{28'001U};
+    const catalog::IndexId index_id{31'100U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_index(index_id, table_id, "metrics_idx", seeded_root_page);
+
+    DropIndexRequest request{};
+    request.schema_id = schema_id;
+    request.index_name = "metrics_idx";
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    CHECK(cleanup_invoked);
     CHECK(harness.indexes().empty());
 }
 

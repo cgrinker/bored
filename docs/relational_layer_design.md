@@ -38,10 +38,10 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
      - Produce a logical plan tree (relational algebra IR) as input to the optimizer.
 
 5. **Transaction & Concurrency Control Manager**
-   - **Responsibilities:** Coordinate transactional lifecycle, isolation levels, and conflict detection (e.g., locking or MVCC).
+   - **Responsibilities:** Coordinate transactional lifecycle, isolation levels, and conflict detection (e.g., MVCC).
    - **Prerequisites:** Catalog visibility rules; WAL/page manager hooks for transaction IDs and LSN tracking.
    - **Key Tasks:**
-     - Choose concurrency model (initially strict 2PL or basic MVCC).
+     - Choose concurrency model (basic MVCC).
      - Instrument page and tuple access with latching/locking APIs.
      - Integrate with WAL commit protocol and retention manager.
 

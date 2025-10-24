@@ -48,6 +48,7 @@ struct CatalogIndexView final {
     IndexId index_id{};
     RelationId relation_id{};
     CatalogIndexType index_type = CatalogIndexType::Unknown;
+    std::uint32_t root_page_id = 0U;
     std::string_view name{};
 };
 

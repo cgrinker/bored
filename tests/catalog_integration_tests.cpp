@@ -213,6 +213,7 @@ TEST_CASE("Catalog DDL integration applies create operations on commit")
     index_request.index_type = CatalogIndexType::BTree;
     index_request.index_id = IndexId{2'000U};
     index_request.name = "events_id_idx";
+    index_request.root_page_id = 501U;
     CreateIndexResult index_result{};
     REQUIRE_FALSE(stage_create_index(mutator, id_allocator, index_request, index_result));
 

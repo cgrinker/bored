@@ -57,10 +57,12 @@ struct CreateIndexRequest final {
     std::string name{};
     CatalogIndexType index_type = CatalogIndexType::Unknown;
     std::optional<IndexId> index_id{};
+    std::optional<std::uint32_t> root_page_id{};
 };
 
 struct CreateIndexResult final {
     IndexId index_id{};
+    std::uint32_t root_page_id = 0U;
 };
 
 std::error_code stage_create_schema(CatalogMutator& mutator,

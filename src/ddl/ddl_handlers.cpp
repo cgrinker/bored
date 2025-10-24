@@ -129,6 +129,7 @@ std::vector<std::byte> serialize_index(const CatalogIndexDescriptor& index)
     descriptor.index_id = index.index_id;
     descriptor.relation_id = index.relation_id;
     descriptor.index_type = index.index_type;
+    descriptor.root_page_id = index.root_page_id;
     descriptor.name = index.name;
     return catalog::serialize_catalog_index(descriptor);
 }
@@ -714,14 +715,32 @@ DdlCommandResponse handle_create_index(DdlCommandContext& context, const CreateI
         return make_failure(make_error_code(DdlErrc::ValidationFailed), "column type is not supported for indexes");
     }
 
+    CreateIndexStoragePlan storage_plan{};
+    if (context.create_index_storage) {
+        if (auto ec = context.create_index_storage(request, *table_opt, *column, storage_plan); ec) {
+            return make_failure(ec, ec.message());
+        }
+    }
+
+    if (storage_plan.root_page_id == 0U) {
+        return make_failure(make_error_code(DdlErrc::ExecutionFailed), "index storage plan missing root page reservation");
+    }
+
     catalog::CreateIndexRequest stage_request{};
     stage_request.relation_id = table_opt->relation_id;
     stage_request.name = request.index_name;
     stage_request.index_type = catalog::CatalogIndexType::BTree;
+    stage_request.root_page_id = storage_plan.root_page_id;
 
     catalog::CreateIndexResult stage_result{};
     if (auto ec = catalog::stage_create_index(*context.mutator, context.allocator, stage_request, stage_result); ec) {
         return make_failure(map_stage_error(ec), ec.message());
+    }
+
+    if (storage_plan.finalize) {
+        if (auto ec = storage_plan.finalize(stage_result, *context.mutator); ec) {
+            return make_failure(ec, ec.message());
+        }
     }
 
     DdlCommandResult payload{std::in_place_type<catalog::CreateIndexResult>, stage_result};
@@ -759,7 +778,11 @@ DdlCommandResponse handle_drop_index(DdlCommandContext& context, const DropIndex
         return make_failure(make_error_code(DdlErrc::IndexNotFound), "index not found");
     }
 
-    // Placeholder for dependency checks (constraints, physical presence) when those hooks land.
+    if (context.drop_index_cleanup) {
+        if (auto ec = context.drop_index_cleanup(request, *descriptor, *context.mutator); ec) {
+            return make_failure(ec, ec.message());
+        }
+    }
 
     auto payload = serialize_index(*descriptor);
     context.mutator->stage_delete(catalog::kCatalogIndexesRelationId,

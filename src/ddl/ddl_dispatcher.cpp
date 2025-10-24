@@ -166,6 +166,8 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
     context.accessor = accessor.get();
     context.drop_table_cleanup = config_.drop_table_cleanup_hook;
     context.dirty_relation_notifier = config_.catalog_dirty_hook;
+    context.create_index_storage = config_.create_index_storage_hook;
+    context.drop_index_cleanup = config_.drop_index_cleanup_hook;
 
     TransactionScope scope{*transaction};
 

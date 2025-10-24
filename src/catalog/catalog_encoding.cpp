@@ -57,9 +57,9 @@ struct CatalogIndexPrefix final {
     std::uint64_t relation_id = 0U;
     std::uint16_t index_type = 0U;
     std::uint16_t reserved = 0U;
-    std::uint32_t padding = 0U;
+    std::uint32_t root_page_id = 0U;
     std::uint16_t name_length = 0U;
-    std::uint16_t reserved2 = 0U;
+    std::uint16_t padding = 0U;
 };
 
 static_assert(sizeof(CatalogDatabasePrefix) == 48U, "CatalogDatabasePrefix expected to be 48 bytes");
@@ -161,6 +161,7 @@ std::vector<std::byte> serialize_catalog_index(const CatalogIndexDescriptor& des
     prefix->index_id = descriptor.index_id.value;
     prefix->relation_id = descriptor.relation_id.value;
     prefix->index_type = static_cast<std::uint16_t>(descriptor.index_type);
+    prefix->root_page_id = descriptor.root_page_id;
     prefix->name_length = static_cast<std::uint16_t>(descriptor.name.size());
     return buffer;
 }
@@ -254,6 +255,7 @@ std::optional<CatalogIndexView> decode_catalog_index(std::span<const std::byte> 
     view.index_id = IndexId{prefix->index_id};
     view.relation_id = RelationId{prefix->relation_id};
     view.index_type = static_cast<CatalogIndexType>(prefix->index_type);
+    view.root_page_id = prefix->root_page_id;
     view.name = read_name(*prefix, tuple);
     return view;
 }

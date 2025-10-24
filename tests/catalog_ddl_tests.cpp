@@ -166,11 +166,13 @@ TEST_CASE("Catalog DDL stages create index with provided identifier")
     request.name = "metrics_name_idx";
     request.index_type = CatalogIndexType::BTree;
     request.index_id = IndexId{9876U};
+    request.root_page_id = 4096U;
 
     CreateIndexResult result{};
     REQUIRE_FALSE(stage_create_index(mutator, id_allocator, request, result));
 
     CHECK(result.index_id.value == request.index_id->value);
+    CHECK(result.root_page_id == *request.root_page_id);
     CHECK(id_allocator.index_calls == 0U);
 
     const auto& mutations = mutator.staged_mutations();
@@ -185,5 +187,6 @@ TEST_CASE("Catalog DDL stages create index with provided identifier")
     CHECK(view->index_id == result.index_id);
     CHECK(view->relation_id == request.relation_id);
     CHECK(view->index_type == request.index_type);
+    CHECK(view->root_page_id == *request.root_page_id);
     CHECK(view->name == request.name);
 }

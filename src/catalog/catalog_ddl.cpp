@@ -146,6 +146,11 @@ std::error_code stage_create_index(CatalogMutator& mutator,
         return invalid_argument();
     }
 
+    const auto root_page_id = request.root_page_id.value_or(0U);
+    if (root_page_id == 0U) {
+        return invalid_argument();
+    }
+
     CatalogTupleDescriptor tuple = CatalogTupleBuilder::for_insert(mutator.transaction());
 
     CatalogIndexDescriptor descriptor{};
@@ -153,12 +158,14 @@ std::error_code stage_create_index(CatalogMutator& mutator,
     descriptor.index_id = index_id;
     descriptor.relation_id = request.relation_id;
     descriptor.index_type = request.index_type;
+    descriptor.root_page_id = root_page_id;
     descriptor.name = request.name;
 
     auto payload = serialize_catalog_index(descriptor);
     mutator.stage_insert(kCatalogIndexesRelationId, index_id.value, tuple, std::move(payload));
 
     result.index_id = index_id;
+    result.root_page_id = root_page_id;
     return {};
 }
 

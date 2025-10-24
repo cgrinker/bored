@@ -129,7 +129,7 @@ std::optional<CatalogIndexDescriptor> CatalogAccessor::index(IndexId id) const
         return std::nullopt;
     }
     const auto& entry = indexes_[it->second];
-    return CatalogIndexDescriptor{entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.name};
+    return CatalogIndexDescriptor{entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.root_page_id, entry.name};
 }
 
 std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes(RelationId relation_id) const
@@ -142,7 +142,7 @@ std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes(RelationId relation
     }
     for (auto index : it->second) {
         const auto& entry = indexes_[index];
-        result.emplace_back(entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.name);
+        result.emplace_back(entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.root_page_id, entry.name);
     }
     return result;
 }
@@ -157,7 +157,7 @@ std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes_for_schema(SchemaId
     }
     for (auto index : it->second) {
         const auto& entry = indexes_[index];
-        result.emplace_back(entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.name);
+        result.emplace_back(entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.root_page_id, entry.name);
     }
     return result;
 }
@@ -381,6 +381,7 @@ void CatalogAccessor::ensure_indexes_loaded() const
             entry.index_id = view->index_id;
             entry.relation_id = view->relation_id;
             entry.index_type = view->index_type;
+            entry.root_page_id = view->root_page_id;
             entry.name = make_string(view->name);
 
             auto table_it = table_index_.find(entry.relation_id.value);

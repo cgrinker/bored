@@ -50,8 +50,8 @@
 
 - **Milestone 2: Index Definition & Dependency Enforcement (1-2 sprints)**
   - [x] Implement `CREATE INDEX` for single-column btree stubs, validating target table/column existence and type compatibility (DDL handler stages catalog metadata with single-column validation; storage hooks remain pending).
-  - [x] Implement `DROP INDEX` ensuring no dependent constraints (future-proof hook) and cleaning index metadata (handler stages catalog delete; dependency hooks stubbed for future constraint plumbing).
-  - [ ] Wire index creation into storage hooks: reserve index root pages, seed WAL records for index metadata, register with retention manager.
+  - [x] Implement `DROP INDEX` ensuring no dependent constraints (future-proof hook) and cleaning index metadata (handler stages catalog delete and now invokes a storage cleanup hook; dependency hooks remain stubbed for future constraint plumbing).
+  - [x] Wire index creation into storage hooks: reserve index root pages, seed WAL records for index metadata, register with retention manager (DDL handler now requires storage hook plans to provide root pages and execute post-stage finalisers for retention/WAL wiring).
   - [ ] Introduce dependency graph helper to prevent dropping schemas/tables while indexes depend on them.
   - [ ] Emit index-focused telemetry (build duration, failure counts) and add crash drills for interrupted index creation (before-image coverage).
   - Tests: end-to-end DDL sequences for index create/drop with catalog replay validation and recovery drills.

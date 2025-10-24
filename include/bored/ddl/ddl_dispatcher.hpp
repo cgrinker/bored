@@ -23,6 +23,8 @@ public:
         std::string telemetry_identifier;
         DropTableCleanupHook drop_table_cleanup_hook{};
         CatalogDirtyRelationHook catalog_dirty_hook{};
+        CreateIndexStorageHook create_index_storage_hook{};
+        DropIndexCleanupHook drop_index_cleanup_hook{};
     };
 
     explicit DdlCommandDispatcher(Config config);
