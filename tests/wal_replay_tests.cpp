@@ -1,3 +1,5 @@
+#include "bored/catalog/catalog_bootstrap_ids.hpp"
+#include "bored/catalog/catalog_encoding.hpp"
 #include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_recovery.hpp"
 #include "bored/storage/wal_undo_walker.hpp"
@@ -1004,6 +1006,107 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
     auto baseline_header_b = bored::storage::page_header(std::span<const std::byte>(baseline_page_b.data(), baseline_page_b.size()));
     auto replay_header_b = bored::storage::page_header(std::span<const std::byte>(replay_page_b.data(), replay_page_b.size()));
     CHECK(replay_header_b.tuple_count == baseline_header_b.tuple_count);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("Wal crash drill restores catalog tuple before image")
+{
+    using namespace bored::catalog;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_catalog_crash_drill_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 128U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = kCatalogTablesPageId;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Meta, page_id));
+
+    CatalogTableDescriptor baseline_descriptor{};
+    baseline_descriptor.tuple.xmin = 42U;
+    baseline_descriptor.tuple.xmax = 0U;
+    baseline_descriptor.tuple.visibility_flags = 0U;
+    baseline_descriptor.relation_id = RelationId{9'001U};
+    baseline_descriptor.schema_id = SchemaId{123U};
+    baseline_descriptor.table_type = CatalogTableType::Heap;
+    baseline_descriptor.root_page_id = 777U;
+    baseline_descriptor.name = "events";
+    auto baseline_payload = serialize_catalog_table(baseline_descriptor);
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span,
+                                       std::span<const std::byte>(baseline_payload.data(), baseline_payload.size()),
+                                       baseline_descriptor.relation_id.value,
+                                       insert_result));
+    const auto baseline_page = page_buffer;
+
+    WalRecordDescriptor commit{};
+    commit.type = WalRecordType::Commit;
+    commit.page_id = page_id;
+    commit.flags = bored::storage::WalRecordFlag::None;
+    commit.payload = {};
+    bored::storage::WalAppendResult commit_append{};
+    REQUIRE_FALSE(wal_writer->append_record(commit, commit_append));
+
+    CatalogTableDescriptor updated_descriptor = baseline_descriptor;
+    updated_descriptor.tuple.xmin = baseline_descriptor.tuple.xmin + 10U;
+    updated_descriptor.name = "events_crash";
+    auto updated_payload = serialize_catalog_table(updated_descriptor);
+
+    PageManager::TupleUpdateResult update_result{};
+    REQUIRE_FALSE(manager.update_tuple(page_span,
+                                       insert_result.slot.index,
+                                       std::span<const std::byte>(updated_payload.data(), updated_payload.size()),
+                                       baseline_descriptor.relation_id.value,
+                                       update_result));
+    const auto crash_page = page_buffer;
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+    REQUIRE_FALSE(plan.redo.empty());
+    REQUIRE_FALSE(plan.undo.empty());
+
+    auto before_it = std::find_if(plan.undo.begin(), plan.undo.end(), [](const WalRecoveryRecord& record) {
+        return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage;
+    });
+    REQUIRE(before_it != plan.undo.end());
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Meta, &replay_fsm};
+    context.set_page(page_id, std::span<const std::byte>(crash_page.data(), crash_page.size()));
+    WalReplayer replayer{context};
+
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    auto replay_page = context.get_page(page_id);
+    auto tuple_span = bored::storage::read_tuple(std::span<const std::byte>(replay_page.data(), replay_page.size()), insert_result.slot.index);
+    auto restored_view = decode_catalog_table(tuple_span);
+    REQUIRE(restored_view);
+    CHECK(restored_view->name == baseline_descriptor.name);
+    CHECK(restored_view->tuple.xmin == baseline_descriptor.tuple.xmin);
+    CHECK(restored_view->root_page_id == baseline_descriptor.root_page_id);
+
+    auto replay_span = std::span<const std::byte>(replay_page.data(), replay_page.size());
+    auto baseline_span = std::span<const std::byte>(baseline_page.data(), baseline_page.size());
+    auto replay_header = bored::storage::page_header(replay_span);
+    auto baseline_header = bored::storage::page_header(baseline_span);
+    CHECK(replay_header.tuple_count == baseline_header.tuple_count);
 
     (void)std::filesystem::remove_all(wal_dir);
 }

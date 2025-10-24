@@ -112,8 +112,8 @@
 - **Milestone 3: Caching, Telemetry, and Hardening (1 sprint)**
 	- [x] Add shared catalog cache with invalidation on commit and retention-aware eviction policy.
 	- [x] Emit catalog mutation and cache-hit telemetry into existing registries.
-	- Conduct crash drills covering mid-flight DDL, id allocator rollbacks, and catalog corruption detection.
-	- Tests: cache eviction correctness, telemetry smoke tests, recovery validation.
+	- Conduct crash drills covering mid-flight DDL, id allocator rollbacks, and catalog corruption detection. (Mid-flight DDL crash drill now exercised by `Wal crash drill restores catalog tuple before image`; allocator rollback and corruption detection paths remain.)
+	- Tests: cache eviction correctness, telemetry smoke tests, recovery validation. (Catalog recovery validation now includes crash drill coverage.)
 
 ## Open Questions
 - Define initial constraint set (primary key, not-null) scope for first milestone.

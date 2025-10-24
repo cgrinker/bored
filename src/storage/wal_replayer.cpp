@@ -516,7 +516,15 @@ std::error_code WalReplayer::apply_undo(const WalRecoveryPlan& plan)
 
     while (auto work_item = walker.next()) {
         if (work_item->owner_page_id != 0U) {
-            (void)ensure_page(context_, work_item->owner_page_id, PageType::Table);
+            PageType owner_type = PageType::Table;
+            {
+                auto existing_page = context_.get_page(work_item->owner_page_id);
+                auto existing_header = page_header(std::span<const std::byte>(existing_page.data(), existing_page.size()));
+                if (is_valid(existing_header)) {
+                    owner_type = static_cast<PageType>(existing_header.type);
+                }
+            }
+            (void)ensure_page(context_, work_item->owner_page_id, owner_type);
         }
         for (auto overflow_page_id : work_item->overflow_page_ids) {
             if (overflow_page_id != 0U) {
@@ -653,7 +661,17 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         if (before_view->tuple_payload.size() != before_view->meta.tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+
+        PageType target_type = PageType::Table;
+        {
+            auto existing_page = context_.get_page(record.header.page_id);
+            auto existing_header = page_header(std::span<const std::byte>(existing_page.data(), existing_page.size()));
+            if (is_valid(existing_header)) {
+                target_type = static_cast<PageType>(existing_header.type);
+            }
+        }
+
+        auto page = ensure_page(context_, record.header.page_id, target_type);
         if (auto ec = apply_tuple_insert(page,
                                          record.header,
                                          before_view->meta,
