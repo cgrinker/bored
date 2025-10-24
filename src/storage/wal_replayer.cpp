@@ -57,6 +57,18 @@ void refresh_overflow_flag(std::span<std::byte> page)
     set_has_overflow(header, page_contains_overflow(const_view));
 }
 
+constexpr PageType replay_page_type(WalRecordType type) noexcept
+{
+    switch (type) {
+    case WalRecordType::CatalogInsert:
+    case WalRecordType::CatalogDelete:
+    case WalRecordType::CatalogUpdate:
+        return PageType::Meta;
+    default:
+        return PageType::Table;
+    }
+}
+
 std::span<std::byte> ensure_page(WalReplayContext& context, std::uint32_t page_id, PageType type)
 {
     auto page = context.get_page(page_id);
@@ -529,8 +541,11 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
     auto fsm = context_.free_space_map();
     auto payload = std::span<const std::byte>(record.payload.data(), record.payload.size());
 
-    switch (static_cast<WalRecordType>(record.header.type)) {
-    case WalRecordType::TupleInsert: {
+    const auto record_type = static_cast<WalRecordType>(record.header.type);
+
+    switch (record_type) {
+    case WalRecordType::TupleInsert:
+    case WalRecordType::CatalogInsert: {
         auto meta = decode_wal_tuple_meta(payload);
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
@@ -539,18 +554,20 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (tuple_payload.size() != meta->tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+        auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
         return apply_tuple_insert(page, record.header, *meta, tuple_payload, fsm, false);
     }
-    case WalRecordType::TupleDelete: {
+    case WalRecordType::TupleDelete:
+    case WalRecordType::CatalogDelete: {
         auto meta = decode_wal_tuple_meta(payload);
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    auto page = ensure_page(context_, record.header.page_id, PageType::Table);
-    return apply_tuple_delete(page, record.header, *meta, fsm, false);
+        auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
+        return apply_tuple_delete(page, record.header, *meta, fsm, false);
     }
-    case WalRecordType::TupleUpdate: {
+    case WalRecordType::TupleUpdate:
+    case WalRecordType::CatalogUpdate: {
         auto meta = decode_wal_tuple_update_meta(payload);
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
@@ -559,7 +576,7 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (tuple_payload.size() != meta->base.tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        auto page = ensure_page(context_, record.header.page_id, PageType::Table);
+        auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
         return apply_tuple_update(page, record.header, *meta, tuple_payload, fsm);
     }
     case WalRecordType::TupleBeforeImage:
@@ -607,22 +624,26 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
     auto fsm = context_.free_space_map();
     auto payload = std::span<const std::byte>(record.payload.data(), record.payload.size());
 
-    switch (static_cast<WalRecordType>(record.header.type)) {
-    case WalRecordType::TupleInsert: {
+    const auto record_type = static_cast<WalRecordType>(record.header.type);
+
+    switch (record_type) {
+    case WalRecordType::TupleInsert:
+    case WalRecordType::CatalogInsert: {
         auto meta = decode_wal_tuple_meta(payload);
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    auto page = ensure_page(context_, record.header.page_id, PageType::Table);
-    return apply_tuple_delete(page, record.header, *meta, fsm, true);
+        auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
+        return apply_tuple_delete(page, record.header, *meta, fsm, true);
     }
-    case WalRecordType::TupleUpdate: {
+    case WalRecordType::TupleUpdate:
+    case WalRecordType::CatalogUpdate: {
         auto meta = decode_wal_tuple_update_meta(payload);
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    auto page = ensure_page(context_, record.header.page_id, PageType::Table);
-    return apply_tuple_delete(page, record.header, meta->base, fsm, false);
+        auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
+        return apply_tuple_delete(page, record.header, meta->base, fsm, false);
     }
     case WalRecordType::TupleBeforeImage: {
         auto before_view = decode_wal_tuple_before_image(payload);
@@ -657,6 +678,7 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         return {};
     }
     case WalRecordType::TupleDelete:
+    case WalRecordType::CatalogDelete:
         return {};
     case WalRecordType::TupleOverflowChunk: {
         auto meta = decode_wal_overflow_chunk_meta(payload);

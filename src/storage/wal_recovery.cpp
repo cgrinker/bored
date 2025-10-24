@@ -25,14 +25,17 @@ std::optional<std::uint32_t> owner_page_id(const WalRecordView& view)
 
     switch (type) {
     case WalRecordType::TupleInsert:
-    case WalRecordType::TupleDelete: {
+    case WalRecordType::CatalogInsert:
+    case WalRecordType::TupleDelete:
+    case WalRecordType::CatalogDelete: {
         auto meta = decode_wal_tuple_meta(payload);
         if (!meta || meta->page_id == 0U || meta->page_id != view.header.page_id) {
             return view.header.page_id;
         }
         return meta->page_id;
     }
-    case WalRecordType::TupleUpdate: {
+    case WalRecordType::TupleUpdate:
+    case WalRecordType::CatalogUpdate: {
         auto meta = decode_wal_tuple_update_meta(payload);
         if (!meta || meta->base.page_id == 0U || meta->base.page_id != view.header.page_id) {
             return view.header.page_id;
@@ -150,6 +153,12 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
 
         for (const auto& record_view : records) {
             const auto type = static_cast<WalRecordType>(record_view.header.type);
+
+            if (type == WalRecordType::CatalogInsert || type == WalRecordType::CatalogDelete || type == WalRecordType::CatalogUpdate) {
+                plan.redo.push_back(make_recovery_record(record_view));
+                continue;
+            }
+
             auto owner = owner_page_id(record_view);
             if (!owner) {
                 return std::make_error_code(std::errc::invalid_argument);

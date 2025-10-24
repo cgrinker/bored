@@ -19,6 +19,15 @@
 - **Tuple Layout:** Compact row format with tuple header (transaction id, commit LSN, visibility flags) followed by attribute payloads.
 - **Indexes:** Lightweight hash index on object names for fast lookup; deferred full B+Tree pending index infrastructure (Roadmap Item 8).
 
+## System Relations & Tuple Layouts
+- **catalog_databases (`catalog_relations.hpp`):** `database_id (int64)`, `default_schema_id (int64)`, `name (utf8)` with tuple prefix carrying `xmin/xmax`.
+- **catalog_schemas:** `schema_id`, `database_id`, `name` mirroring database layout for schema namespace resolution.
+- **catalog_tables:** `table_id`, `schema_id`, `table_type (uint16)`, `root_page_id (uint32)`, `name` used for table-to-segment mapping; bootstrap seeds catalog relations themselves.
+- **catalog_columns:** `column_id`, `table_id`, `column_type (uint32)`, `ordinal_position (uint16)`, `name` capturing basic type metadata for DDL validation.
+- **catalog_indexes:** `index_id`, `table_id`, `index_type (uint16)`, `name` placeholder for future index descriptors.
+- Shared tuple header (`CatalogTupleDescriptor`) stores `xmin/xmax`; encoding helpers in `catalog_encoding.hpp` normalise padding to 8-byte alignment.
+- Reserved identifiers (`catalog_bootstrap_ids.hpp`) occupy disjoint ranges (databases=1, schemas=2, relations≥256, columns≥4096, indexes≥8192) to simplify sanity checks and prevent collisions.
+
 ## Bootstrapping & Recovery
 - Bootstrap sequence writes initial catalog tuples for system namespace using single-writer WAL transaction.
 - Recovery driver replays catalog WAL segments prior to user relations to ensure metadata availability.
@@ -49,6 +58,33 @@
 - Unit tests for tuple visibility rules and MVCC filtering.
 - WAL replay tests covering catalog bootstrap, rename, and drop scenarios.
 - Crash-recovery drills verifying catalog integrity after simulated failures during DDL.
+
+## Milestones
+- **Milestone 0: Bootstrapping Infrastructure (1 sprint)**
+	- **Task 0.1:** Author catalog relation schemas (`catalog_databases`, `catalog_schemas`, `catalog_tables`, `catalog_columns`, `catalog_indexes`) and tuple layouts in documentation and header stubs.
+	- **Task 0.2:** Implement tuple serialization helpers and size calculators for catalog rows.
+	- **Task 0.3:** Reserve system identifier ranges and encode them in `catalog_bootstrap_ids.hpp`.
+	- **Task 0.4:** Implement `CatalogBootstrapper` to create root catalog segment, instantiate catalog relations, and write seed tuples.
+	- **Task 0.5:** Define WAL record types for catalog tuple insert/update/delete; extend WAL writer to emit them.
+	- **Task 0.6:** Extend WAL replay path to recognize catalog records and apply them to catalog pages before user relations.
+	- **Task 0.7:** Build bootstrap smoke test covering fresh cluster initialization.
+	- **Task 0.8:** Build WAL replay test ensuring bootstrap WAL stream rehydrates catalog correctly.
+	- **Task 0.9:** Add sanity check test verifying reserved identifier ranges stay collision-free.
+- **Milestone 1: MVCC Visibility & Snapshot Reads (1 sprint)**
+	- Implement MVCC tuple headers (`xmin`, `xmax`, visibility flags) with snapshot evaluation helpers.
+	- Deliver `CatalogTransaction` and `CatalogAccessor` read APIs with per-transaction caching.
+	- Integrate with transaction id allocator and snapshot manager stubs.
+	- Tests: concurrent reader simulations, snapshot visibility edge cases, recovery of in-flight catalog tuples.
+- **Milestone 2: DDL Mutation Path (1-2 sprints)**
+	- Provide `CatalogMutator` for insert/update/delete of catalog tuples with transactional staging.
+	- Wire DDL handlers to allocate storage identifiers and emit catalog WAL records.
+	- Ensure rollback on failure restores previous visible state and invalidates caches.
+	- Tests: create/drop/alter cycles, rollback scenarios, retention manager interaction.
+- **Milestone 3: Caching, Telemetry, and Hardening (1 sprint)**
+	- Add shared catalog cache with invalidation on commit and retention-aware eviction policy.
+	- Emit catalog mutation and cache-hit telemetry into existing registries.
+	- Conduct crash drills covering mid-flight DDL, id allocator rollbacks, and catalog corruption detection.
+	- Tests: cache eviction correctness, telemetry smoke tests, recovery validation.
 
 ## Open Questions
 - Define initial constraint set (primary key, not-null) scope for first milestone.

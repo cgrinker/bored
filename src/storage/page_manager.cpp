@@ -89,6 +89,26 @@ private:
 constexpr std::size_t kOverflowChunkCapacity = kPageSize - sizeof(PageHeader) - sizeof(WalOverflowChunkMeta);
 static_assert(kOverflowChunkCapacity > 0U, "Overflow chunk capacity must be positive");
 
+constexpr bool is_catalog_page(const PageHeader& header) noexcept
+{
+    return static_cast<PageType>(header.type) == PageType::Meta;
+}
+
+constexpr WalRecordType insert_record_type(const PageHeader& header) noexcept
+{
+    return is_catalog_page(header) ? WalRecordType::CatalogInsert : WalRecordType::TupleInsert;
+}
+
+constexpr WalRecordType delete_record_type(const PageHeader& header) noexcept
+{
+    return is_catalog_page(header) ? WalRecordType::CatalogDelete : WalRecordType::TupleDelete;
+}
+
+constexpr WalRecordType update_record_type(const PageHeader& header) noexcept
+{
+    return is_catalog_page(header) ? WalRecordType::CatalogUpdate : WalRecordType::TupleUpdate;
+}
+
 }  // namespace
 
 PageManager::OperationScope::OperationScope(const PageManager* manager, OperationKind kind) noexcept
@@ -253,8 +273,8 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
             return std::make_error_code(std::errc::invalid_argument);
         }
 
-        WalRecordDescriptor descriptor{};
-        descriptor.type = WalRecordType::TupleInsert;
+    WalRecordDescriptor descriptor{};
+    descriptor.type = insert_record_type(header);
         descriptor.page_id = header.page_id;
         descriptor.flags = WalRecordFlag::None;
         descriptor.payload = std::span<const std::byte>(wal_buffer_span.data(), wal_buffer_span.size());
@@ -365,7 +385,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     }
 
     WalRecordDescriptor descriptor{};
-    descriptor.type = WalRecordType::TupleInsert;
+    descriptor.type = insert_record_type(header);
     descriptor.page_id = header.page_id;
     descriptor.flags = WalRecordFlag::None;
     descriptor.payload = std::span<const std::byte>(wal_buffer_span.data(), wal_buffer_span.size());
@@ -591,7 +611,7 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
     }
 
     WalRecordDescriptor descriptor{};
-    descriptor.type = WalRecordType::TupleDelete;
+    descriptor.type = delete_record_type(header);
     descriptor.page_id = header.page_id;
     descriptor.flags = WalRecordFlag::None;
     descriptor.payload = std::span<const std::byte>(wal_buffer_span.data(), wal_buffer_span.size());
@@ -745,7 +765,7 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     }
 
     WalRecordDescriptor descriptor{};
-    descriptor.type = WalRecordType::TupleUpdate;
+    descriptor.type = update_record_type(header);
     descriptor.page_id = header.page_id;
     descriptor.flags = WalRecordFlag::None;
     descriptor.payload = std::span<const std::byte>(wal_buffer_span.data(), wal_buffer_span.size());
