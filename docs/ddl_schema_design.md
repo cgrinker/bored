@@ -49,7 +49,7 @@
   - Tests: integration tests using `CatalogMutator` stubs to verify catalog state after each verb, crash drills for mid-flight table creation with undo coverage.
 
 - **Milestone 2: Index Definition & Dependency Enforcement (1-2 sprints)**
-  - [ ] Implement `CREATE INDEX` for single-column btree stubs, validating target table/column existence and type compatibility.
+  - [x] Implement `CREATE INDEX` for single-column btree stubs, validating target table/column existence and type compatibility (DDL handler stages catalog metadata with single-column validation; storage hooks remain pending).
   - [ ] Implement `DROP INDEX` ensuring no dependent constraints (future-proof hook) and cleaning index metadata.
   - [ ] Wire index creation into storage hooks: reserve index root pages, seed WAL records for index metadata, register with retention manager.
   - [ ] Introduce dependency graph helper to prevent dropping schemas/tables while indexes depend on them.

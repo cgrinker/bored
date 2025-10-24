@@ -121,6 +121,47 @@ std::vector<CatalogColumnDescriptor> CatalogAccessor::columns(RelationId relatio
     return result;
 }
 
+std::optional<CatalogIndexDescriptor> CatalogAccessor::index(IndexId id) const
+{
+    ensure_indexes_loaded();
+    auto it = index_index_.find(id.value);
+    if (it == index_index_.end()) {
+        return std::nullopt;
+    }
+    const auto& entry = indexes_[it->second];
+    return CatalogIndexDescriptor{entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.name};
+}
+
+std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes(RelationId relation_id) const
+{
+    ensure_indexes_loaded();
+    std::vector<CatalogIndexDescriptor> result;
+    auto it = indexes_by_relation_.find(relation_id.value);
+    if (it == indexes_by_relation_.end()) {
+        return result;
+    }
+    for (auto index : it->second) {
+        const auto& entry = indexes_[index];
+        result.emplace_back(entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.name);
+    }
+    return result;
+}
+
+std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes_for_schema(SchemaId schema_id) const
+{
+    ensure_indexes_loaded();
+    std::vector<CatalogIndexDescriptor> result;
+    auto it = indexes_by_schema_.find(schema_id.value);
+    if (it == indexes_by_schema_.end()) {
+        return result;
+    }
+    for (auto index : it->second) {
+        const auto& entry = indexes_[index];
+        result.emplace_back(entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.name);
+    }
+    return result;
+}
+
 void CatalogAccessor::invalidate_all() noexcept
 {
     CatalogCache::instance().invalidate_all();
@@ -261,6 +302,7 @@ void CatalogAccessor::ensure_tables_loaded() const
 
     tables_loaded_ = true;
     tables_epoch_ = current_epoch;
+    indexes_loaded_ = false;
 }
 
 void CatalogAccessor::ensure_columns_loaded() const
@@ -304,6 +346,60 @@ void CatalogAccessor::ensure_columns_loaded() const
 
     columns_loaded_ = true;
     columns_epoch_ = current_epoch;
+    indexes_loaded_ = false;
+}
+
+void CatalogAccessor::ensure_indexes_loaded() const
+{
+    auto& cache = CatalogCache::instance();
+    const auto current_epoch = cache.epoch(kCatalogIndexesRelationId);
+    if (indexes_loaded_ && indexes_epoch_ == current_epoch) {
+        return;
+    }
+
+    ensure_tables_loaded();
+
+    indexes_.clear();
+    index_index_.clear();
+    indexes_by_relation_.clear();
+    indexes_by_schema_.clear();
+
+    auto relation = cache.materialize(kCatalogIndexesRelationId, scanner_);
+    if (relation) {
+        for (const auto& tuple : relation->tuples) {
+            auto tuple_span = std::span<const std::byte>(tuple.payload.data(), tuple.payload.size());
+            auto view = decode_catalog_index(tuple_span);
+            if (!view) {
+                continue;
+            }
+            if (!transaction_->is_visible(view->tuple)) {
+                continue;
+            }
+
+            IndexEntry entry{};
+            entry.tuple = view->tuple;
+            entry.index_id = view->index_id;
+            entry.relation_id = view->relation_id;
+            entry.index_type = view->index_type;
+            entry.name = make_string(view->name);
+
+            auto table_it = table_index_.find(entry.relation_id.value);
+            if (table_it != table_index_.end()) {
+                entry.schema_id = tables_[table_it->second].schema_id;
+            }
+
+            const auto index = indexes_.size();
+            indexes_.push_back(entry);
+            index_index_[entry.index_id.value] = index;
+            indexes_by_relation_[entry.relation_id.value].push_back(index);
+            if (entry.schema_id.is_valid()) {
+                indexes_by_schema_[entry.schema_id.value].push_back(index);
+            }
+        }
+    }
+
+    indexes_loaded_ = true;
+    indexes_epoch_ = current_epoch;
 }
 
 }  // namespace bored::catalog

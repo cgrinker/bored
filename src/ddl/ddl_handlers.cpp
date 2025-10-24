@@ -27,6 +27,7 @@ using catalog::CatalogSchemaDescriptor;
 using catalog::CatalogTableDescriptor;
 using catalog::CatalogTupleBuilder;
 using catalog::CatalogTupleDescriptor;
+using catalog::CatalogIndexDescriptor;
 
 DdlCommandResponse make_context_failure(std::string message)
 {
@@ -40,7 +41,6 @@ std::error_code map_stage_error(std::error_code ec) noexcept
     if (!ec) {
         return {};
     }
-
     if (ec == std::make_error_code(errc::invalid_argument)) {
         return make_error_code(DdlErrc::ValidationFailed);
     }
@@ -156,6 +156,13 @@ std::vector<std::byte> serialize_column(const CatalogColumnDescriptor& column)
 bool column_name_available(const std::vector<CatalogColumnDescriptor>& columns, std::string_view name)
 {
     return find_column(columns, name) == nullptr;
+}
+
+bool index_name_available(const std::vector<CatalogIndexDescriptor>& indexes, std::string_view name)
+{
+    return std::none_of(indexes.begin(), indexes.end(), [&](const CatalogIndexDescriptor& index) {
+        return index.name == name;
+    });
 }
 
 std::error_code stage_table_rename(DdlCommandContext& context,
@@ -283,6 +290,19 @@ std::error_code stage_column_drop(DdlCommandContext& context,
                     }),
                     columns.end());
     return {};
+}
+
+[[nodiscard]] bool is_supported_index_column_type(catalog::CatalogColumnType type) noexcept
+{
+    switch (type) {
+    case catalog::CatalogColumnType::Int64:
+    case catalog::CatalogColumnType::UInt16:
+    case catalog::CatalogColumnType::UInt32:
+    case catalog::CatalogColumnType::Utf8:
+        return true;
+    default:
+        return false;
+    }
 }
 
 std::error_code stage_alter_actions(DdlCommandContext& context,
@@ -608,6 +628,84 @@ DdlCommandResponse handle_alter_table(DdlCommandContext& context, const AlterTab
     return make_success();
 }
 
+DdlCommandResponse handle_create_index(DdlCommandContext& context, const CreateIndexRequest& request)
+{
+    if (context.mutator == nullptr) {
+        return make_context_failure("ddl create index missing catalog mutator");
+    }
+    if (context.accessor == nullptr) {
+        return make_context_failure("ddl create index missing catalog accessor");
+    }
+
+    if (!request.schema_id.is_valid()) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "target schema id is invalid");
+    }
+
+    if (auto ec = validate_identifier(request.table_name); ec) {
+        return make_failure(ec, "table name is invalid");
+    }
+
+    if (auto ec = validate_identifier(request.index_name); ec) {
+        return make_failure(ec, "index name is invalid");
+    }
+
+    if (request.unique) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "unique indexes are not supported yet");
+    }
+
+    if (request.column_names.empty()) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "create index requires at least one column");
+    }
+    if (request.column_names.size() != 1U) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "create index currently supports exactly one column");
+    }
+
+    const auto& column_name = request.column_names.front();
+    if (auto ec = validate_identifier(column_name); ec) {
+        return make_failure(ec, "index column name is invalid");
+    }
+
+    auto schema = context.accessor->schema(request.schema_id);
+    if (!schema) {
+        return make_failure(make_error_code(DdlErrc::SchemaNotFound), "schema not found");
+    }
+
+    auto table_opt = find_table(*context.accessor, request.schema_id, request.table_name);
+    if (!table_opt) {
+        return make_failure(make_error_code(DdlErrc::TableNotFound), "table not found");
+    }
+
+    const auto indexes = context.accessor->indexes(table_opt->relation_id);
+    if (!index_name_available(indexes, request.index_name)) {
+        if (request.if_not_exists) {
+            return make_success();
+        }
+        return make_failure(make_error_code(DdlErrc::IndexAlreadyExists), "index already exists");
+    }
+
+    auto columns = context.accessor->columns(table_opt->relation_id);
+    const auto* column = find_column(columns, column_name);
+    if (column == nullptr) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "column not found");
+    }
+    if (!is_supported_index_column_type(column->column_type)) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "column type is not supported for indexes");
+    }
+
+    catalog::CreateIndexRequest stage_request{};
+    stage_request.relation_id = table_opt->relation_id;
+    stage_request.name = request.index_name;
+    stage_request.index_type = catalog::CatalogIndexType::BTree;
+
+    catalog::CreateIndexResult stage_result{};
+    if (auto ec = catalog::stage_create_index(*context.mutator, context.allocator, stage_request, stage_result); ec) {
+        return make_failure(map_stage_error(ec), ec.message());
+    }
+
+    DdlCommandResult payload{std::in_place_type<catalog::CreateIndexResult>, stage_result};
+    return make_success(std::move(payload));
+}
+
 }  // namespace
 
 void register_catalog_handlers(DdlCommandDispatcher& dispatcher)
@@ -617,6 +715,7 @@ void register_catalog_handlers(DdlCommandDispatcher& dispatcher)
     dispatcher.register_handler<CreateTableRequest>(handle_create_table);
     dispatcher.register_handler<DropTableRequest>(handle_drop_table);
     dispatcher.register_handler<AlterTableRequest>(handle_alter_table);
+    dispatcher.register_handler<CreateIndexRequest>(handle_create_index);
 }
 
 }  // namespace bored::ddl
