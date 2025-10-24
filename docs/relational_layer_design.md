@@ -5,7 +5,7 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
 
 ## Dependency-Ordered Feature Plan
 
-1. **Catalog & Metadata Subsystem** ([catalog design](catalog_design.md))
+1. **Catalog & Metadata Subsystem** _(Status: Complete)_ ([catalog design](catalog_design.md))
    - **Responsibilities:** Persist database, schema, table, index, and column metadata; map logical descriptors to storage identifiers; expose catalog lookups with caching and transactional visibility.
    - **Prerequisites:** Existing WAL/page manager stack for persistent storage of catalog pages.
    - **Key Tasks:**
@@ -86,6 +86,6 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
       - Integrate telemetry (query latencies, lock waits) into existing diagnostics pipelines.
 
 ## Next Steps
-- Draft detailed specifications and milestones for the catalog subsystem (Item 1).
+- Finalise detailed milestones for the DDL and schema management layer ([DDL & schema design](ddl_schema_design.md)).
 - Introduce PEGTL as a third-party dependency and prototype minimal SQL grammar support for DDL statements (Items 2-3).
 - Establish transaction manager design review to select the initial concurrency model (Item 5).
