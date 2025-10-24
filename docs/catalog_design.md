@@ -84,7 +84,7 @@
 	- [x] **Task 2.4:** Extend WAL emission to capture catalog mutation records with before-images and bind them to commit LSNs.
 	- [x] **Task 2.5:** Wire simple DDL handlers (create schema/table/index) to use `CatalogMutator`, including identifier allocation flows.
 	- [x] **Task 2.6:** Update catalog accessor caches and invalidation mechanisms triggered by committed catalog mutations.
-	- [ ] **Task 2.7:** Build integration tests covering create/drop/alter cycles, rollback scenarios, and retention manager interaction.
+	- [x] **Task 2.7:** Build integration tests covering create/drop/alter cycles, rollback scenarios, and retention manager interaction.
 	- [ ] **Task 2.8:** Document DDL mutation lifecycle, catalog locking expectations, and troubleshooting guidance in `docs/catalog_design.md` and operator docs.
 - **Milestone 3: Caching, Telemetry, and Hardening (1 sprint)**
 	- Add shared catalog cache with invalidation on commit and retention-aware eviction policy.

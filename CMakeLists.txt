@@ -72,6 +72,7 @@ if(BORED_ENABLE_TESTS)
     tests/catalog_ddl_tests.cpp
         tests/catalog_mutator_tests.cpp
         tests/catalog_mvcc_tests.cpp
+        tests/catalog_integration_tests.cpp
         tests/page_manager_tests.cpp
         tests/free_space_map_tests.cpp
         tests/wal_writer_tests.cpp
