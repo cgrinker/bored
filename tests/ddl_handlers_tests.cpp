@@ -612,9 +612,10 @@ TEST_CASE("Drop table removes table and columns")
     REQUIRE(response.success);
     CHECK(harness.tables().empty());
     CHECK(harness.columns().empty());
+    CHECK(harness.indexes().empty());
 }
 
-TEST_CASE("Drop table fails while dependent indexes exist")
+TEST_CASE("Drop table cascades to dependent indexes")
 {
     DispatcherHarness harness;
     harness.seed_database("system");
@@ -632,10 +633,41 @@ TEST_CASE("Drop table fails while dependent indexes exist")
     DdlCommand command = request;
     const auto response = harness.dispatch(command);
 
-    CHECK_FALSE(response.success);
-    CHECK(response.error == make_error_code(DdlErrc::ValidationFailed));
-    CHECK_FALSE(harness.tables().empty());
-    CHECK_FALSE(harness.indexes().empty());
+    REQUIRE(response.success);
+    CHECK(harness.tables().empty());
+    CHECK(harness.indexes().empty());
+}
+
+TEST_CASE("Drop table cascade invokes index cleanup hook")
+{
+    std::size_t cleanup_invocations = 0U;
+    DropIndexCleanupHook index_cleanup = [&](const DropIndexRequest& request,
+                                            const catalog::CatalogIndexDescriptor& descriptor,
+                                            catalog::CatalogMutator&) -> std::error_code {
+        ++cleanup_invocations;
+        CHECK(request.index_name == descriptor.name);
+        return {};
+    };
+
+    DispatcherHarness harness({}, nullptr, {}, std::move(index_cleanup));
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{5U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    const catalog::RelationId table_id{13'200U};
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{21'200U}, table_id, "id", 1U);
+    harness.seed_index(catalog::IndexId{31'100U}, table_id, "metrics_idx", 88U);
+
+    DropTableRequest request{};
+    request.schema_id = schema_id;
+    request.name = "metrics";
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    CHECK(cleanup_invocations == 1U);
+    CHECK(harness.indexes().empty());
 }
 
 TEST_CASE("Drop table IF EXISTS suppresses missing errors")
