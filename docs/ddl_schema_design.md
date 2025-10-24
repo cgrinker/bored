@@ -41,8 +41,8 @@
   - Tests: unit tests for dispatcher plumbing, validation helpers, and telemetry counter increments.
 
 - **Milestone 1: Schema & Table Lifecycle (1-2 sprints)**
-  - [ ] Implement `CREATE SCHEMA`/`DROP SCHEMA` with dependency checks ensuring schemas cannot be dropped while containing tables.
-  - [ ] Implement `CREATE TABLE` with column definitions, type validation (primitive types), and catalog identifier allocation.
+  - [x] Implement `CREATE SCHEMA`/`DROP SCHEMA` with dependency checks ensuring schemas cannot be dropped while containing tables.
+  - [x] Implement `CREATE TABLE` with column definitions, type validation (primitive types), and catalog identifier allocation.
   - [ ] Support `ALTER TABLE` operations: rename table, add column (appends column metadata), drop column (marks metadata as dropped, no physical reclaim yet).
   - [ ] Implement `DROP TABLE` with retention-aware cleanup hooks (signal retention manager, flag table metadata for pruning).
   - [ ] Extend checkpoint scheduler integration to account for DDL-driven dirty catalog pages.

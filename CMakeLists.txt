@@ -13,6 +13,7 @@ add_library(${PROJECT_NAME}_lib
     src/ddl/ddl_validation.cpp
     src/ddl/ddl_telemetry.cpp
     src/ddl/ddl_dispatcher.cpp
+    src/ddl/ddl_handlers.cpp
     src/catalog/catalog_bootstrapper.cpp
     src/catalog/catalog_encoding.cpp
     src/catalog/catalog_ddl.cpp
@@ -82,6 +83,7 @@ if(BORED_ENABLE_TESTS)
         tests/catalog_integration_tests.cpp
         tests/ddl_validation_tests.cpp
         tests/ddl_dispatcher_tests.cpp
+    tests/ddl_handlers_tests.cpp
         tests/page_manager_tests.cpp
         tests/free_space_map_tests.cpp
         tests/wal_writer_tests.cpp
