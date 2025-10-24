@@ -1,6 +1,7 @@
 #include "bored/catalog/catalog_mutator.hpp"
 
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 namespace bored::catalog {
@@ -23,6 +24,7 @@ CatalogMutator::CatalogMutator(CatalogMutatorConfig config)
     if (transaction_ == nullptr) {
         throw std::invalid_argument{"CatalogMutator requires an active transaction"};
     }
+    register_transaction_hooks();
 }
 
 const CatalogTransaction& CatalogMutator::transaction() const noexcept
@@ -43,6 +45,29 @@ const std::vector<CatalogStagedMutation>& CatalogMutator::staged_mutations() con
 const std::vector<std::optional<CatalogWalRecordStaging>>& CatalogMutator::staged_wal_records() const noexcept
 {
     return wal_records_;
+}
+
+bool CatalogMutator::has_published_batch() const noexcept
+{
+    return published_batch_.has_value();
+}
+
+const CatalogMutationBatch& CatalogMutator::published_batch() const
+{
+    if (!published_batch_) {
+        throw std::logic_error{"CatalogMutator::published_batch called without published batch"};
+    }
+    return *published_batch_;
+}
+
+CatalogMutationBatch CatalogMutator::consume_published_batch()
+{
+    if (!published_batch_) {
+        throw std::logic_error{"CatalogMutator::consume_published_batch called without published batch"};
+    }
+    auto batch = std::move(*published_batch_);
+    published_batch_.reset();
+    return batch;
 }
 
 void CatalogMutator::stage_insert(RelationId relation_id,
@@ -109,6 +134,7 @@ void CatalogMutator::clear() noexcept
 {
     staged_.clear();
     wal_records_.clear();
+    published_batch_.reset();
 }
 
 CatalogWalRecordStaging& CatalogMutator::ensure_wal_record(std::size_t index)
@@ -136,6 +162,33 @@ void CatalogMutator::clear_wal_record(std::size_t index) noexcept
     if (index < wal_records_.size()) {
         wal_records_[index].reset();
     }
+}
+
+std::error_code CatalogMutator::publish_staged_batch()
+{
+    if (staged_.empty()) {
+        published_batch_.reset();
+        wal_records_.clear();
+        return {};
+    }
+
+    CatalogMutationBatch batch{};
+    batch.mutations = std::move(staged_);
+    batch.wal_records = std::move(wal_records_);
+    published_batch_ = std::move(batch);
+    staged_.clear();
+    wal_records_.clear();
+    return {};
+}
+
+void CatalogMutator::register_transaction_hooks()
+{
+    transaction_->register_commit_hook([this]() {
+        return this->publish_staged_batch();
+    });
+    transaction_->register_abort_hook([this]() {
+        this->clear();
+    });
 }
 
 CatalogTupleDescriptor CatalogTupleBuilder::for_insert(const CatalogTransaction& transaction,

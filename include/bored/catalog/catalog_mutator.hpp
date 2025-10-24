@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <system_error>
 #include <vector>
 
 namespace bored::catalog {
@@ -41,6 +42,11 @@ struct CatalogMutatorConfig final {
     CatalogTransaction* transaction = nullptr;
 };
 
+struct CatalogMutationBatch final {
+    std::vector<CatalogStagedMutation> mutations{};
+    std::vector<std::optional<CatalogWalRecordStaging>> wal_records{};
+};
+
 class CatalogMutator final {
 public:
     explicit CatalogMutator(CatalogMutatorConfig config);
@@ -54,6 +60,9 @@ public:
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] const std::vector<CatalogStagedMutation>& staged_mutations() const noexcept;
     [[nodiscard]] const std::vector<std::optional<CatalogWalRecordStaging>>& staged_wal_records() const noexcept;
+    [[nodiscard]] bool has_published_batch() const noexcept;
+    [[nodiscard]] const CatalogMutationBatch& published_batch() const;
+    CatalogMutationBatch consume_published_batch();
 
     void stage_insert(RelationId relation_id,
                       std::uint64_t row_id,
@@ -79,9 +88,13 @@ public:
     void clear_wal_record(std::size_t index) noexcept;
 
 private:
+    std::error_code publish_staged_batch();
+    void register_transaction_hooks();
+
     CatalogTransaction* transaction_ = nullptr;
     std::vector<CatalogStagedMutation> staged_{};
     std::vector<std::optional<CatalogWalRecordStaging>> wal_records_{};
+    std::optional<CatalogMutationBatch> published_batch_{};
 };
 
 struct CatalogTupleBuilder final {

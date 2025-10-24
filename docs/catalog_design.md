@@ -80,7 +80,7 @@
 - **Milestone 2: DDL Mutation Path (1-2 sprints)**
 	- [x] **Task 2.1:** Finalise `CatalogMutator` API surface for insert/update/delete staging, including tuple version builders and undo scaffolding.
 	- [x] **Task 2.2:** Implement mutation staging buffers that record new tuple payloads alongside WAL descriptors pending commit.
-	- [ ] **Task 2.3:** Integrate mutation path with transaction commit/abort hooks to publish or discard staged versions atomically.
+	- [x] **Task 2.3:** Integrate mutation path with transaction commit/abort hooks to publish or discard staged versions atomically.
 	- [ ] **Task 2.4:** Extend WAL emission to capture catalog mutation records with before-images and bind them to commit LSNs.
 	- [ ] **Task 2.5:** Wire simple DDL handlers (create schema/table/index) to use `CatalogMutator`, including identifier allocation flows.
 	- [ ] **Task 2.6:** Update catalog accessor caches and invalidation mechanisms triggered by committed catalog mutations.
