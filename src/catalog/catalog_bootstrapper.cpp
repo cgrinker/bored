@@ -1,5 +1,6 @@
 #include "bored/catalog/catalog_bootstrapper.hpp"
 
+#include "bored/catalog/catalog_mvcc.hpp"
 #include <array>
 #include <span>
 
@@ -12,6 +13,7 @@ constexpr CatalogTupleDescriptor bootstrap_tuple() noexcept
     CatalogTupleDescriptor tuple{};
     tuple.xmin = kCatalogBootstrapTxnId;
     tuple.xmax = 0U;
+    tuple.visibility_flags = to_value(CatalogVisibilityFlag::Frozen);
     return tuple;
 }
 

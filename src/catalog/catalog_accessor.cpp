@@ -1,0 +1,250 @@
+#include "bored/catalog/catalog_accessor.hpp"
+
+#include <stdexcept>
+#include <string_view>
+#include <utility>
+
+namespace bored::catalog {
+
+namespace {
+
+std::string make_string(std::string_view value)
+{
+    return std::string(value.begin(), value.end());
+}
+
+}  // namespace
+
+CatalogAccessor::CatalogAccessor(Config config)
+    : transaction_{config.transaction}
+    , scanner_{std::move(config.scanner)}
+{
+    if (transaction_ == nullptr) {
+        throw std::invalid_argument{"CatalogAccessor requires an active transaction"};
+    }
+    if (!scanner_) {
+        throw std::invalid_argument{"CatalogAccessor requires a relation scanner"};
+    }
+}
+
+const CatalogTransaction& CatalogAccessor::transaction() const noexcept
+{
+    return *transaction_;
+}
+
+std::optional<CatalogDatabaseDescriptor> CatalogAccessor::database(DatabaseId id) const
+{
+    ensure_databases_loaded();
+    auto it = database_index_.find(id.value);
+    if (it == database_index_.end()) {
+        return std::nullopt;
+    }
+    const auto& entry = databases_[it->second];
+    return CatalogDatabaseDescriptor{entry.tuple, entry.database_id, entry.default_schema_id, entry.name};
+}
+
+std::optional<CatalogDatabaseDescriptor> CatalogAccessor::database(std::string_view name) const
+{
+    ensure_databases_loaded();
+    std::string key{name};
+    auto it = database_name_index_.find(key);
+    if (it == database_name_index_.end()) {
+        return std::nullopt;
+    }
+    const auto& entry = databases_[it->second];
+    return CatalogDatabaseDescriptor{entry.tuple, entry.database_id, entry.default_schema_id, entry.name};
+}
+
+std::optional<CatalogSchemaDescriptor> CatalogAccessor::schema(SchemaId id) const
+{
+    ensure_schemas_loaded();
+    auto it = schema_index_.find(id.value);
+    if (it == schema_index_.end()) {
+        return std::nullopt;
+    }
+    const auto& entry = schemas_[it->second];
+    return CatalogSchemaDescriptor{entry.tuple, entry.schema_id, entry.database_id, entry.name};
+}
+
+std::vector<CatalogSchemaDescriptor> CatalogAccessor::schemas(DatabaseId database_id) const
+{
+    ensure_schemas_loaded();
+    std::vector<CatalogSchemaDescriptor> result;
+    for (const auto& entry : schemas_) {
+        if (entry.database_id == database_id) {
+            result.emplace_back(entry.tuple, entry.schema_id, entry.database_id, entry.name);
+        }
+    }
+    return result;
+}
+
+std::optional<CatalogTableDescriptor> CatalogAccessor::table(RelationId id) const
+{
+    ensure_tables_loaded();
+    auto it = table_index_.find(id.value);
+    if (it == table_index_.end()) {
+        return std::nullopt;
+    }
+    const auto& entry = tables_[it->second];
+    return CatalogTableDescriptor{entry.tuple, entry.relation_id, entry.schema_id, entry.table_type, entry.root_page_id, entry.name};
+}
+
+std::vector<CatalogTableDescriptor> CatalogAccessor::tables(SchemaId schema_id) const
+{
+    ensure_tables_loaded();
+    std::vector<CatalogTableDescriptor> result;
+    auto it = tables_by_schema_.find(schema_id.value);
+    if (it == tables_by_schema_.end()) {
+        return result;
+    }
+    for (auto index : it->second) {
+        const auto& entry = tables_[index];
+        result.emplace_back(entry.tuple, entry.relation_id, entry.schema_id, entry.table_type, entry.root_page_id, entry.name);
+    }
+    return result;
+}
+
+std::vector<CatalogColumnDescriptor> CatalogAccessor::columns(RelationId relation_id) const
+{
+    ensure_columns_loaded();
+    std::vector<CatalogColumnDescriptor> result;
+    auto it = columns_by_relation_.find(relation_id.value);
+    if (it == columns_by_relation_.end()) {
+        return result;
+    }
+    for (auto index : it->second) {
+        const auto& entry = columns_[index];
+        result.emplace_back(entry.tuple, entry.column_id, entry.relation_id, entry.column_type, entry.ordinal_position, entry.name);
+    }
+    return result;
+}
+
+void CatalogAccessor::ensure_databases_loaded() const
+{
+    if (databases_loaded_) {
+        return;
+    }
+
+    scanner_(kCatalogDatabasesRelationId, [this](std::span<const std::byte> tuple_span) {
+        auto view = decode_catalog_database(tuple_span);
+        if (!view) {
+            return;
+        }
+        if (!transaction_->is_visible(view->tuple)) {
+            return;
+        }
+
+        DatabaseEntry entry{};
+        entry.tuple = view->tuple;
+        entry.database_id = view->database_id;
+        entry.default_schema_id = view->default_schema_id;
+        entry.name = make_string(view->name);
+
+        const auto index = databases_.size();
+        databases_.push_back(entry);
+        database_index_[entry.database_id.value] = index;
+        database_name_index_[entry.name] = index;
+    });
+
+    databases_loaded_ = true;
+}
+
+void CatalogAccessor::ensure_schemas_loaded() const
+{
+    if (schemas_loaded_) {
+        return;
+    }
+
+    ensure_databases_loaded();
+
+    scanner_(kCatalogSchemasRelationId, [this](std::span<const std::byte> tuple_span) {
+        auto view = decode_catalog_schema(tuple_span);
+        if (!view) {
+            return;
+        }
+        if (!transaction_->is_visible(view->tuple)) {
+            return;
+        }
+
+        SchemaEntry entry{};
+        entry.tuple = view->tuple;
+        entry.schema_id = view->schema_id;
+        entry.database_id = view->database_id;
+        entry.name = make_string(view->name);
+
+        const auto index = schemas_.size();
+        schemas_.push_back(entry);
+        schema_index_[entry.schema_id.value] = index;
+    });
+
+    schemas_loaded_ = true;
+}
+
+void CatalogAccessor::ensure_tables_loaded() const
+{
+    if (tables_loaded_) {
+        return;
+    }
+
+    ensure_schemas_loaded();
+
+    scanner_(kCatalogTablesRelationId, [this](std::span<const std::byte> tuple_span) {
+        auto view = decode_catalog_table(tuple_span);
+        if (!view) {
+            return;
+        }
+        if (!transaction_->is_visible(view->tuple)) {
+            return;
+        }
+
+        TableEntry entry{};
+        entry.tuple = view->tuple;
+        entry.relation_id = view->relation_id;
+        entry.schema_id = view->schema_id;
+        entry.table_type = view->table_type;
+        entry.root_page_id = view->root_page_id;
+        entry.name = make_string(view->name);
+
+        const auto index = tables_.size();
+        tables_.push_back(entry);
+        table_index_[entry.relation_id.value] = index;
+        tables_by_schema_[entry.schema_id.value].push_back(index);
+    });
+
+    tables_loaded_ = true;
+}
+
+void CatalogAccessor::ensure_columns_loaded() const
+{
+    if (columns_loaded_) {
+        return;
+    }
+
+    ensure_tables_loaded();
+
+    scanner_(kCatalogColumnsRelationId, [this](std::span<const std::byte> tuple_span) {
+        auto view = decode_catalog_column(tuple_span);
+        if (!view) {
+            return;
+        }
+        if (!transaction_->is_visible(view->tuple)) {
+            return;
+        }
+
+        ColumnEntry entry{};
+        entry.tuple = view->tuple;
+        entry.column_id = view->column_id;
+        entry.relation_id = view->relation_id;
+        entry.column_type = view->column_type;
+        entry.ordinal_position = view->ordinal_position;
+        entry.name = make_string(view->name);
+
+        const auto index = columns_.size();
+        columns_.push_back(entry);
+        columns_by_relation_[entry.relation_id.value].push_back(index);
+    });
+
+    columns_loaded_ = true;
+}
+
+}  // namespace bored::catalog

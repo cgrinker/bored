@@ -59,22 +59,24 @@
 - WAL replay tests covering catalog bootstrap, rename, and drop scenarios.
 - Crash-recovery drills verifying catalog integrity after simulated failures during DDL.
 
-## Milestones
-- **Milestone 0: Bootstrapping Infrastructure (1 sprint)**
-	- **Task 0.1:** Author catalog relation schemas (`catalog_databases`, `catalog_schemas`, `catalog_tables`, `catalog_columns`, `catalog_indexes`) and tuple layouts in documentation and header stubs.
-	- **Task 0.2:** Implement tuple serialization helpers and size calculators for catalog rows.
-	- **Task 0.3:** Reserve system identifier ranges and encode them in `catalog_bootstrap_ids.hpp`.
-	- **Task 0.4:** Implement `CatalogBootstrapper` to create root catalog segment, instantiate catalog relations, and write seed tuples.
-	- **Task 0.5:** Define WAL record types for catalog tuple insert/update/delete; extend WAL writer to emit them.
-	- **Task 0.6:** Extend WAL replay path to recognize catalog records and apply them to catalog pages before user relations.
-	- **Task 0.7:** Build bootstrap smoke test covering fresh cluster initialization.
-	- **Task 0.8:** Build WAL replay test ensuring bootstrap WAL stream rehydrates catalog correctly.
-	- **Task 0.9:** Add sanity check test verifying reserved identifier ranges stay collision-free.
-- **Milestone 1: MVCC Visibility & Snapshot Reads (1 sprint)**
-	- Implement MVCC tuple headers (`xmin`, `xmax`, visibility flags) with snapshot evaluation helpers.
-	- Deliver `CatalogTransaction` and `CatalogAccessor` read APIs with per-transaction caching.
-	- Integrate with transaction id allocator and snapshot manager stubs.
-	- Tests: concurrent reader simulations, snapshot visibility edge cases, recovery of in-flight catalog tuples.
+- **Milestones**
+- **Milestone 0: Bootstrapping Infrastructure (1 sprint)** _(Status: Complete)_
+	- [x] **Task 0.1:** Author catalog relation schemas (`catalog_databases`, `catalog_schemas`, `catalog_tables`, `catalog_columns`, `catalog_indexes`) and tuple layouts in documentation and header stubs.
+	- [x] **Task 0.2:** Implement tuple serialization helpers and size calculators for catalog rows.
+	- [x] **Task 0.3:** Reserve system identifier ranges and encode them in `catalog_bootstrap_ids.hpp`.
+	- [x] **Task 0.4:** Implement `CatalogBootstrapper` to create root catalog segment, instantiate catalog relations, and write seed tuples.
+	- [x] **Task 0.5:** Define WAL record types for catalog tuple insert/update/delete; extend WAL writer to emit them.
+	- [x] **Task 0.6:** Extend WAL replay path to recognize catalog records and apply them to catalog pages before user relations.
+	- [x] **Task 0.7:** Build bootstrap smoke test covering fresh cluster initialization.
+	- [x] **Task 0.8:** Build WAL replay test ensuring bootstrap WAL stream rehydrates catalog correctly.
+	- [x] **Task 0.9:** Add sanity check test verifying reserved identifier ranges stay collision-free.
+- **Milestone 1: MVCC Visibility & Snapshot Reads (1 sprint)** _(Status: Complete)_
+	- [x] **Task 1.1:** Implement MVCC tuple headers (`xmin`, `xmax`, visibility flags) and snapshot evaluation helpers integrated with catalog tuple layouts.
+	- [x] **Task 1.2:** Introduce `CatalogTransaction` to capture active transaction id, acquire snapshots, and expose visibility checks.
+	- [x] **Task 1.3:** Deliver `CatalogAccessor` read APIs with per-transaction caching and typed metadata retrieval helpers.
+	- [x] **Task 1.4:** Integrate catalog snapshot flow with the transaction id allocator and snapshot manager stubs.
+	- [x] **Task 1.5:** Implement concurrency-focused tests covering parallel readers, snapshot edge cases, and catalog tuple visibility transitions.
+	- [x] **Task 1.6:** Extend recovery tests to validate redo/undo handling of in-flight catalog tuples under MVCC.
 - **Milestone 2: DDL Mutation Path (1-2 sprints)**
 	- Provide `CatalogMutator` for insert/update/delete of catalog tuples with transactional staging.
 	- Wire DDL handlers to allocate storage identifiers and emit catalog WAL records.

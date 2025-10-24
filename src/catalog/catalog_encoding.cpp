@@ -62,11 +62,11 @@ struct CatalogIndexPrefix final {
     std::uint16_t reserved2 = 0U;
 };
 
-static_assert(sizeof(CatalogDatabasePrefix) == 40U, "CatalogDatabasePrefix expected to be 40 bytes");
-static_assert(sizeof(CatalogSchemaPrefix) == 40U, "CatalogSchemaPrefix expected to be 40 bytes");
-static_assert(sizeof(CatalogTablePrefix) == 48U, "CatalogTablePrefix expected to be 48 bytes");
-static_assert(sizeof(CatalogColumnPrefix) == 48U, "CatalogColumnPrefix expected to be 48 bytes");
-static_assert(sizeof(CatalogIndexPrefix) == 48U, "CatalogIndexPrefix expected to be 48 bytes");
+static_assert(sizeof(CatalogDatabasePrefix) == 48U, "CatalogDatabasePrefix expected to be 48 bytes");
+static_assert(sizeof(CatalogSchemaPrefix) == 48U, "CatalogSchemaPrefix expected to be 48 bytes");
+static_assert(sizeof(CatalogTablePrefix) == 56U, "CatalogTablePrefix expected to be 56 bytes");
+static_assert(sizeof(CatalogColumnPrefix) == 56U, "CatalogColumnPrefix expected to be 56 bytes");
+static_assert(sizeof(CatalogIndexPrefix) == 56U, "CatalogIndexPrefix expected to be 56 bytes");
 
 std::vector<std::byte> serialize_prefixed_tuple(std::size_t prefix_size, std::string_view name)
 {

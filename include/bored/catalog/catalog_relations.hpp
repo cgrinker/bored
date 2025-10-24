@@ -10,6 +10,8 @@ namespace bored::catalog {
 struct CatalogTupleDescriptor final {
     std::uint64_t xmin = 0U;
     std::uint64_t xmax = 0U;
+    std::uint32_t visibility_flags = 0U;
+    std::uint32_t reserved = 0U;
 };
 
 enum class CatalogTableType : std::uint16_t {

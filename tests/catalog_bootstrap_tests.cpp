@@ -1,6 +1,7 @@
 #include "bored/catalog/catalog_bootstrapper.hpp"
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
+#include "bored/catalog/catalog_mvcc.hpp"
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/free_space_map.hpp"
 #include "bored/storage/page_format.hpp"
@@ -106,6 +107,7 @@ TEST_CASE("Catalog bootstrap seeds system relations")
             REQUIRE(view);
             REQUIRE(view->database_id == catalog::kSystemDatabaseId);
             REQUIRE(view->name == "system");
+            CHECK(catalog::has_flag(view->tuple.visibility_flags, catalog::CatalogVisibilityFlag::Frozen));
         } else if (page_id == catalog::kCatalogTablesPageId) {
             auto tuple = storage::read_tuple(span, 0U);
             REQUIRE(!tuple.empty());
@@ -113,6 +115,7 @@ TEST_CASE("Catalog bootstrap seeds system relations")
             REQUIRE(view);
             REQUIRE(view->relation_id == catalog::kCatalogDatabasesRelationId);
             REQUIRE(view->table_type == catalog::CatalogTableType::Catalog);
+            CHECK(catalog::has_flag(view->tuple.visibility_flags, catalog::CatalogVisibilityFlag::Frozen));
         }
     }
 
