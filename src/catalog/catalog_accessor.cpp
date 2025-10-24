@@ -1,6 +1,7 @@
 #include "bored/catalog/catalog_accessor.hpp"
 
-#include <atomic>
+#include "bored/catalog/catalog_cache.hpp"
+
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -8,28 +9,6 @@
 namespace bored::catalog {
 
 namespace {
-
-std::atomic<std::uint64_t> g_databases_epoch{1U};
-std::atomic<std::uint64_t> g_schemas_epoch{1U};
-std::atomic<std::uint64_t> g_tables_epoch{1U};
-std::atomic<std::uint64_t> g_columns_epoch{1U};
-
-std::atomic<std::uint64_t>* epoch_for_relation(RelationId relation_id) noexcept
-{
-    if (relation_id == kCatalogDatabasesRelationId) {
-        return &g_databases_epoch;
-    }
-    if (relation_id == kCatalogSchemasRelationId) {
-        return &g_schemas_epoch;
-    }
-    if (relation_id == kCatalogTablesRelationId) {
-        return &g_tables_epoch;
-    }
-    if (relation_id == kCatalogColumnsRelationId) {
-        return &g_columns_epoch;
-    }
-    return nullptr;
-}
 
 std::string make_string(std::string_view value)
 {
@@ -144,30 +123,23 @@ std::vector<CatalogColumnDescriptor> CatalogAccessor::columns(RelationId relatio
 
 void CatalogAccessor::invalidate_all() noexcept
 {
-    g_databases_epoch.fetch_add(1U, std::memory_order_acq_rel);
-    g_schemas_epoch.fetch_add(1U, std::memory_order_acq_rel);
-    g_tables_epoch.fetch_add(1U, std::memory_order_acq_rel);
-    g_columns_epoch.fetch_add(1U, std::memory_order_acq_rel);
+    CatalogCache::instance().invalidate_all();
 }
 
 void CatalogAccessor::invalidate_relation(RelationId relation_id) noexcept
 {
-    if (auto* epoch = epoch_for_relation(relation_id); epoch != nullptr) {
-        epoch->fetch_add(1U, std::memory_order_acq_rel);
-    }
+    CatalogCache::instance().invalidate(relation_id);
 }
 
 std::uint64_t CatalogAccessor::current_epoch(RelationId relation_id) noexcept
 {
-    if (auto* epoch = epoch_for_relation(relation_id); epoch != nullptr) {
-        return epoch->load(std::memory_order_acquire);
-    }
-    return 0U;
+    return CatalogCache::instance().epoch(relation_id);
 }
 
 void CatalogAccessor::ensure_databases_loaded() const
 {
-    const auto current_epoch = g_databases_epoch.load(std::memory_order_acquire);
+    auto& cache = CatalogCache::instance();
+    const auto current_epoch = cache.epoch(kCatalogDatabasesRelationId);
     if (databases_loaded_ && databases_epoch_ == current_epoch) {
         return;
     }
@@ -176,14 +148,17 @@ void CatalogAccessor::ensure_databases_loaded() const
     database_index_.clear();
     database_name_index_.clear();
 
-    scanner_(kCatalogDatabasesRelationId, [this](std::span<const std::byte> tuple_span) {
-        auto view = decode_catalog_database(tuple_span);
-        if (!view) {
-            return;
-        }
-        if (!transaction_->is_visible(view->tuple)) {
-            return;
-        }
+    auto relation = cache.materialize(kCatalogDatabasesRelationId, scanner_);
+    if (relation) {
+        for (const auto& tuple : relation->tuples) {
+            auto tuple_span = std::span<const std::byte>(tuple.payload.data(), tuple.payload.size());
+            auto view = decode_catalog_database(tuple_span);
+            if (!view) {
+                continue;
+            }
+            if (!transaction_->is_visible(view->tuple)) {
+                continue;
+            }
 
         DatabaseEntry entry{};
         entry.tuple = view->tuple;
@@ -195,7 +170,8 @@ void CatalogAccessor::ensure_databases_loaded() const
         databases_.push_back(entry);
         database_index_[entry.database_id.value] = index;
         database_name_index_[entry.name] = index;
-    });
+        }
+    }
 
     databases_loaded_ = true;
     databases_epoch_ = current_epoch;
@@ -203,7 +179,8 @@ void CatalogAccessor::ensure_databases_loaded() const
 
 void CatalogAccessor::ensure_schemas_loaded() const
 {
-    const auto current_epoch = g_schemas_epoch.load(std::memory_order_acquire);
+    auto& cache = CatalogCache::instance();
+    const auto current_epoch = cache.epoch(kCatalogSchemasRelationId);
     if (schemas_loaded_ && schemas_epoch_ == current_epoch) {
         return;
     }
@@ -213,14 +190,17 @@ void CatalogAccessor::ensure_schemas_loaded() const
     schemas_.clear();
     schema_index_.clear();
 
-    scanner_(kCatalogSchemasRelationId, [this](std::span<const std::byte> tuple_span) {
-        auto view = decode_catalog_schema(tuple_span);
-        if (!view) {
-            return;
-        }
-        if (!transaction_->is_visible(view->tuple)) {
-            return;
-        }
+    auto relation = cache.materialize(kCatalogSchemasRelationId, scanner_);
+    if (relation) {
+        for (const auto& tuple : relation->tuples) {
+            auto tuple_span = std::span<const std::byte>(tuple.payload.data(), tuple.payload.size());
+            auto view = decode_catalog_schema(tuple_span);
+            if (!view) {
+                continue;
+            }
+            if (!transaction_->is_visible(view->tuple)) {
+                continue;
+            }
 
         SchemaEntry entry{};
         entry.tuple = view->tuple;
@@ -231,7 +211,8 @@ void CatalogAccessor::ensure_schemas_loaded() const
         const auto index = schemas_.size();
         schemas_.push_back(entry);
         schema_index_[entry.schema_id.value] = index;
-    });
+        }
+    }
 
     schemas_loaded_ = true;
     schemas_epoch_ = current_epoch;
@@ -239,7 +220,8 @@ void CatalogAccessor::ensure_schemas_loaded() const
 
 void CatalogAccessor::ensure_tables_loaded() const
 {
-    const auto current_epoch = g_tables_epoch.load(std::memory_order_acquire);
+    auto& cache = CatalogCache::instance();
+    const auto current_epoch = cache.epoch(kCatalogTablesRelationId);
     if (tables_loaded_ && tables_epoch_ == current_epoch) {
         return;
     }
@@ -250,14 +232,17 @@ void CatalogAccessor::ensure_tables_loaded() const
     table_index_.clear();
     tables_by_schema_.clear();
 
-    scanner_(kCatalogTablesRelationId, [this](std::span<const std::byte> tuple_span) {
-        auto view = decode_catalog_table(tuple_span);
-        if (!view) {
-            return;
-        }
-        if (!transaction_->is_visible(view->tuple)) {
-            return;
-        }
+    auto relation = cache.materialize(kCatalogTablesRelationId, scanner_);
+    if (relation) {
+        for (const auto& tuple : relation->tuples) {
+            auto tuple_span = std::span<const std::byte>(tuple.payload.data(), tuple.payload.size());
+            auto view = decode_catalog_table(tuple_span);
+            if (!view) {
+                continue;
+            }
+            if (!transaction_->is_visible(view->tuple)) {
+                continue;
+            }
 
         TableEntry entry{};
         entry.tuple = view->tuple;
@@ -271,7 +256,8 @@ void CatalogAccessor::ensure_tables_loaded() const
         tables_.push_back(entry);
         table_index_[entry.relation_id.value] = index;
         tables_by_schema_[entry.schema_id.value].push_back(index);
-    });
+        }
+    }
 
     tables_loaded_ = true;
     tables_epoch_ = current_epoch;
@@ -279,7 +265,8 @@ void CatalogAccessor::ensure_tables_loaded() const
 
 void CatalogAccessor::ensure_columns_loaded() const
 {
-    const auto current_epoch = g_columns_epoch.load(std::memory_order_acquire);
+    auto& cache = CatalogCache::instance();
+    const auto current_epoch = cache.epoch(kCatalogColumnsRelationId);
     if (columns_loaded_ && columns_epoch_ == current_epoch) {
         return;
     }
@@ -289,14 +276,17 @@ void CatalogAccessor::ensure_columns_loaded() const
     columns_.clear();
     columns_by_relation_.clear();
 
-    scanner_(kCatalogColumnsRelationId, [this](std::span<const std::byte> tuple_span) {
-        auto view = decode_catalog_column(tuple_span);
-        if (!view) {
-            return;
-        }
-        if (!transaction_->is_visible(view->tuple)) {
-            return;
-        }
+    auto relation = cache.materialize(kCatalogColumnsRelationId, scanner_);
+    if (relation) {
+        for (const auto& tuple : relation->tuples) {
+            auto tuple_span = std::span<const std::byte>(tuple.payload.data(), tuple.payload.size());
+            auto view = decode_catalog_column(tuple_span);
+            if (!view) {
+                continue;
+            }
+            if (!transaction_->is_visible(view->tuple)) {
+                continue;
+            }
 
         ColumnEntry entry{};
         entry.tuple = view->tuple;
@@ -309,7 +299,8 @@ void CatalogAccessor::ensure_columns_loaded() const
         const auto index = columns_.size();
         columns_.push_back(entry);
         columns_by_relation_[entry.relation_id.value].push_back(index);
-    });
+        }
+    }
 
     columns_loaded_ = true;
     columns_epoch_ = current_epoch;

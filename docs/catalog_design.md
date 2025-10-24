@@ -41,6 +41,7 @@
 ## API Surface
 - `CatalogTransaction`: mediates catalog reads/writes with active transaction id and snapshot.
 - `CatalogAccessor`: provides typed access to metadata entities (e.g., `get_table(table_oid)`), caches lookups per snapshot.
+- `CatalogCache`: shared relation cache that materializes catalog tuples once per epoch, tracks cache hits, and enforces retention-aware eviction across accessors.
 - `CatalogMutator`: staged updates for DDL statements, producing WAL entries and new tuple versions.
 - `CatalogBootstrapper`: initializes catalog segments and system relations during cluster start.
 
@@ -50,6 +51,7 @@
 3. **Commit Hooks** – `CatalogMutator` registers commit/abort callbacks with `CatalogTransaction`. On commit it synthesises WAL fragments for each mutation, binds the commit LSN from the provider, and publishes a `CatalogMutationBatch`; abort clears staged mutations without touching storage.
 4. **Durability** – The caller must persist `CatalogMutationBatch` contents: (a) append WAL fragments through the storage writer, (b) apply tuple payloads to catalog pages, and (c) flush WAL before acknowledging success. Before-images are already packaged for delete/update records to support undo.
 5. **Cache Invalidation** – When a batch publishes, per-relation epochs are bumped. `CatalogAccessor` compares cached epoch values before returning results and will rescan relations when an epoch changes.
+	The shared `CatalogCache` drops materialized tuples on invalidation and refreshes them lazily, retaining recently mutated relations to respect retention guard thresholds.
 6. **Recovery** – WAL replay first applies catalog records so that subsequent page/table recovery always sees up-to-date metadata. Before-images produced during delete/update are used to undo failed transactions.
 
 ### Locking Expectations
@@ -107,7 +109,7 @@
 	- [x] **Task 2.7:** Build integration tests covering create/drop/alter cycles, rollback scenarios, and retention manager interaction.
 	- [x] **Task 2.8:** Document DDL mutation lifecycle, catalog locking expectations, and troubleshooting guidance in `docs/catalog_design.md` and operator docs.
 - **Milestone 3: Caching, Telemetry, and Hardening (1 sprint)**
-	- Add shared catalog cache with invalidation on commit and retention-aware eviction policy.
+	- [x] Add shared catalog cache with invalidation on commit and retention-aware eviction policy.
 	- Emit catalog mutation and cache-hit telemetry into existing registries.
 	- Conduct crash drills covering mid-flight DDL, id allocator rollbacks, and catalog corruption detection.
 	- Tests: cache eviction correctness, telemetry smoke tests, recovery validation.
