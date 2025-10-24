@@ -591,6 +591,66 @@ TEST_CASE("Drop schema fails when tables exist")
     CHECK(harness.schemas().size() == 1U);
 }
 
+TEST_CASE("Drop schema cascades to tables and indexes")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{4U};
+    const catalog::RelationId table_id{12'100U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{22'000U}, table_id, "id", 1U);
+    harness.seed_index(catalog::IndexId{32'000U}, table_id, "metrics_idx", 91U);
+
+    DropSchemaRequest request{};
+    request.database_id = catalog::kSystemDatabaseId;
+    request.name = "analytics";
+    request.cascade = true;
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    CHECK(harness.schemas().empty());
+    CHECK(harness.tables().empty());
+    CHECK(harness.columns().empty());
+    CHECK(harness.indexes().empty());
+}
+
+TEST_CASE("Drop schema cascade invokes index cleanup hook")
+{
+    std::size_t cleanup_invocations = 0U;
+    DropIndexCleanupHook index_cleanup = [&](const DropIndexRequest& request,
+                                            const catalog::CatalogIndexDescriptor& descriptor,
+                                            catalog::CatalogMutator&) -> std::error_code {
+        ++cleanup_invocations;
+        CHECK(request.index_name == descriptor.name);
+        return {};
+    };
+
+    DispatcherHarness harness({}, nullptr, {}, std::move(index_cleanup));
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{4U};
+    const catalog::RelationId table_id{12'200U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+    harness.seed_table(table_id, schema_id, "metrics");
+    harness.seed_column(catalog::ColumnId{22'100U}, table_id, "id", 1U);
+    harness.seed_index(catalog::IndexId{32'100U}, table_id, "metrics_idx", 92U);
+    harness.seed_index(catalog::IndexId{32'101U}, table_id, "metrics_idx_alt", 93U);
+
+    DropSchemaRequest request{};
+    request.database_id = catalog::kSystemDatabaseId;
+    request.name = "analytics";
+    request.cascade = true;
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+    CHECK(cleanup_invocations == 2U);
+    CHECK(harness.indexes().empty());
+}
+
 TEST_CASE("Drop table removes table and columns")
 {
     DispatcherHarness harness;

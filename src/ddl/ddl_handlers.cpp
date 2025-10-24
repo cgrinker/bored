@@ -30,6 +30,9 @@ using catalog::CatalogTupleBuilder;
 using catalog::CatalogTupleDescriptor;
 using catalog::CatalogIndexDescriptor;
 
+DdlCommandResponse handle_drop_table(DdlCommandContext& context, const DropTableRequest& request);
+DdlCommandResponse handle_drop_index(DdlCommandContext& context, const DropIndexRequest& request);
+
 DdlCommandResponse make_context_failure(std::string message)
 {
     return make_failure(make_error_code(DdlErrc::ExecutionFailed), std::move(message));
@@ -467,9 +470,43 @@ DdlCommandResponse handle_drop_schema(DdlCommandContext& context, const DropSche
         return make_failure(make_error_code(DdlErrc::SchemaNotFound), "schema not found");
     }
 
-    const auto tables = context.accessor->tables(schema->schema_id);
+    auto tables = context.accessor->tables(schema->schema_id);
+    const DdlDependencyGraph dependencies{*context.accessor};
+    auto schema_indexes = dependencies.indexes_in_schema(schema->schema_id);
+
     if (!tables.empty()) {
-        return make_failure(make_error_code(DdlErrc::ValidationFailed), "schema contains tables");
+        if (!request.cascade) {
+            return make_failure(make_error_code(DdlErrc::ValidationFailed), "schema contains tables");
+        }
+
+        for (const auto& table : tables) {
+            DropTableRequest cascade_request{};
+            cascade_request.schema_id = schema->schema_id;
+            cascade_request.name = std::string(table.name);
+            cascade_request.cascade = true;
+            cascade_request.if_exists = true;
+
+            auto cascade_result = handle_drop_table(context, cascade_request);
+            if (!cascade_result.success) {
+                return cascade_result;
+            }
+        }
+    } else if (!schema_indexes.empty()) {
+        if (!request.cascade) {
+            return make_failure(make_error_code(DdlErrc::ValidationFailed), "schema contains indexes");
+        }
+
+        for (const auto& index : schema_indexes) {
+            DropIndexRequest cascade_index_request{};
+            cascade_index_request.schema_id = schema->schema_id;
+            cascade_index_request.index_name = std::string(index.name);
+            cascade_index_request.if_exists = true;
+
+            auto cascade_result = handle_drop_index(context, cascade_index_request);
+            if (!cascade_result.success) {
+                return cascade_result;
+            }
+        }
     }
 
     auto payload = serialize_schema(*schema);

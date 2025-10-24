@@ -20,7 +20,7 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
      - Define DDL command handlers and state machines.
      - Integrate catalog updates with checkpointing and retention policies.
      - Establish error handling and rollback semantics for partial DDL failures.
-  - Maintain a dependency graph that drives cascading index cleanup when parent tables are dropped.
+  - Maintain a dependency graph that drives cascading cleanup when parent tables are dropped and powers `DROP SCHEMA ... CASCADE` teardown flows.
 
 3. **Parser Front-End (PEGTL-Based)**
    - **Responsibilities:** Translate SQL text into an abstract syntax tree (AST) using the `taocpp/PEGTL` CMake package.
