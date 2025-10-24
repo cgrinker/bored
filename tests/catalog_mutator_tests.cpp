@@ -376,6 +376,84 @@ TEST_CASE("Catalog mutator abort discards staged batch")
     CHECK_FALSE(mutator.has_published_batch());
 }
 
+TEST_CASE("Catalog mutator savepoint rolls back staged mutations")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{905U};
+    bored::txn::SnapshotManagerStub snapshot_manager{};
+    CatalogTransaction transaction({&allocator, &snapshot_manager});
+
+    CatalogMutator mutator({&transaction});
+
+    const std::uint64_t initial_row = 18'000U;
+    auto descriptor = CatalogTupleBuilder::for_insert(transaction);
+    mutator.stage_insert(kCatalogTablesRelationId, initial_row, descriptor, make_payload("initial"));
+
+    auto savepoint = mutator.create_savepoint();
+    CHECK(savepoint.mutation_count == 1U);
+    CHECK(savepoint.wal_record_count == 1U);
+
+    SECTION("rollback removes staged entries and allows continued staging")
+    {
+        const std::uint64_t extra_row = 18'001U;
+        auto extra_descriptor = CatalogTupleBuilder::for_insert(transaction);
+        mutator.stage_insert(kCatalogTablesRelationId, extra_row, extra_descriptor, make_payload("extra"));
+
+        auto& wal = mutator.ensure_wal_record(1U);
+        CatalogWalRecordFragment fragment{};
+        fragment.type = bored::storage::WalRecordType::CatalogInsert;
+        fragment.flags = bored::storage::WalRecordFlag::HasPayload;
+        fragment.page_id = kCatalogTablesPageId;
+        fragment.payload = mutator.staged_mutations()[1].after->payload;
+        wal.records.push_back(std::move(fragment));
+
+        REQUIRE(mutator.staged_mutations().size() == 2U);
+        REQUIRE(mutator.staged_wal_records().size() == 2U);
+        REQUIRE(mutator.staged_wal_records()[1].has_value());
+
+        mutator.rollback_to_savepoint(savepoint);
+
+        CHECK(mutator.staged_mutations().size() == 1U);
+        CHECK(mutator.staged_mutations()[0].row_id == initial_row);
+        CHECK(mutator.staged_wal_records().size() == 1U);
+        CHECK_FALSE(mutator.staged_wal_records()[0].has_value());
+
+        const std::uint64_t post_row = 18'002U;
+        auto post_descriptor = CatalogTupleBuilder::for_insert(transaction);
+        mutator.stage_insert(kCatalogTablesRelationId, post_row, post_descriptor, make_payload("post"));
+
+        REQUIRE(mutator.staged_mutations().size() == 2U);
+
+        REQUIRE_FALSE(transaction.commit());
+
+        const auto& batch = mutator.published_batch();
+        REQUIRE(batch.mutations.size() == 2U);
+        CHECK(batch.mutations[0].row_id == initial_row);
+        CHECK(batch.mutations[1].row_id == post_row);
+
+        (void)mutator.consume_published_batch();
+    }
+
+    SECTION("rollback rejects mismatched savepoint counts")
+    {
+        CatalogMutationSavepoint mismatched = savepoint;
+        mismatched.wal_record_count += 1U;
+        CHECK_THROWS_AS(mutator.rollback_to_savepoint(mismatched), std::invalid_argument);
+
+        CatalogMutationSavepoint future = savepoint;
+        future.mutation_count += 1U;
+        future.wal_record_count += 1U;
+        CHECK_THROWS_AS(mutator.rollback_to_savepoint(future), std::out_of_range);
+    }
+
+    SECTION("rollback is not permitted after publish")
+    {
+        REQUIRE_FALSE(transaction.commit());
+        REQUIRE(mutator.has_published_batch());
+        CHECK_THROWS_AS(mutator.rollback_to_savepoint(savepoint), std::logic_error);
+        (void)mutator.consume_published_batch();
+    }
+}
+
 TEST_CASE("Catalog mutator commit invalidates accessor caches")
 {
     bored::txn::TransactionIdAllocatorStub allocator{911U};

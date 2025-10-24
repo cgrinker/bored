@@ -261,6 +261,32 @@ CatalogMutationBatch CatalogMutator::consume_published_batch()
     return batch;
 }
 
+CatalogMutationSavepoint CatalogMutator::create_savepoint() const noexcept
+{
+    CatalogMutationSavepoint savepoint{};
+    savepoint.mutation_count = staged_.size();
+    savepoint.wal_record_count = wal_records_.size();
+    return savepoint;
+}
+
+void CatalogMutator::rollback_to_savepoint(const CatalogMutationSavepoint& savepoint)
+{
+    if (published_batch_) {
+        throw std::logic_error{"CatalogMutator::rollback_to_savepoint cannot be used after publish"};
+    }
+
+    if (savepoint.mutation_count != savepoint.wal_record_count) {
+        throw std::invalid_argument{"CatalogMutator savepoint has mismatched counts"};
+    }
+
+    if (savepoint.mutation_count > staged_.size() || savepoint.wal_record_count > wal_records_.size()) {
+        throw std::out_of_range{"CatalogMutator savepoint exceeds staged mutations"};
+    }
+
+    staged_.resize(savepoint.mutation_count);
+    wal_records_.resize(savepoint.wal_record_count);
+}
+
 void CatalogMutator::stage_insert(RelationId relation_id,
                                   std::uint64_t row_id,
                                   CatalogTupleDescriptor descriptor,

@@ -64,6 +64,11 @@ struct CatalogMutationTelemetrySnapshot final {
     std::uint64_t aborted_mutations = 0U;
 };
 
+struct CatalogMutationSavepoint final {
+    std::size_t mutation_count = 0U;
+    std::size_t wal_record_count = 0U;
+};
+
 class CatalogMutator final {
 public:
     explicit CatalogMutator(CatalogMutatorConfig config);
@@ -80,6 +85,8 @@ public:
     [[nodiscard]] bool has_published_batch() const noexcept;
     [[nodiscard]] const CatalogMutationBatch& published_batch() const;
     CatalogMutationBatch consume_published_batch();
+    [[nodiscard]] CatalogMutationSavepoint create_savepoint() const noexcept;
+    void rollback_to_savepoint(const CatalogMutationSavepoint& savepoint);
 
     void stage_insert(RelationId relation_id,
                       std::uint64_t row_id,

@@ -54,11 +54,11 @@
   - [x] Wire index creation into storage hooks: reserve index root pages, seed WAL records for index metadata, register with retention manager (DDL handler now requires storage hook plans to provide root pages and execute post-stage finalisers for retention/WAL wiring).
   - [x] Introduce dependency graph helper and cascade logic so table drops automatically remove dependent indexes and `DROP SCHEMA ... CASCADE` tears down member tables (and their indexes) before removing the schema descriptor.
   - [x] Emit index-focused telemetry (create/drop attempts, successes/failures, total/last build durations).
-  - [ ] Add crash drills for interrupted index creation (before-image coverage).
+  - [x] Add crash drills for interrupted index creation (before-image coverage).
   - Tests: end-to-end DDL sequences for index create/drop with catalog replay validation and recovery drills.
 
 - **Milestone 3: Hardening, Rollback, and Diagnostics (1 sprint)**
-  - [ ] Implement savepoint-friendly DDL rollback (ensure staged catalog mutations can be unwound before commit).
+  - [x] Implement savepoint-friendly DDL rollback (ensure staged catalog mutations can be unwound before commit).
   - [ ] Expand crash drills to cover identifier allocator updates during concurrent DDL, ensuring WAL replay restores counters and metadata consistently.
   - [ ] Integrate DDL activity telemetry into `storage_diagnostics.hpp` for operator surfaces (per-verb latency distribution, failure taxonomy).
   - [ ] Enhance error propagation with structured diagnostics (error code, severity, remediation hints) surfaced via CLI/API.

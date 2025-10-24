@@ -1123,6 +1123,115 @@ TEST_CASE("Wal crash drill restores catalog tuple before image")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
+TEST_CASE("Wal crash drill restores index descriptor before image")
+{
+    using namespace bored::catalog;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_index_crash_drill_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 128U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = kCatalogIndexesPageId;
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Meta, page_id));
+
+    CatalogIndexDescriptor pending_descriptor{};
+    pending_descriptor.tuple.xmin = 91U;
+    pending_descriptor.tuple.xmax = 0U;
+    pending_descriptor.tuple.visibility_flags = 0x01U;
+    pending_descriptor.index_id = IndexId{8'500U};
+    pending_descriptor.relation_id = RelationId{4'200U};
+    pending_descriptor.index_type = CatalogIndexType::BTree;
+    pending_descriptor.root_page_id = 7'000U;
+    pending_descriptor.name = "metrics_idx_pending";
+    auto pending_payload = serialize_catalog_index(pending_descriptor);
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span,
+                                       std::span<const std::byte>(pending_payload.data(), pending_payload.size()),
+                                       pending_descriptor.index_id.value,
+                                       insert_result));
+
+    WalRecordDescriptor commit{};
+    commit.type = WalRecordType::Commit;
+    commit.page_id = page_id;
+    commit.flags = bored::storage::WalRecordFlag::None;
+    commit.payload = {};
+    bored::storage::WalAppendResult commit_append{};
+    REQUIRE_FALSE(wal_writer->append_record(commit, commit_append));
+
+    const auto baseline_page = page_buffer;
+
+    CatalogIndexDescriptor updated_descriptor = pending_descriptor;
+    updated_descriptor.tuple.xmin = pending_descriptor.tuple.xmin + 5U;
+    updated_descriptor.tuple.visibility_flags = 0x02U;
+    updated_descriptor.root_page_id = pending_descriptor.root_page_id + 1U;
+    updated_descriptor.name = "metrics_idx_ready";
+    auto updated_payload = serialize_catalog_index(updated_descriptor);
+
+    PageManager::TupleUpdateResult update_result{};
+    REQUIRE_FALSE(manager.update_tuple(page_span,
+                                       insert_result.slot.index,
+                                       std::span<const std::byte>(updated_payload.data(), updated_payload.size()),
+                                       pending_descriptor.index_id.value,
+                                       update_result));
+
+    const auto crash_page = page_buffer;
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+    REQUIRE_FALSE(plan.redo.empty());
+    REQUIRE_FALSE(plan.undo.empty());
+
+    auto before_it = std::find_if(plan.undo.begin(), plan.undo.end(), [](const WalRecoveryRecord& record) {
+        return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage;
+    });
+    REQUIRE(before_it != plan.undo.end());
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Meta, &replay_fsm};
+    context.set_page(page_id, std::span<const std::byte>(crash_page.data(), crash_page.size()));
+    WalReplayer replayer{context};
+
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    auto replay_page = context.get_page(page_id);
+    auto tuple_span = bored::storage::read_tuple(std::span<const std::byte>(replay_page.data(), replay_page.size()),
+                                                 insert_result.slot.index);
+    auto restored_view = decode_catalog_index(tuple_span);
+    REQUIRE(restored_view);
+    CHECK(restored_view->name == pending_descriptor.name);
+    CHECK(restored_view->root_page_id == pending_descriptor.root_page_id);
+    CHECK(restored_view->tuple.visibility_flags == pending_descriptor.tuple.visibility_flags);
+    CHECK(restored_view->tuple.xmin == pending_descriptor.tuple.xmin);
+
+    auto replay_header = bored::storage::page_header(std::span<const std::byte>(replay_page.data(), replay_page.size()));
+    auto baseline_header = bored::storage::page_header(std::span<const std::byte>(baseline_page.data(), baseline_page.size()));
+    CHECK(replay_header.tuple_count == baseline_header.tuple_count);
+
+    auto replay_span = std::span<const std::byte>(replay_page.data(), replay_page.size());
+    auto baseline_span = std::span<const std::byte>(baseline_page.data(), baseline_page.size());
+    REQUIRE(std::equal(replay_span.begin(), replay_span.end(), baseline_span.begin(), baseline_span.end()));
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
 TEST_CASE("Wal crash drill rolls back catalog id allocator counters")
 {
     auto io = make_async_io();
