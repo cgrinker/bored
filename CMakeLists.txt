@@ -11,6 +11,7 @@ add_library(${PROJECT_NAME}_lib
     src/greeter.cpp
     src/catalog/catalog_bootstrapper.cpp
     src/catalog/catalog_encoding.cpp
+    src/catalog/catalog_ddl.cpp
     src/catalog/catalog_mutator.cpp
     src/catalog/catalog_accessor.cpp
     src/catalog/catalog_transaction.cpp
@@ -68,6 +69,7 @@ if(BORED_ENABLE_TESTS)
         tests/async_io_tests.cpp
         tests/async_io_ioring_tests.cpp
         tests/catalog_bootstrap_tests.cpp
+    tests/catalog_ddl_tests.cpp
         tests/catalog_mutator_tests.cpp
         tests/catalog_mvcc_tests.cpp
         tests/page_manager_tests.cpp
