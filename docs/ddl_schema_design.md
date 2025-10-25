@@ -59,7 +59,7 @@
 
 - **Milestone 3: Hardening, Rollback, and Diagnostics (1 sprint)**
   - [x] Implement savepoint-friendly DDL rollback (ensure staged catalog mutations can be unwound before commit).
-  - [ ] Expand crash drills to cover identifier allocator updates during concurrent DDL, ensuring WAL replay restores counters and metadata consistently.
+  - [x] Expand crash drills to cover identifier allocator updates during concurrent DDL, ensuring WAL replay restores counters and metadata consistently.
   - [ ] Integrate DDL activity telemetry into `storage_diagnostics.hpp` for operator surfaces (per-verb latency distribution, failure taxonomy).
   - [ ] Enhance error propagation with structured diagnostics (error code, severity, remediation hints) surfaced via CLI/API.
   - [ ] Document DDL verb semantics, failure modes, and recovery behaviors.
