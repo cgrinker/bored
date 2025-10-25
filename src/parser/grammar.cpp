@@ -67,6 +67,9 @@ struct kw_key : keyword<'K', 'E', 'Y'> {
 struct kw_unique : keyword<'U', 'N', 'I', 'Q', 'U', 'E'> {
 };
 
+struct kw_restrict : keyword<'R', 'E', 'S', 'T', 'R', 'I', 'C', 'T'> {
+};
+
 struct kw_if : keyword<'I', 'F'> {
 };
 
@@ -100,6 +103,11 @@ struct schema_name_tail : identifier_rule {
 struct schema_name_rule
     : pegtl::seq<schema_name_head,
                  pegtl::opt<pegtl::seq<optional_space, dot, optional_space, schema_name_tail>>> {
+};
+
+struct schema_name_list_rule
+    : pegtl::seq<schema_name_rule,
+                 pegtl::star<pegtl::seq<optional_space, pegtl::one<','>, optional_space, schema_name_rule>>> {
 };
 
 struct table_name_rule : schema_name_rule {
@@ -284,9 +292,9 @@ struct drop_schema_grammar
                  required_space,
                  kw_schema,
                  required_space,
-                 pegtl::opt<pegtl::seq<if_exists_rule, required_space>>,
-                 schema_name_rule,
-                 pegtl::opt<pegtl::seq<required_space, cascade_rule>>,
+                 pegtl::opt<pegtl::seq<if_exists_rule, pegtl::opt<required_space>>>,
+                 schema_name_list_rule,
+                 pegtl::opt<pegtl::seq<required_space, pegtl::sor<cascade_rule, kw_restrict>>>,
                  optional_space,
                  pegtl::opt<pegtl::seq<semicolon, optional_space>>,
                  pegtl::eof> {
@@ -475,8 +483,9 @@ struct drop_schema_action<schema_name_head> {
     template <typename Input>
     static void apply(const Input& in, DropSchemaStatement& statement)
     {
-        statement.database.value.clear();
-        statement.name.value = in.string();
+        auto& schema = statement.schemas.emplace_back();
+        schema.database.value.clear();
+        schema.name.value = in.string();
     }
 };
 
@@ -485,8 +494,11 @@ struct drop_schema_action<schema_name_tail> {
     template <typename Input>
     static void apply(const Input& in, DropSchemaStatement& statement)
     {
-        statement.database.value = statement.name.value;
-        statement.name.value = in.string();
+        if (!statement.schemas.empty()) {
+            auto& schema = statement.schemas.back();
+            schema.database.value = schema.name.value;
+            schema.name.value = in.string();
+        }
     }
 };
 
@@ -495,7 +507,16 @@ struct drop_schema_action<cascade_rule> {
     template <typename Input>
     static void apply(const Input&, DropSchemaStatement& statement)
     {
-        statement.cascade = true;
+        statement.behavior = DropSchemaStatement::Behavior::Cascade;
+    }
+};
+
+template <>
+struct drop_schema_action<kw_restrict> {
+    template <typename Input>
+    static void apply(const Input&, DropSchemaStatement& statement)
+    {
+        statement.behavior = DropSchemaStatement::Behavior::Restrict;
     }
 };
 

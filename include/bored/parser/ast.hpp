@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -8,6 +9,11 @@ namespace bored::parser {
 
 struct Identifier final {
     std::string value{};
+};
+
+struct SchemaName final {
+    Identifier database{};
+    Identifier name{};
 };
 
 struct CreateDatabaseStatement final {
@@ -30,10 +36,15 @@ struct CreateSchemaStatement final {
 };
 
 struct DropSchemaStatement final {
-    Identifier database{};
-    Identifier name{};
+    enum class Behavior : std::uint8_t {
+        Default = 0,
+        Cascade,
+        Restrict
+    };
+
+    std::vector<SchemaName> schemas{};
     bool if_exists = false;
-    bool cascade = false;
+    Behavior behavior = Behavior::Default;
 };
 
 struct ColumnDefinition final {

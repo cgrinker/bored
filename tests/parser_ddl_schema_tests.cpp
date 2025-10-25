@@ -69,10 +69,12 @@ TEST_CASE("parse_drop_schema handles cascade clause")
     const auto result = parse_drop_schema("DROP SCHEMA IF EXISTS system.analytics CASCADE;");
     REQUIRE(result.success());
     REQUIRE(result.ast.has_value());
-    CHECK(result.ast->database.value == "system");
-    CHECK(result.ast->name.value == "analytics");
     CHECK(result.ast->if_exists);
-    CHECK(result.ast->cascade);
+    REQUIRE(result.ast->schemas.size() == 1);
+    const auto& schema = result.ast->schemas.front();
+    CHECK(schema.database.value == "system");
+    CHECK(schema.name.value == "analytics");
+    CHECK(result.ast->behavior == DropSchemaStatement::Behavior::Cascade);
 }
 
 TEST_CASE("parse_drop_schema rejects missing name")
@@ -80,4 +82,18 @@ TEST_CASE("parse_drop_schema rejects missing name")
     const auto result = parse_drop_schema("DROP SCHEMA IF EXISTS;");
     CHECK_FALSE(result.success());
     REQUIRE_FALSE(result.diagnostics.empty());
+}
+
+TEST_CASE("parse_drop_schema supports restrict and multiple targets")
+{
+    const auto result = parse_drop_schema("DROP SCHEMA sales.stage, public.temp RESTRICT");
+    REQUIRE(result.success());
+    REQUIRE(result.ast.has_value());
+    CHECK_FALSE(result.ast->if_exists);
+    REQUIRE(result.ast->schemas.size() == 2);
+    CHECK(result.ast->schemas[0].database.value == "sales");
+    CHECK(result.ast->schemas[0].name.value == "stage");
+    CHECK(result.ast->schemas[1].database.value == "public");
+    CHECK(result.ast->schemas[1].name.value == "temp");
+    CHECK(result.ast->behavior == DropSchemaStatement::Behavior::Restrict);
 }
