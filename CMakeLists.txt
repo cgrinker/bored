@@ -45,6 +45,8 @@ add_library(${PROJECT_NAME}_lib
     src/storage/storage_diagnostics.cpp
 )
 
+find_package(pegtl CONFIG REQUIRED)
+
 target_include_directories(${PROJECT_NAME}_lib
     PUBLIC
         include
@@ -55,13 +57,18 @@ target_compile_features(${PROJECT_NAME}_lib
         cxx_std_20
 )
 
+target_link_libraries(${PROJECT_NAME}_lib
+    PUBLIC
+        pegtl::pegtl
+)
+
 add_executable(${PROJECT_NAME}
     src/main.cpp
 )
 
 target_link_libraries(${PROJECT_NAME}
     PRIVATE
-        ${PROJECT_NAME}_lib
+    ${PROJECT_NAME}_lib
 )
 
 option(BORED_ENABLE_TESTS "Build and enable tests" ON)

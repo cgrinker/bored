@@ -13,7 +13,7 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
      - Implement catalog bootstrap process and recovery hooks.
      - Provide transactional catalog updates with WAL integration.
 
-2. **DDL & Schema Management Layer**
+2. **DDL & Schema Management Layer** _(Status: Complete)_ ([Milestone detail](ddl_schema_design.md))
    - **Responsibilities:** Execute create/alter/drop operations for schemas, tables, and indexes; validate dependencies and constraints; materialize catalog changes into WAL-protected catalog pages.
    - **Prerequisites:** Catalog subsystem.
    - **Key Tasks:**
@@ -21,9 +21,10 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
      - Integrate catalog updates with checkpointing and retention policies.
      - Establish error handling and rollback semantics for partial DDL failures.
   - Maintain a dependency graph that drives cascading cleanup when parent tables are dropped and powers `DROP SCHEMA ... CASCADE` teardown flows.
-      - Emit index telemetry snapshots (attempt/success/failure counters, build durations) for diagnostics surfaces.
+    - Emit index telemetry snapshots (attempt/success/failure counters, build durations) for diagnostics surfaces.
+  - Structured diagnostics surface severity + remediation guidance for all verbs (see `docs/ddl_verb_reference.md`).
 
-3. **Parser Front-End (PEGTL-Based)**
+3. **Parser Front-End (PEGTL-Based)** _(Milestones tracked in [parser_frontend_milestones.md](parser_frontend_milestones.md))_
    - **Responsibilities:** Translate SQL text into an abstract syntax tree (AST) using the `taocpp/PEGTL` CMake package.
    - **Prerequisites:** Baseline DDL verb definitions to seed grammar; coordination with planned AST schema.
    - **Key Tasks:**
@@ -88,6 +89,6 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
       - Integrate telemetry (query latencies, lock waits) into existing diagnostics pipelines.
 
 ## Next Steps
-- Finalise detailed milestones for the DDL and schema management layer ([DDL & schema design](ddl_schema_design.md)).
-- Introduce PEGTL as a third-party dependency and prototype minimal SQL grammar support for DDL statements (Items 2-3).
+- Execute the parser front-end milestones (see `parser_frontend_milestones.md`) now that DDL work is complete.
+- Integrate PEGTL into the toolchain via vcpkg and CMake (dependency committed).
 - Establish transaction manager design review to select the initial concurrency model (Item 5).
