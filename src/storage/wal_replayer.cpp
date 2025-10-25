@@ -95,7 +95,10 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
                                    const WalTupleMeta& meta,
                                    std::span<const std::byte> payload,
                                    FreeSpaceMap* fsm,
-                                   bool force)
+                                   bool force,
+                                   std::uint64_t forced_lsn = 0U,
+                                   std::uint16_t forced_free_start = 0U,
+                                   std::uint16_t forced_tuple_offset = 0U)
 {
     if (page_header(page).page_id != meta.page_id) {
         return std::make_error_code(std::errc::invalid_argument);
@@ -114,30 +117,67 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
             return std::make_error_code(std::errc::invalid_argument);
         }
         auto& slot = directory[meta.slot_index];
-        if (slot.offset + payload.size() > page.size()) {
+        const auto previous_free_start = header_ref.free_start;
+        const auto previous_offset = slot.offset;
+        const auto previous_length = slot.length;
+        if (previous_length > 0U) {
+            if (static_cast<std::size_t>(previous_offset) + previous_length > page.size()) {
+                return std::make_error_code(std::errc::invalid_argument);
+            }
+            std::memset(page.data() + previous_offset, 0, previous_length);
+        }
+
+        const auto target_offset = (forced_tuple_offset != 0U) ? forced_tuple_offset : previous_offset;
+        if (static_cast<std::size_t>(target_offset) + payload.size() > page.size()) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-        std::memcpy(page.data() + slot.offset, payload.data(), payload.size());
+
+        std::memcpy(page.data() + target_offset, payload.data(), payload.size());
+        slot.offset = target_offset;
         slot.length = static_cast<std::uint16_t>(payload.size());
-        const auto tuple_end = static_cast<std::uint16_t>(slot.offset + slot.length);
-        if (tuple_end > header_ref.free_start) {
-            header_ref.free_start = tuple_end;
+
+        const auto tuple_end = static_cast<std::uint16_t>(target_offset + slot.length);
+        if (previous_free_start > tuple_end) {
+            std::memset(page.data() + tuple_end, 0, previous_free_start - tuple_end);
         }
-        if (header_ref.fragment_count > 0U) {
+
+        if (previous_length == 0U && header_ref.fragment_count > 0U) {
             --header_ref.fragment_count;
         }
+
+        auto desired_free_start = (forced_free_start != 0U) ? forced_free_start : previous_free_start;
+        if (desired_free_start < tuple_end) {
+            desired_free_start = tuple_end;
+        }
+        for (const auto& other_slot : directory) {
+            if (other_slot.length == 0U) {
+                continue;
+            }
+            const auto other_end = static_cast<std::uint16_t>(other_slot.offset + other_slot.length);
+            if (desired_free_start < other_end) {
+                desired_free_start = other_end;
+            }
+        }
+        if (desired_free_start > previous_free_start) {
+            std::memset(page.data() + previous_free_start, 0, desired_free_start - previous_free_start);
+        }
+
         header_ref.flags |= static_cast<std::uint16_t>(PageFlag::Dirty);
-        header_ref.lsn = std::max(previous_lsn, header.lsn);
+        const auto restored_lsn = forced_lsn != 0U ? forced_lsn : (header.prev_lsn != 0U ? header.prev_lsn : previous_lsn);
+        header_ref.lsn = restored_lsn;
+        header_ref.free_start = desired_free_start;
         if (inserted_overflow) {
             set_has_overflow(header_ref, true);
         } else {
             refresh_overflow_flag(page);
         }
-        if (!compact_page(page, header_ref.lsn, fsm)) {
-            return std::make_error_code(std::errc::io_error);
-        }
         if (fsm != nullptr) {
             sync_free_space(*fsm, page);
+        }
+        if (header_ref.free_start < header_ref.free_end) {
+            std::memset(page.data() + header_ref.free_start,
+                        0,
+                        static_cast<std::size_t>(header_ref.free_end) - header_ref.free_start);
         }
         return {};
     }
@@ -188,7 +228,9 @@ std::error_code apply_tuple_delete(std::span<std::byte> page,
         return {};
     }
 
-    if (!delete_tuple(page, meta.slot_index, header.lsn, fsm)) {
+    const auto delete_lsn = (force && header.prev_lsn != 0U) ? header.prev_lsn : header.lsn;
+
+    if (!delete_tuple(page, meta.slot_index, delete_lsn, fsm)) {
         return std::make_error_code(std::errc::io_error);
     }
 
@@ -677,7 +719,10 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
                                          before_view->meta,
                                          before_view->tuple_payload,
                                          fsm,
-                                         true);
+                                         true,
+                                         before_view->previous_page_lsn,
+                                         before_view->previous_free_start,
+                                         before_view->previous_tuple_offset);
             ec) {
             return ec;
         }

@@ -134,7 +134,10 @@ bool encode_wal_tuple_before_image(std::span<std::byte> buffer,
                                    const WalTupleMeta& meta,
                                    std::span<const std::byte> tuple_data,
                                    std::span<const WalOverflowChunkMeta> chunk_metas,
-                                   std::span<const std::span<const std::byte>> chunk_payloads)
+                                   std::span<const std::span<const std::byte>> chunk_payloads,
+                                   std::uint64_t previous_page_lsn,
+                                   std::uint16_t previous_free_start,
+                                   std::uint16_t previous_tuple_offset)
 {
     if (meta.tuple_length != tuple_data.size()) {
         return false;
@@ -152,6 +155,9 @@ bool encode_wal_tuple_before_image(std::span<std::byte> buffer,
     WalTupleBeforeImageHeader header{};
     header.meta = meta;
     header.overflow_chunk_count = static_cast<std::uint32_t>(chunk_metas.size());
+    header.previous_page_lsn = previous_page_lsn;
+    header.previous_free_start = previous_free_start;
+    header.previous_tuple_offset = previous_tuple_offset;
 
     std::memcpy(buffer.data(), &header, sizeof(WalTupleBeforeImageHeader));
 
@@ -442,6 +448,9 @@ std::optional<WalTupleBeforeImageView> decode_wal_tuple_before_image(std::span<c
     WalTupleBeforeImageView view{};
     view.meta = header.meta;
     view.tuple_payload = buffer.subspan(sizeof(WalTupleBeforeImageHeader), header.meta.tuple_length);
+    view.previous_page_lsn = header.previous_page_lsn;
+    view.previous_free_start = header.previous_free_start;
+    view.previous_tuple_offset = header.previous_tuple_offset;
 
     std::size_t offset = sizeof(WalTupleBeforeImageHeader) + header.meta.tuple_length;
     view.overflow_chunks.reserve(header.overflow_chunk_count);

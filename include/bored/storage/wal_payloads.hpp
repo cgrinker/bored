@@ -67,8 +67,9 @@ struct WalOverflowTruncateChunkView final {
 struct alignas(8) WalTupleBeforeImageHeader final {
     WalTupleMeta meta{};
     std::uint32_t overflow_chunk_count = 0U;
-    std::uint32_t reserved = 0U;
-    std::uint64_t reserved_high = 0U;
+    std::uint16_t previous_free_start = 0U;
+    std::uint16_t previous_tuple_offset = 0U;
+    std::uint64_t previous_page_lsn = 0U;
 };
 
 using WalTupleBeforeImageChunkView = WalOverflowTruncateChunkView;
@@ -77,6 +78,9 @@ struct WalTupleBeforeImageView final {
     WalTupleMeta meta{};
     std::span<const std::byte> tuple_payload{};
     std::vector<WalTupleBeforeImageChunkView> overflow_chunks{};
+    std::uint64_t previous_page_lsn = 0U;
+    std::uint16_t previous_free_start = 0U;
+    std::uint16_t previous_tuple_offset = 0U;
 };
 
 struct alignas(8) WalCheckpointHeader final {
@@ -191,7 +195,10 @@ bool encode_wal_tuple_before_image(std::span<std::byte> buffer,
                                    const WalTupleMeta& meta,
                                    std::span<const std::byte> tuple_data,
                                    std::span<const WalOverflowChunkMeta> chunk_metas,
-                                   std::span<const std::span<const std::byte>> chunk_payloads);
+                                   std::span<const std::span<const std::byte>> chunk_payloads,
+                                   std::uint64_t previous_page_lsn = 0U,
+                                   std::uint16_t previous_free_start = 0U,
+                                   std::uint16_t previous_tuple_offset = 0U);
 
 std::optional<WalTupleMeta> decode_wal_tuple_meta(std::span<const std::byte> buffer);
 std::optional<WalTupleUpdateMeta> decode_wal_tuple_update_meta(std::span<const std::byte> buffer);

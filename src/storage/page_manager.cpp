@@ -456,13 +456,29 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     auto chunk_meta_span = std::span<const WalOverflowChunkMeta>(chunk_metas.data(), chunk_metas.size());
     auto chunk_payload_span = std::span<const std::span<const std::byte>>(chunk_payload_views.data(), chunk_payload_views.size());
 
+    const auto previous_page_lsn = header.lsn;
+
+    std::uint16_t previous_tuple_offset = 0U;
+    if (stub_plan->reuses_slot) {
+        auto directory = slot_directory(page);
+        const auto directory_size = directory.size();
+        if (meta.slot_index >= directory_size) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        const auto directory_index = directory_size - static_cast<std::size_t>(meta.slot_index) - 1U;
+        previous_tuple_offset = directory[directory_index].offset;
+    }
+
     std::vector<std::byte> before_buffer(wal_tuple_before_image_payload_size(meta.tuple_length, chunk_meta_span));
     auto before_span = std::span<std::byte>(before_buffer.data(), before_buffer.size());
     if (!encode_wal_tuple_before_image(before_span,
                                        meta,
                                        stub_payload_span,
                                        chunk_meta_span,
-                                       chunk_payload_span)) {
+                                       chunk_payload_span,
+                                       previous_page_lsn,
+                                       header.free_start,
+                                       previous_tuple_offset)) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 
@@ -554,13 +570,26 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
     }
     std::span<const std::span<const std::byte>> chunk_payload_span{chunk_payload_views};
 
+    const auto delete_previous_lsn = header.lsn;
+
+    auto directory = slot_directory(page);
+    const auto directory_size = directory.size();
+    if (slot_index >= directory_size) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+    const auto directory_index = directory_size - static_cast<std::size_t>(slot_index) - 1U;
+    const auto previous_tuple_offset = directory[directory_index].offset;
+
     std::vector<std::byte> before_buffer(wal_tuple_before_image_payload_size(before_meta.tuple_length, chunk_meta_span));
     auto before_span = std::span<std::byte>(before_buffer.data(), before_buffer.size());
     if (!encode_wal_tuple_before_image(before_span,
                                        before_meta,
                                        tuple_view,
                                        chunk_meta_span,
-                                       chunk_payload_span)) {
+                                       chunk_payload_span,
+                                       delete_previous_lsn,
+                                       header.free_start,
+                                       previous_tuple_offset)) {
         return std::make_error_code(std::errc::io_error);
     }
 
@@ -707,13 +736,26 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     }
     std::span<const std::span<const std::byte>> chunk_payload_span{chunk_payload_views};
 
+    const auto update_previous_lsn = header.lsn;
+
+    auto directory = slot_directory(page);
+    const auto directory_size = directory.size();
+    if (slot_index >= directory_size) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+    const auto directory_index = directory_size - static_cast<std::size_t>(slot_index) - 1U;
+    const auto previous_tuple_offset = directory[directory_index].offset;
+
     std::vector<std::byte> before_buffer(wal_tuple_before_image_payload_size(before_meta.tuple_length, chunk_meta_span));
     auto before_span = std::span<std::byte>(before_buffer.data(), before_buffer.size());
     if (!encode_wal_tuple_before_image(before_span,
                                        before_meta,
                                        current_tuple,
                                        chunk_meta_span,
-                                       chunk_payload_span)) {
+                                       chunk_payload_span,
+                                       update_previous_lsn,
+                                       header.free_start,
+                                       previous_tuple_offset)) {
         return std::make_error_code(std::errc::io_error);
     }
 
