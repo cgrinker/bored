@@ -3,6 +3,7 @@
 #include <tao/pegtl.hpp>
 
 #include <cctype>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -74,6 +75,9 @@ struct kw_key : keyword<'K', 'E', 'Y'> {
 };
 
 struct kw_unique : keyword<'U', 'N', 'I', 'Q', 'U', 'E'> {
+};
+
+struct kw_constraint : keyword<'C', 'O', 'N', 'S', 'T', 'R', 'A', 'I', 'N', 'T'> {
 };
 
 struct kw_restrict : keyword<'R', 'E', 'S', 'T', 'R', 'I', 'C', 'T'> {
@@ -207,16 +211,58 @@ struct string_literal_rule
     : pegtl::seq<pegtl::one<'\''>, pegtl::star<string_literal_char>, pegtl::one<'\''>> {
 };
 
-struct numeric_literal_rule : pegtl::seq<pegtl::opt<pegtl::one<'-'>>, pegtl::plus<pegtl::digit>> {
+struct numeric_literal_rule
+    : pegtl::seq<pegtl::opt<pegtl::one<'-'>>,
+                 pegtl::plus<pegtl::digit>,
+                 pegtl::opt<pegtl::seq<pegtl::one<'.'>, pegtl::plus<pegtl::digit>>>> {
 };
 
 struct default_identifier_rule : identifier_rule {
 };
 
-struct default_value_rule : pegtl::sor<string_literal_rule, numeric_literal_rule, default_identifier_rule> {
+struct default_expression_rule;
+struct default_function_argument_list_rule;
+
+struct default_parenthesized_expression_rule
+    : pegtl::seq<left_paren, optional_space, default_expression_rule, optional_space, right_paren> {
 };
 
-struct default_clause_rule : pegtl::seq<kw_default, required_space, default_value_rule> {
+struct default_function_argument_list_rule
+    : pegtl::seq<default_expression_rule,
+                 pegtl::star<optional_space, pegtl::one<','>, optional_space, default_expression_rule>> {
+};
+
+struct default_function_call_rule
+    : pegtl::seq<default_identifier_rule,
+                 optional_space,
+                 left_paren,
+                 optional_space,
+                 pegtl::opt<default_function_argument_list_rule>,
+                 optional_space,
+                 right_paren> {
+};
+
+struct default_term_rule
+    : pegtl::sor<string_literal_rule,
+                 numeric_literal_rule,
+                 default_function_call_rule,
+                 default_parenthesized_expression_rule,
+                 default_identifier_rule> {
+};
+
+struct default_operator_token : pegtl::sor<pegtl::one<'+'>, pegtl::one<'-'>, pegtl::one<'*'>, pegtl::one<'/'>> {
+};
+
+struct default_operator_sequence_rule
+    : pegtl::seq<optional_space, default_operator_token, optional_space, default_term_rule> {
+};
+
+struct default_expression_rule
+    : pegtl::seq<default_term_rule, pegtl::star<default_operator_sequence_rule>> {
+};
+
+struct default_clause_rule
+    : pegtl::seq<kw_default, required_space, default_expression_rule> {
 };
 
 struct primary_key_rule : pegtl::seq<kw_primary, required_space, kw_key> {
@@ -225,30 +271,26 @@ struct primary_key_rule : pegtl::seq<kw_primary, required_space, kw_key> {
 struct unique_constraint_rule : kw_unique {
 };
 
-struct column_constraint_default_clause : pegtl::seq<required_space, default_clause_rule> {
+struct constraint_identifier_rule : identifier_rule {
 };
 
-struct column_constraint_not_null_clause : pegtl::seq<required_space, constraint_not_null_rule> {
-};
-
-struct column_constraint_primary_key_clause : pegtl::seq<required_space, primary_key_rule> {
-};
-
-struct column_constraint_unique_clause : pegtl::seq<required_space, unique_constraint_rule> {
-};
-
-struct column_constraint_clause
-    : pegtl::sor<column_constraint_default_clause,
-                 column_constraint_not_null_clause,
-                 column_constraint_primary_key_clause,
-                 column_constraint_unique_clause> {
+struct column_constraint_rule
+    : pegtl::seq<required_space,
+                 pegtl::opt<pegtl::seq<kw_constraint,
+                                      required_space,
+                                      constraint_identifier_rule,
+                                      required_space>>,
+                 pegtl::sor<default_clause_rule,
+                            constraint_not_null_rule,
+                            primary_key_rule,
+                            unique_constraint_rule>> {
 };
 
 struct column_definition_rule
     : pegtl::seq<column_identifier,
                  required_space,
                  type_identifier,
-                 pegtl::star<column_constraint_clause>,
+                 pegtl::star<column_constraint_rule>,
                  optional_space> {
 };
 
@@ -501,6 +543,10 @@ struct DropSchemaParseState final {
     bool next_if_exists = false;
 };
 
+struct CreateTableParseState final {
+    std::optional<Identifier> pending_constraint_name{};
+};
+
 void convert_embedded_statements(const std::vector<std::string>& raw_statements,
                                  CreateSchemaStatement& statement,
                                  std::vector<ParserDiagnostic>& diagnostics)
@@ -749,7 +795,7 @@ struct drop_schema_action<kw_restrict> {
 template <typename Rule>
 struct create_table_action {
     template <typename Input>
-    static void apply(const Input&, CreateTableStatement&)
+    static void apply(const Input&, CreateTableStatement&, CreateTableParseState&)
     {
     }
 };
@@ -757,7 +803,7 @@ struct create_table_action {
 template <>
 struct create_table_action<if_not_exists_rule> {
     template <typename Input>
-    static void apply(const Input&, CreateTableStatement& statement)
+    static void apply(const Input&, CreateTableStatement& statement, CreateTableParseState&)
     {
         statement.if_not_exists = true;
     }
@@ -766,7 +812,7 @@ struct create_table_action<if_not_exists_rule> {
 template <>
 struct create_table_action<schema_name_head> {
     template <typename Input>
-    static void apply(const Input& in, CreateTableStatement& statement)
+    static void apply(const Input& in, CreateTableStatement& statement, CreateTableParseState&)
     {
         statement.schema.value.clear();
         statement.name.value = in.string();
@@ -776,7 +822,7 @@ struct create_table_action<schema_name_head> {
 template <>
 struct create_table_action<schema_name_tail> {
     template <typename Input>
-    static void apply(const Input& in, CreateTableStatement& statement)
+    static void apply(const Input& in, CreateTableStatement& statement, CreateTableParseState&)
     {
         statement.schema.value = statement.name.value;
         statement.name.value = in.string();
@@ -786,7 +832,7 @@ struct create_table_action<schema_name_tail> {
 template <>
 struct create_table_action<column_identifier> {
     template <typename Input>
-    static void apply(const Input& in, CreateTableStatement& statement)
+    static void apply(const Input& in, CreateTableStatement& statement, CreateTableParseState& state)
     {
         auto& column = statement.columns.emplace_back();
         column.name.value = in.string();
@@ -794,13 +840,18 @@ struct create_table_action<column_identifier> {
         column.primary_key = false;
         column.unique = false;
         column.default_expression.reset();
+        column.default_constraint_name.reset();
+        column.not_null_constraint_name.reset();
+        column.primary_key_constraint_name.reset();
+        column.unique_constraint_name.reset();
+        state.pending_constraint_name.reset();
     }
 };
 
 template <>
 struct create_table_action<type_identifier> {
     template <typename Input>
-    static void apply(const Input& in, CreateTableStatement& statement)
+    static void apply(const Input& in, CreateTableStatement& statement, CreateTableParseState&)
     {
         if (!statement.columns.empty()) {
             statement.columns.back().type_name.value = in.string();
@@ -809,48 +860,77 @@ struct create_table_action<type_identifier> {
 };
 
 template <>
-struct create_table_action<constraint_not_null_rule> {
+struct create_table_action<constraint_identifier_rule> {
     template <typename Input>
-    static void apply(const Input&, CreateTableStatement& statement)
+    static void apply(const Input& in, CreateTableStatement&, CreateTableParseState& state)
     {
-        if (!statement.columns.empty()) {
-            statement.columns.back().not_null = true;
-        }
+        state.pending_constraint_name = Identifier{};
+        state.pending_constraint_name->value = in.string();
     }
 };
 
 template <>
-struct create_table_action<default_value_rule> {
+struct create_table_action<constraint_not_null_rule> {
     template <typename Input>
-    static void apply(const Input& in, CreateTableStatement& statement)
+    static void apply(const Input&, CreateTableStatement& statement, CreateTableParseState& state)
     {
         if (!statement.columns.empty()) {
-            statement.columns.back().default_expression = in.string();
+            auto& column = statement.columns.back();
+            column.not_null = true;
+            if (state.pending_constraint_name) {
+                column.not_null_constraint_name = std::move(*state.pending_constraint_name);
+            }
         }
+        state.pending_constraint_name.reset();
+    }
+};
+
+template <>
+struct create_table_action<default_expression_rule> {
+    template <typename Input>
+    static void apply(const Input& in, CreateTableStatement& statement, CreateTableParseState& state)
+    {
+        if (!statement.columns.empty()) {
+            auto& column = statement.columns.back();
+            column.default_expression = trim_copy(in.string());
+            if (state.pending_constraint_name) {
+                column.default_constraint_name = std::move(*state.pending_constraint_name);
+            }
+        }
+        state.pending_constraint_name.reset();
     }
 };
 
 template <>
 struct create_table_action<primary_key_rule> {
     template <typename Input>
-    static void apply(const Input&, CreateTableStatement& statement)
+    static void apply(const Input&, CreateTableStatement& statement, CreateTableParseState& state)
     {
         if (!statement.columns.empty()) {
             auto& column = statement.columns.back();
             column.primary_key = true;
             column.not_null = true;
+            if (state.pending_constraint_name) {
+                column.primary_key_constraint_name = std::move(*state.pending_constraint_name);
+            }
         }
+        state.pending_constraint_name.reset();
     }
 };
 
 template <>
 struct create_table_action<unique_constraint_rule> {
     template <typename Input>
-    static void apply(const Input&, CreateTableStatement& statement)
+    static void apply(const Input&, CreateTableStatement& statement, CreateTableParseState& state)
     {
         if (!statement.columns.empty()) {
-            statement.columns.back().unique = true;
+            auto& column = statement.columns.back();
+            column.unique = true;
+            if (state.pending_constraint_name) {
+                column.unique_constraint_name = std::move(*state.pending_constraint_name);
+            }
         }
+        state.pending_constraint_name.reset();
     }
 };
 
@@ -1082,9 +1162,10 @@ ParseResult<CreateTableStatement> parse_create_table(std::string_view input)
     ParseResult<CreateTableStatement> result{};
     pegtl::memory_input in(input, "create_table");
     CreateTableStatement statement{};
+    CreateTableParseState state{};
 
     try {
-        const auto parsed = pegtl::parse<create_table_grammar, create_table_action>(in, statement);
+        const auto parsed = pegtl::parse<create_table_grammar, create_table_action>(in, statement, state);
         if (parsed) {
             append_duplicate_column_diagnostics(statement, result.diagnostics);
             result.ast = std::move(statement);

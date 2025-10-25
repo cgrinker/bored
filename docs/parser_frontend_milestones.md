@@ -22,7 +22,7 @@
 - [x] Support per-schema `IF EXISTS` flags and richer diagnostic context for bulk drops.
 - [x] Implement CREATE/DROP TABLE grammar with column definitions (type literals, `NOT NULL`, default expressions stubbed).
 - [x] Extend CREATE TABLE grammar with column default expressions and inline constraint variants (PRIMARY KEY, UNIQUE).
-- [ ] Support complex column default expressions (function calls, arithmetic) and inline constraint naming.
+- [x] Support complex column default expressions (function calls, arithmetic) and inline constraint naming.
 - [x] Capture parser diagnostics for missing keywords and duplicate identifiers.
 - [ ] Extend diagnostics with remediation hints and statement context for complex scripts.
 - [ ] Translate parser diagnostics to `DdlCommandResponse` severity/hints (warning for user input issues, error for parser bugs).

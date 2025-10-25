@@ -25,6 +25,10 @@ struct ColumnDefinition final {
     bool primary_key = false;
     bool unique = false;
     std::optional<std::string> default_expression{};
+    std::optional<Identifier> default_constraint_name{};
+    std::optional<Identifier> not_null_constraint_name{};
+    std::optional<Identifier> primary_key_constraint_name{};
+    std::optional<Identifier> unique_constraint_name{};
 };
 
 struct CreateTableStatement final {
