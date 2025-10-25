@@ -5,12 +5,13 @@
 #include "bored/catalog/catalog_relations.hpp"
 #include "bored/ddl/ddl_errors.hpp"
 
-#include <functional>
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <span>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -150,10 +151,18 @@ using DdlCommandResult = std::variant<std::monostate,
                                       catalog::CreateTableResult,
                                       catalog::CreateIndexResult>;
 
+enum class DdlDiagnosticSeverity : std::uint8_t {
+    Info = 0,
+    Warning,
+    Error
+};
+
 struct DdlCommandResponse final {
     bool success = false;
     std::error_code error{};
     std::string message{};
+    DdlDiagnosticSeverity severity = DdlDiagnosticSeverity::Error;
+    std::vector<std::string> remediation_hints{};
     DdlCommandResult result{};
 };
 
@@ -232,10 +241,84 @@ constexpr std::size_t request_verb_index() noexcept
     return static_cast<std::size_t>(request_verb<Request>());
 }
 
+inline DdlDiagnosticSeverity default_diagnostic_severity(std::error_code error) noexcept
+{
+    if (!error) {
+        return DdlDiagnosticSeverity::Info;
+    }
+    if (error.category() != ddl_error_category()) {
+        return DdlDiagnosticSeverity::Error;
+    }
+
+    switch (static_cast<DdlErrc>(error.value())) {
+    case DdlErrc::Success:
+        return DdlDiagnosticSeverity::Info;
+    case DdlErrc::InvalidIdentifier:
+    case DdlErrc::InvalidOption:
+    case DdlErrc::SchemaNotFound:
+    case DdlErrc::SchemaAlreadyExists:
+    case DdlErrc::TableNotFound:
+    case DdlErrc::TableAlreadyExists:
+    case DdlErrc::IndexNotFound:
+    case DdlErrc::IndexAlreadyExists:
+    case DdlErrc::DatabaseNotFound:
+    case DdlErrc::DatabaseAlreadyExists:
+    case DdlErrc::ValidationFailed:
+        return DdlDiagnosticSeverity::Warning;
+    default:
+        return DdlDiagnosticSeverity::Error;
+    }
+}
+
+inline std::vector<std::string> default_remediation_hints(std::error_code error)
+{
+    if (!error) {
+        return {};
+    }
+    if (error.category() != ddl_error_category()) {
+        return {"Inspect server logs for additional details."};
+    }
+
+    switch (static_cast<DdlErrc>(error.value())) {
+    case DdlErrc::Success:
+        return {};
+    case DdlErrc::InvalidIdentifier:
+        return {"Verify identifier names use supported characters and length constraints."};
+    case DdlErrc::InvalidOption:
+        return {"Review command options and remove unsupported flags or correct their values."};
+    case DdlErrc::SchemaNotFound:
+        return {"Ensure the target schema exists or create it before running this command."};
+    case DdlErrc::SchemaAlreadyExists:
+        return {"Use IF NOT EXISTS or drop the existing schema before retrying."};
+    case DdlErrc::TableNotFound:
+        return {"Confirm the table name and schema are correct."};
+    case DdlErrc::TableAlreadyExists:
+        return {"Use IF NOT EXISTS, drop the table, or choose a different table name."};
+    case DdlErrc::IndexNotFound:
+        return {"Confirm the index name exists on the target table."};
+    case DdlErrc::IndexAlreadyExists:
+        return {"Use IF NOT EXISTS, drop the index, or choose a different index name."};
+    case DdlErrc::DatabaseNotFound:
+        return {"Verify the database exists and is accessible to this session."};
+    case DdlErrc::DatabaseAlreadyExists:
+        return {"Use IF NOT EXISTS or drop the existing database before retrying."};
+    case DdlErrc::HandlerMissing:
+        return {"Register a handler for this DDL verb before dispatching commands."};
+    case DdlErrc::ValidationFailed:
+        return {"Review the validation message and adjust the command parameters."};
+    case DdlErrc::ExecutionFailed:
+        return {"Check storage and catalog logs for execution errors, then retry after resolving the underlying issue."};
+    default:
+        return {"Inspect server logs for additional details."};
+    }
+}
+
 inline DdlCommandResponse make_success(DdlCommandResult result = {})
 {
     DdlCommandResponse response{};
     response.success = true;
+    response.severity = DdlDiagnosticSeverity::Info;
+    response.remediation_hints.clear();
     response.result = std::move(result);
     return response;
 }
@@ -246,6 +329,22 @@ inline DdlCommandResponse make_failure(std::error_code error, std::string messag
     response.success = false;
     response.error = std::move(error);
     response.message = std::move(message);
+    response.severity = default_diagnostic_severity(response.error);
+    response.remediation_hints = default_remediation_hints(response.error);
+    return response;
+}
+
+inline DdlCommandResponse make_failure(std::error_code error,
+                                       std::string message,
+                                       DdlDiagnosticSeverity severity,
+                                       std::vector<std::string> remediation_hints)
+{
+    DdlCommandResponse response{};
+    response.success = false;
+    response.error = std::move(error);
+    response.message = std::move(message);
+    response.severity = severity;
+    response.remediation_hints = std::move(remediation_hints);
     return response;
 }
 

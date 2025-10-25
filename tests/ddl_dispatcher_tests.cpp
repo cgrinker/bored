@@ -115,6 +115,8 @@ TEST_CASE("DdlCommandDispatcher commits transaction on success")
     const auto response = dispatcher.dispatch(command);
 
     CHECK(response.success);
+    CHECK(response.severity == DdlDiagnosticSeverity::Info);
+    CHECK(response.remediation_hints.empty());
     CHECK(committed);
     CHECK_FALSE(aborted);
 
@@ -150,6 +152,9 @@ TEST_CASE("DdlCommandDispatcher aborts transaction on handler failure")
 
     CHECK_FALSE(response.success);
     CHECK(response.error == make_error_code(DdlErrc::ValidationFailed));
+    CHECK(response.severity == DdlDiagnosticSeverity::Warning);
+    REQUIRE_FALSE(response.remediation_hints.empty());
+    CHECK(response.remediation_hints.front().find("validation") != std::string::npos);
     CHECK(aborted);
 
     const auto snapshot = dispatcher.telemetry().snapshot();
@@ -181,6 +186,9 @@ TEST_CASE("DdlCommandDispatcher reports handler exceptions")
     CHECK_FALSE(response.success);
     CHECK(response.error == make_error_code(DdlErrc::ExecutionFailed));
     CHECK(response.message == "handler blew up");
+    CHECK(response.severity == DdlDiagnosticSeverity::Error);
+    REQUIRE_FALSE(response.remediation_hints.empty());
+    CHECK(response.remediation_hints.front().find("logs") != std::string::npos);
 
     const auto snapshot = dispatcher.telemetry().snapshot();
     const auto index = static_cast<std::size_t>(DdlVerb::CreateSchema);
@@ -204,6 +212,9 @@ TEST_CASE("DdlCommandDispatcher surfaces missing handlers")
 
     CHECK_FALSE(response.success);
     CHECK(response.error == make_error_code(DdlErrc::HandlerMissing));
+    CHECK(response.severity == DdlDiagnosticSeverity::Error);
+    REQUIRE_FALSE(response.remediation_hints.empty());
+    CHECK(response.remediation_hints.front().find("handler") != std::string::npos);
 
     const auto snapshot = dispatcher.telemetry().snapshot();
     const auto index = static_cast<std::size_t>(DdlVerb::CreateSchema);

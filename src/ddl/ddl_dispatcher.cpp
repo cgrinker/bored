@@ -9,6 +9,7 @@
 #include <span>
 #include <stdexcept>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace bored::ddl {
@@ -20,9 +21,13 @@ constexpr std::uint64_t default_commit_lsn() noexcept
     return 0U;
 }
 
-DdlCommandResponse make_internal_failure(std::string message)
+DdlCommandResponse make_internal_failure(std::string message,
+                                         std::vector<std::string> hints = {"Inspect server logs for dispatcher failures."})
 {
-    return make_failure(make_error_code(DdlErrc::ExecutionFailed), std::move(message));
+    return make_failure(make_error_code(DdlErrc::ExecutionFailed),
+                        std::move(message),
+                        DdlDiagnosticSeverity::Error,
+                        std::move(hints));
 }
 
 }  // namespace
@@ -114,27 +119,33 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
     if (config_.identifier_allocator == nullptr) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
         record_duration();
-        return make_internal_failure("DDL dispatcher missing identifier allocator");
+        return make_internal_failure("DDL dispatcher missing identifier allocator",
+                                     {"Configure DdlCommandDispatcher::Config.identifier_allocator before dispatching commands."});
     }
 
     if (!config_.transaction_factory) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
         record_duration();
-        return make_internal_failure("DDL dispatcher missing transaction factory");
+        return make_internal_failure("DDL dispatcher missing transaction factory",
+                                     {"Provide DdlCommandDispatcher::Config.transaction_factory to create catalog transactions."});
     }
 
     auto transaction = config_.transaction_factory();
     if (!transaction) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
         record_duration();
-        return make_internal_failure("DDL dispatcher failed to acquire transaction");
+        return make_internal_failure("DDL dispatcher failed to acquire transaction",
+                                     {"Ensure the transaction_factory returns an active CatalogTransaction instance."});
     }
 
     auto handler = find_handler(command);
     if (handler == nullptr) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::HandlerMissing));
         record_duration();
-        return make_failure(make_error_code(DdlErrc::HandlerMissing), "no handler registered for DDL verb");
+        return make_failure(make_error_code(DdlErrc::HandlerMissing),
+                            "no handler registered for DDL verb",
+                            DdlDiagnosticSeverity::Error,
+                            {"Register a handler for this DDL verb before dispatching commands."});
     }
 
     std::unique_ptr<catalog::CatalogMutator> mutator;
@@ -202,7 +213,10 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
         if (auto ec = scope.commit()) {
             telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
             record_duration();
-            return make_failure(make_error_code(DdlErrc::ExecutionFailed), ec.message());
+            return make_failure(make_error_code(DdlErrc::ExecutionFailed),
+                                ec.message(),
+                                DdlDiagnosticSeverity::Error,
+                                {"Check catalog and storage logs for commit failures before retrying this DDL command."});
         }
         telemetry_.record_success(verb);
         record_duration();
