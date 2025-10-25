@@ -7,11 +7,11 @@
 - Integrate the parser into the existing build with vcpkg-provided PEGTL and ensure CI covers parser unit tests.
 
 ## Milestone 0: PEGTL Integration & Scaffolding (0.5 sprint)
-- [ ] Add `taocpp-pegtl` to `vcpkg.json` (done) and ensure the root `CMakeLists.txt` links against `pegtl::pegtl`.
-- [ ] Create `src/parser` module with umbrella headers (`parser/grammar.hpp`, `parser/ast.hpp`).
-- [ ] Establish basic token and identifier grammar (whitespace skipping, quoted identifiers, keywords).
-- [ ] Implement parser unit test harness using Catch2; include golden SQL snippets under `tests/parser_samples/`.
-- [ ] Wire parser build flag (`BORED_ENABLE_PARSER`) so downstream consumers can opt-in during bring-up.
+- [x] Add `taocpp-pegtl` to `vcpkg.json` (done) and ensure the root `CMakeLists.txt` links against `pegtl::pegtl`.
+- [x] Create `src/parser` module with umbrella headers (`parser/grammar.hpp`, `parser/ast.hpp`).
+- [x] Establish baseline identifier grammar (whitespace skipping, bare identifiers); track quoted identifier and keyword handling as follow-up.
+- [x] Implement parser unit test harness using Catch2; include golden SQL snippets under `tests/parser_samples/`.
+- [x] Wire parser build flag (`BORED_ENABLE_PARSER`) so downstream consumers can opt-in during bring-up.
 
 ## Milestone 1: DDL Statement Grammar (1 sprint)
 - [ ] Implement CREATE/DROP DATABASE grammar and AST nodes.

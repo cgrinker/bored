@@ -45,7 +45,28 @@ add_library(${PROJECT_NAME}_lib
     src/storage/storage_diagnostics.cpp
 )
 
-find_package(pegtl CONFIG REQUIRED)
+option(BORED_ENABLE_PARSER "Build parser front-end components" ON)
+
+if(BORED_ENABLE_PARSER)
+    find_package(pegtl CONFIG REQUIRED)
+    target_sources(${PROJECT_NAME}_lib
+        PRIVATE
+            src/parser/grammar.cpp
+    )
+    target_link_libraries(${PROJECT_NAME}_lib
+        PUBLIC
+            taocpp::pegtl
+    )
+    target_compile_definitions(${PROJECT_NAME}_lib
+        PUBLIC
+            BORED_ENABLE_PARSER=1
+    )
+else()
+    target_compile_definitions(${PROJECT_NAME}_lib
+        PUBLIC
+            BORED_ENABLE_PARSER=0
+    )
+endif()
 
 target_include_directories(${PROJECT_NAME}_lib
     PUBLIC
@@ -55,11 +76,6 @@ target_include_directories(${PROJECT_NAME}_lib
 target_compile_features(${PROJECT_NAME}_lib
     PUBLIC
         cxx_std_20
-)
-
-target_link_libraries(${PROJECT_NAME}_lib
-    PUBLIC
-        pegtl::pegtl
 )
 
 add_executable(${PROJECT_NAME}
@@ -113,6 +129,13 @@ if(BORED_ENABLE_TESTS)
             ${PROJECT_NAME}_lib
             Catch2::Catch2WithMain
     )
+
+    if(BORED_ENABLE_PARSER)
+        target_sources(${PROJECT_NAME}_tests
+            PRIVATE
+                tests/parser_smoke_tests.cpp
+        )
+    endif()
 
     include(CTest)
     include(Catch)

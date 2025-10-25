@@ -1,6 +1,7 @@
 #include "bored/ddl/ddl_handlers.hpp"
 
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
+#include "bored/catalog/catalog_accessor.hpp"
 #include "bored/catalog/catalog_checkpoint_registry.hpp"
 #include "bored/catalog/catalog_ddl.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
@@ -493,12 +494,12 @@ TEST_CASE("DDL handlers register dirty catalog pages")
 
         catalog::ColumnDefinition id_column{};
         id_column.name = "id";
-        id_column.type = catalog::CatalogColumnType::Int64;
+    id_column.column_type = catalog::CatalogColumnType::Int64;
         request.columns.push_back(id_column);
 
         catalog::ColumnDefinition ts_column{};
         ts_column.name = "created_at";
-    ts_column.type = catalog::CatalogColumnType::Utf8;
+    ts_column.column_type = catalog::CatalogColumnType::Utf8;
         request.columns.push_back(ts_column);
 
         DdlCommand command = request;
@@ -1144,5 +1145,3 @@ TEST_CASE("Alter table drop column missing without IF EXISTS fails")
     CHECK_FALSE(response.success);
     CHECK(response.error == make_error_code(DdlErrc::ValidationFailed));
 }
-
-}  // namespace

@@ -1,0 +1,3 @@
+123abc
+-table
+!invalid

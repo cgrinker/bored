@@ -6,6 +6,7 @@
 #include "bored/ddl/ddl_errors.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -83,6 +84,8 @@ using AlterTableAction = std::variant<AlterTableRenameTable, AlterTableRenameCol
 struct CreateTableRequest final {
     catalog::SchemaId schema_id{};
     std::string name{};
+    catalog::CatalogTableType table_type = catalog::CatalogTableType::Heap;
+    std::uint32_t root_page_id = 0U;
     std::vector<catalog::ColumnDefinition> columns{};
     bool if_not_exists = false;
 };
@@ -106,6 +109,9 @@ using DropTableCleanupHook = std::function<std::error_code(const DropTableReques
                                                            catalog::CatalogMutator&)>;
 
 using CatalogDirtyRelationHook = std::function<std::error_code(std::span<const catalog::RelationId>, std::uint64_t)>;
+
+struct CreateIndexRequest;
+struct DropIndexRequest;
 
 struct CreateIndexStoragePlan final {
     std::uint32_t root_page_id = 0U;
