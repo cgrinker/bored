@@ -30,12 +30,13 @@
 
 ## Milestone 2: Grammar Infrastructure Hardening (1 sprint)
 - [x] Introduce error-recovery hooks (synchronise at statement terminators) to continue parsing multi-statement scripts.
-- [ ] Implement common expression grammar primitives (string literals, numeric literals) needed for defaults and expressions.
-- [ ] Benchmark parser performance using representative scripts; set baseline targets for future regressions.
-- [ ] Document grammar extension guidelines (naming, action hooks, AST mapping) in `docs/parser_frontend_milestones.md` appendix.
+- [x] Implement common expression grammar primitives (string literals, numeric literals) needed for defaults and expressions.
+- [ ] Benchmark parser performance using representative scripts; set baseline targets for future regressions. _(Deferred to Milestone 3: integration benchmarking phase.)_
+- [x] Document grammar extension guidelines (naming, action hooks, AST mapping) in `docs/parser_frontend_milestones.md` appendix.
 
 ## Milestone 3: Integration with Catalog Semantics (1 sprint)
-- [ ] Map AST nodes to semantic structures consumed by DDL dispatcher (request structs, options).
+- [x] Map AST nodes to semantic structures consumed by DDL dispatcher (request structs, options).  \
+	Implemented `parser::build_ddl_commands`, which converts successful statement ASTs into `bored::ddl::DdlCommand` requests and propagates parser diagnostics.
 - [ ] Plug parser diagnostics into telemetry (parser failure counters, average parse duration).
 - [ ] Add integration tests that parse + dispatch CREATE TABLE / DROP TABLE flows end-to-end.
 - [ ] Update operator documentation to describe parser error messages and remediation hints.
@@ -45,3 +46,11 @@
 - Parser unit test suite running under `ctest` with deterministic fixtures.
 - Documentation updated (this doc plus references from `relational_layer_design.md`).
 - Parser module capable of translating basic DDL SQL into existing dispatcher request structs with actionable diagnostics.
+
+### Appendix: Grammar Extension Guidelines
+- Keep new grammar rules in `src/parser/grammar.cpp` scoped to the smallest sensible region; prefer `namespace`-local structs when the rule is an implementation detail. Name rules using `<entity>_<role>_rule` to mirror existing patterns (`default_expression_rule`, `schema_embedded_statement_rule`).
+- Use dedicated parse-state structs for per-statement context that carries mutable state between actions; avoid globals and reset state at rule boundaries (see `CreateTableParseState`).
+- Implement PEGTL action specialisations only when a rule needs semantic side effects. Fall back to the default templated no-op action otherwise to keep compile times low and intent clear.
+- Normalise parsed text through helpers such as `trim_copy` before storing it in AST nodes. This keeps downstream consumers from re-implementing whitespace stripping.
+- Surface diagnostics for ambiguous or unsupported constructs immediately during parsing. Reuse `make_parse_error` for PEGTL exceptions and append custom diagnostics for logical validations (duplicate column names, duplicate schema targets).
+- Extend the Catch2 suite alongside every grammar change. Add positive coverage to the relevant `parser_ddl_*` tests and negative coverage that exercises diagnostics; remember to update `CMakeLists.txt` if new test translation units are introduced.

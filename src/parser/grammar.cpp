@@ -1,4 +1,5 @@
 #include "bored/parser/grammar.hpp"
+#include "bored/parser/expression_primitives.hpp"
 
 #include <tao/pegtl.hpp>
 
@@ -205,19 +206,6 @@ struct null_keyword : keyword<'N', 'U', 'L', 'L'> {
 struct constraint_not_null_rule : pegtl::seq<not_keyword, required_space, null_keyword> {
 };
 
-struct string_literal_char : pegtl::sor<pegtl::seq<pegtl::one<'\''>, pegtl::one<'\''>>, pegtl::not_one<'\''>> {
-};
-
-struct string_literal_rule
-    : pegtl::seq<pegtl::one<'\''>, pegtl::star<string_literal_char>, pegtl::one<'\''>> {
-};
-
-struct numeric_literal_rule
-    : pegtl::seq<pegtl::opt<pegtl::one<'-'>>,
-                 pegtl::plus<pegtl::digit>,
-                 pegtl::opt<pegtl::seq<pegtl::one<'.'>, pegtl::plus<pegtl::digit>>>> {
-};
-
 struct default_identifier_rule : identifier_rule {
 };
 
@@ -244,8 +232,8 @@ struct default_function_call_rule
 };
 
 struct default_term_rule
-    : pegtl::sor<string_literal_rule,
-                 numeric_literal_rule,
+    : pegtl::sor<expr::string_literal,
+                 expr::numeric_literal,
                  default_function_call_rule,
                  default_parenthesized_expression_rule,
                  default_identifier_rule> {
