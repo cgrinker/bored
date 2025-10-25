@@ -54,6 +54,12 @@ struct kw_schema : keyword<'S', 'C', 'H', 'E', 'M', 'A'> {
 struct kw_table : keyword<'T', 'A', 'B', 'L', 'E'> {
 };
 
+struct kw_view : keyword<'V', 'I', 'E', 'W'> {
+};
+
+struct kw_as : keyword<'A', 'S'> {
+};
+
 struct kw_authorization : keyword<'A', 'U', 'T', 'H', 'O', 'R', 'I', 'Z', 'A', 'T', 'I', 'O', 'N'> {
 };
 
@@ -259,6 +265,26 @@ struct create_table_grammar
                  pegtl::eof> {
 };
 
+struct view_definition_rule : pegtl::star<pegtl::not_one<';'>> {
+};
+
+struct create_view_grammar
+    : pegtl::seq<optional_space,
+                 kw_create,
+                 required_space,
+                 kw_view,
+                 required_space,
+                 pegtl::opt<pegtl::seq<if_not_exists_rule, required_space>>,
+                 table_name_rule,
+                 required_space,
+                 kw_as,
+                 required_space,
+                 view_definition_rule,
+                 optional_space,
+                 pegtl::opt<pegtl::seq<semicolon, optional_space>>,
+                 pegtl::eof> {
+};
+
 struct drop_table_grammar
     : pegtl::seq<optional_space,
                  kw_drop,
@@ -328,6 +354,37 @@ std::string trim_copy(std::string_view text)
     }
     const auto last = text.find_last_not_of(" \t\r\n");
     return std::string{text.substr(first, last - first + 1)};
+}
+
+bool iequals(std::string_view lhs, std::string_view rhs)
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < lhs.size(); ++index) {
+        const auto left = static_cast<unsigned char>(lhs[index]);
+        const auto right = static_cast<unsigned char>(rhs[index]);
+        if (std::tolower(left) != std::tolower(right)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::string_view next_token(std::string_view text, std::size_t& offset)
+{
+    while (offset < text.size() && std::isspace(static_cast<unsigned char>(text[offset])) != 0) {
+        ++offset;
+    }
+
+    const auto start = offset;
+    while (offset < text.size() && std::isspace(static_cast<unsigned char>(text[offset])) == 0) {
+        ++offset;
+    }
+
+    return text.substr(start, offset - start);
 }
 
 std::string format_parse_message(std::string_view message)
@@ -426,6 +483,59 @@ void append_duplicate_schema_diagnostics(const DropSchemaStatement& statement,
     }
 }
 
+void convert_embedded_statements(const std::vector<std::string>& raw_statements,
+                                 CreateSchemaStatement& statement,
+                                 std::vector<ParserDiagnostic>& diagnostics)
+{
+    for (const auto& raw : raw_statements) {
+        const auto trimmed = trim_copy(raw);
+        if (trimmed.empty()) {
+            continue;
+        }
+
+        std::size_t offset = 0U;
+        const auto first = next_token(trimmed, offset);
+        const auto second = next_token(trimmed, offset);
+
+        if (iequals(first, "CREATE") && iequals(second, "TABLE")) {
+            auto table_result = parse_create_table(trimmed);
+            diagnostics.insert(diagnostics.end(),
+                               table_result.diagnostics.begin(),
+                               table_result.diagnostics.end());
+            if (table_result.ast) {
+                statement.embedded_statements.emplace_back(std::move(*table_result.ast));
+            } else if (table_result.diagnostics.empty()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Failed to parse embedded CREATE TABLE statement";
+                diagnostics.push_back(std::move(diagnostic));
+            }
+            continue;
+        }
+
+        if (iequals(first, "CREATE") && iequals(second, "VIEW")) {
+            auto view_result = parse_create_view(trimmed);
+            diagnostics.insert(diagnostics.end(),
+                               view_result.diagnostics.begin(),
+                               view_result.diagnostics.end());
+            if (view_result.ast) {
+                statement.embedded_statements.emplace_back(std::move(*view_result.ast));
+            } else if (view_result.diagnostics.empty()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Failed to parse embedded CREATE VIEW statement";
+                diagnostics.push_back(std::move(diagnostic));
+            }
+            continue;
+        }
+
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "Unsupported embedded CREATE statement '" + trimmed + "'";
+        diagnostics.push_back(std::move(diagnostic));
+    }
+}
+
 template <typename Rule>
 struct create_database_action {
     template <typename Input>
@@ -490,7 +600,7 @@ struct drop_database_action<cascade_rule> {
 template <typename Rule>
 struct create_schema_action {
     template <typename Input>
-    static void apply(const Input&, CreateSchemaStatement&)
+    static void apply(const Input&, CreateSchemaStatement&, std::vector<std::string>&)
     {
     }
 };
@@ -498,7 +608,7 @@ struct create_schema_action {
 template <>
 struct create_schema_action<if_not_exists_rule> {
     template <typename Input>
-    static void apply(const Input&, CreateSchemaStatement& statement)
+    static void apply(const Input&, CreateSchemaStatement& statement, std::vector<std::string>&)
     {
         statement.if_not_exists = true;
     }
@@ -507,7 +617,7 @@ struct create_schema_action<if_not_exists_rule> {
 template <>
 struct create_schema_action<schema_name_head> {
     template <typename Input>
-    static void apply(const Input& in, CreateSchemaStatement& statement)
+    static void apply(const Input& in, CreateSchemaStatement& statement, std::vector<std::string>&)
     {
         statement.database.value.clear();
         statement.name.value = in.string();
@@ -517,7 +627,7 @@ struct create_schema_action<schema_name_head> {
 template <>
 struct create_schema_action<schema_name_tail> {
     template <typename Input>
-    static void apply(const Input& in, CreateSchemaStatement& statement)
+    static void apply(const Input& in, CreateSchemaStatement& statement, std::vector<std::string>&)
     {
         statement.database.value = statement.name.value;
         statement.name.value = in.string();
@@ -527,7 +637,7 @@ struct create_schema_action<schema_name_tail> {
 template <>
 struct create_schema_action<schema_authorization_identifier> {
     template <typename Input>
-    static void apply(const Input& in, CreateSchemaStatement& statement)
+    static void apply(const Input& in, CreateSchemaStatement& statement, std::vector<std::string>&)
     {
         statement.authorization = Identifier{};
         statement.authorization->value = in.string();
@@ -537,11 +647,13 @@ struct create_schema_action<schema_authorization_identifier> {
 template <>
 struct create_schema_action<schema_embedded_statement_content> {
     template <typename Input>
-    static void apply(const Input& in, CreateSchemaStatement& statement)
+    static void apply(const Input& in,
+                      CreateSchemaStatement&,
+                      std::vector<std::string>& statements)
     {
         auto text = trim_copy(in.string());
         if (!text.empty()) {
-            statement.embedded_statements.push_back(std::move(text));
+            statements.push_back(std::move(text));
         }
     }
 };
@@ -714,6 +826,52 @@ struct create_table_action<unique_constraint_rule> {
 };
 
 template <typename Rule>
+struct create_view_action {
+    template <typename Input>
+    static void apply(const Input&, CreateViewStatement&)
+    {
+    }
+};
+
+template <>
+struct create_view_action<if_not_exists_rule> {
+    template <typename Input>
+    static void apply(const Input&, CreateViewStatement& statement)
+    {
+        statement.if_not_exists = true;
+    }
+};
+
+template <>
+struct create_view_action<schema_name_head> {
+    template <typename Input>
+    static void apply(const Input& in, CreateViewStatement& statement)
+    {
+        statement.schema.value.clear();
+        statement.name.value = in.string();
+    }
+};
+
+template <>
+struct create_view_action<schema_name_tail> {
+    template <typename Input>
+    static void apply(const Input& in, CreateViewStatement& statement)
+    {
+        statement.schema.value = statement.name.value;
+        statement.name.value = in.string();
+    }
+};
+
+template <>
+struct create_view_action<view_definition_rule> {
+    template <typename Input>
+    static void apply(const Input& in, CreateViewStatement& statement)
+    {
+        statement.definition = trim_copy(in.string());
+    }
+};
+
+template <typename Rule>
 struct drop_table_action {
     template <typename Input>
     static void apply(const Input&, DropTableStatement&)
@@ -841,10 +999,12 @@ ParseResult<CreateSchemaStatement> parse_create_schema(std::string_view input)
     ParseResult<CreateSchemaStatement> result{};
     pegtl::memory_input in(input, "create_schema");
     CreateSchemaStatement statement{};
+    std::vector<std::string> embedded_sql{};
 
     try {
-        const auto parsed = pegtl::parse<create_schema_grammar, create_schema_action>(in, statement);
+        const auto parsed = pegtl::parse<create_schema_grammar, create_schema_action>(in, statement, embedded_sql);
         if (parsed) {
+            convert_embedded_statements(embedded_sql, statement, result.diagnostics);
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
@@ -902,6 +1062,31 @@ ParseResult<CreateTableStatement> parse_create_table(std::string_view input)
             ParserDiagnostic diagnostic{};
             diagnostic.severity = ParserSeverity::Error;
             diagnostic.message = "input did not match CREATE TABLE grammar";
+            diagnostic.line = 1U;
+            diagnostic.column = 1U;
+            result.diagnostics.push_back(std::move(diagnostic));
+        }
+    } catch (const pegtl::parse_error& error) {
+        result.diagnostics.push_back(make_parse_error(error, input));
+    }
+
+    return result;
+}
+
+ParseResult<CreateViewStatement> parse_create_view(std::string_view input)
+{
+    ParseResult<CreateViewStatement> result{};
+    pegtl::memory_input in(input, "create_view");
+    CreateViewStatement statement{};
+
+    try {
+        const auto parsed = pegtl::parse<create_view_grammar, create_view_action>(in, statement);
+        if (parsed) {
+            result.ast = std::move(statement);
+        } else {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "input did not match CREATE VIEW grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
             result.diagnostics.push_back(std::move(diagnostic));

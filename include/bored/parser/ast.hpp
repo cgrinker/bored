@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace bored::parser {
@@ -14,37 +15,6 @@ struct Identifier final {
 struct SchemaName final {
     Identifier database{};
     Identifier name{};
-};
-
-struct CreateDatabaseStatement final {
-    Identifier name{};
-    bool if_not_exists = false;
-};
-
-struct DropDatabaseStatement final {
-    Identifier name{};
-    bool if_exists = false;
-    bool cascade = false;
-};
-
-struct CreateSchemaStatement final {
-    Identifier database{};
-    Identifier name{};
-    bool if_not_exists = false;
-    std::optional<Identifier> authorization{};
-    std::vector<std::string> embedded_statements{};
-};
-
-struct DropSchemaStatement final {
-    enum class Behavior : std::uint8_t {
-        Default = 0,
-        Cascade,
-        Restrict
-    };
-
-    std::vector<SchemaName> schemas{};
-    bool if_exists = false;
-    Behavior behavior = Behavior::Default;
 };
 
 struct ColumnDefinition final {
@@ -68,6 +38,46 @@ struct DropTableStatement final {
     Identifier name{};
     bool if_exists = false;
     bool cascade = false;
+};
+
+struct CreateDatabaseStatement final {
+    Identifier name{};
+    bool if_not_exists = false;
+};
+
+struct DropDatabaseStatement final {
+    Identifier name{};
+    bool if_exists = false;
+    bool cascade = false;
+};
+
+struct CreateViewStatement final {
+    Identifier schema{};
+    Identifier name{};
+    std::string definition{};
+    bool if_not_exists = false;
+};
+
+using SchemaEmbeddedStatement = std::variant<CreateTableStatement, CreateViewStatement>;
+
+struct CreateSchemaStatement final {
+    Identifier database{};
+    Identifier name{};
+    bool if_not_exists = false;
+    std::optional<Identifier> authorization{};
+    std::vector<SchemaEmbeddedStatement> embedded_statements{};
+};
+
+struct DropSchemaStatement final {
+    enum class Behavior : std::uint8_t {
+        Default = 0,
+        Cascade,
+        Restrict
+    };
+
+    std::vector<SchemaName> schemas{};
+    bool if_exists = false;
+    Behavior behavior = Behavior::Default;
 };
 
 }  // namespace bored::parser

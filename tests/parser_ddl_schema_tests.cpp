@@ -1,6 +1,7 @@
 #include "bored/parser/grammar.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <variant>
 
 using namespace bored::parser;
 
@@ -52,9 +53,19 @@ TEST_CASE("parse_create_schema captures embedded statements")
     REQUIRE(result.ast->authorization.has_value());
     CHECK(result.ast->authorization->value == "owner");
     REQUIRE(result.ast->embedded_statements.size() == 2);
-    CHECK(result.ast->embedded_statements[0] == "CREATE TABLE analytics.events (event_id BIGINT)");
-    CHECK(result.ast->embedded_statements[1]
-          == "CREATE VIEW analytics.events_view AS SELECT event_id FROM analytics.events");
+    REQUIRE(std::holds_alternative<CreateTableStatement>(result.ast->embedded_statements[0]));
+    const auto& create_table = std::get<CreateTableStatement>(result.ast->embedded_statements[0]);
+    CHECK(create_table.schema.value == "analytics");
+    CHECK(create_table.name.value == "events");
+    REQUIRE(create_table.columns.size() == 1);
+    CHECK(create_table.columns[0].name.value == "event_id");
+    CHECK(create_table.columns[0].type_name.value == "BIGINT");
+
+    REQUIRE(std::holds_alternative<CreateViewStatement>(result.ast->embedded_statements[1]));
+    const auto& create_view = std::get<CreateViewStatement>(result.ast->embedded_statements[1]);
+    CHECK(create_view.schema.value == "analytics");
+    CHECK(create_view.name.value == "events_view");
+    CHECK(create_view.definition == "SELECT event_id FROM analytics.events");
 }
 
 TEST_CASE("parse_create_schema rejects missing identifier")

@@ -17,7 +17,7 @@
 - [x] Implement CREATE/DROP DATABASE grammar and AST nodes.
 - [x] Implement CREATE/DROP SCHEMA grammar and AST nodes (including `IF NOT EXISTS` / `IF EXISTS`).
 - [x] Extend CREATE SCHEMA grammar with `AUTHORIZATION` and embedded statement support.
-- [ ] Parse CREATE SCHEMA embedded statements into dedicated AST nodes rather than raw strings.
+- [x] Parse CREATE SCHEMA embedded statements into dedicated AST nodes rather than raw strings.
 - [x] Extend DROP SCHEMA grammar with `RESTRICT` handling and multiple schema targets.
 - [ ] Support per-schema `IF EXISTS` flags and richer diagnostic context for bulk drops.
 - [x] Implement CREATE/DROP TABLE grammar with column definitions (type literals, `NOT NULL`, default expressions stubbed).
