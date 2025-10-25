@@ -49,6 +49,21 @@ struct kw_database : keyword<'D', 'A', 'T', 'A', 'B', 'A', 'S', 'E'> {
 struct kw_schema : keyword<'S', 'C', 'H', 'E', 'M', 'A'> {
 };
 
+struct kw_table : keyword<'T', 'A', 'B', 'L', 'E'> {
+};
+
+struct kw_default : keyword<'D', 'E', 'F', 'A', 'U', 'L', 'T'> {
+};
+
+struct kw_primary : keyword<'P', 'R', 'I', 'M', 'A', 'R', 'Y'> {
+};
+
+struct kw_key : keyword<'K', 'E', 'Y'> {
+};
+
+struct kw_unique : keyword<'U', 'N', 'I', 'Q', 'U', 'E'> {
+};
+
 struct kw_if : keyword<'I', 'F'> {
 };
 
@@ -84,6 +99,15 @@ struct schema_name_rule
                  pegtl::opt<pegtl::seq<optional_space, dot, optional_space, schema_name_tail>>> {
 };
 
+struct table_name_rule : schema_name_rule {
+};
+
+struct left_paren : pegtl::one<'('> {
+};
+
+struct right_paren : pegtl::one<')'> {
+};
+
 struct create_database_grammar
     : pegtl::seq<optional_space,
                  kw_create,
@@ -105,6 +129,110 @@ struct drop_database_grammar
                  required_space,
                  pegtl::opt<pegtl::seq<if_exists_rule, required_space>>,
                  database_identifier,
+                 pegtl::opt<pegtl::seq<required_space, cascade_rule>>,
+                 optional_space,
+                 pegtl::opt<pegtl::seq<semicolon, optional_space>>,
+                 pegtl::eof> {
+};
+
+struct column_identifier : identifier_rule {
+};
+
+struct type_identifier : identifier_rule {
+};
+
+struct not_keyword : keyword<'N', 'O', 'T'> {
+};
+
+struct null_keyword : keyword<'N', 'U', 'L', 'L'> {
+};
+
+struct constraint_not_null_rule : pegtl::seq<not_keyword, required_space, null_keyword> {
+};
+
+struct string_literal_char : pegtl::sor<pegtl::seq<pegtl::one<'\''>, pegtl::one<'\''>>, pegtl::not_one<'\''>> {
+};
+
+struct string_literal_rule
+    : pegtl::seq<pegtl::one<'\''>, pegtl::star<string_literal_char>, pegtl::one<'\''>> {
+};
+
+struct numeric_literal_rule : pegtl::seq<pegtl::opt<pegtl::one<'-'>>, pegtl::plus<pegtl::digit>> {
+};
+
+struct default_identifier_rule : identifier_rule {
+};
+
+struct default_value_rule : pegtl::sor<string_literal_rule, numeric_literal_rule, default_identifier_rule> {
+};
+
+struct default_clause_rule : pegtl::seq<kw_default, required_space, default_value_rule> {
+};
+
+struct primary_key_rule : pegtl::seq<kw_primary, required_space, kw_key> {
+};
+
+struct unique_constraint_rule : kw_unique {
+};
+
+struct column_constraint_default_clause : pegtl::seq<required_space, default_clause_rule> {
+};
+
+struct column_constraint_not_null_clause : pegtl::seq<required_space, constraint_not_null_rule> {
+};
+
+struct column_constraint_primary_key_clause : pegtl::seq<required_space, primary_key_rule> {
+};
+
+struct column_constraint_unique_clause : pegtl::seq<required_space, unique_constraint_rule> {
+};
+
+struct column_constraint_clause
+    : pegtl::sor<column_constraint_default_clause,
+                 column_constraint_not_null_clause,
+                 column_constraint_primary_key_clause,
+                 column_constraint_unique_clause> {
+};
+
+struct column_definition_rule
+    : pegtl::seq<column_identifier,
+                 required_space,
+                 type_identifier,
+                 pegtl::star<column_constraint_clause>,
+                 optional_space> {
+};
+
+struct column_list_rule
+    : pegtl::seq<left_paren,
+                 optional_space,
+                 column_definition_rule,
+                 pegtl::star<pegtl::seq<pegtl::one<','>, optional_space, column_definition_rule>>,
+                 right_paren> {
+};
+
+struct create_table_grammar
+    : pegtl::seq<optional_space,
+                 kw_create,
+                 required_space,
+                 kw_table,
+                 required_space,
+                 pegtl::opt<pegtl::seq<if_not_exists_rule, required_space>>,
+                 table_name_rule,
+                 optional_space,
+                 column_list_rule,
+                 optional_space,
+                 pegtl::opt<pegtl::seq<semicolon, optional_space>>,
+                 pegtl::eof> {
+};
+
+struct drop_table_grammar
+    : pegtl::seq<optional_space,
+                 kw_drop,
+                 required_space,
+                 kw_table,
+                 required_space,
+                 pegtl::opt<pegtl::seq<if_exists_rule, required_space>>,
+                 table_name_rule,
                  pegtl::opt<pegtl::seq<required_space, cascade_rule>>,
                  optional_space,
                  pegtl::opt<pegtl::seq<semicolon, optional_space>>,
@@ -313,6 +441,160 @@ struct drop_schema_action<cascade_rule> {
     }
 };
 
+template <typename Rule>
+struct create_table_action {
+    template <typename Input>
+    static void apply(const Input&, CreateTableStatement&)
+    {
+    }
+};
+
+template <>
+struct create_table_action<if_not_exists_rule> {
+    template <typename Input>
+    static void apply(const Input&, CreateTableStatement& statement)
+    {
+        statement.if_not_exists = true;
+    }
+};
+
+template <>
+struct create_table_action<schema_name_head> {
+    template <typename Input>
+    static void apply(const Input& in, CreateTableStatement& statement)
+    {
+        statement.schema.value.clear();
+        statement.name.value = in.string();
+    }
+};
+
+template <>
+struct create_table_action<schema_name_tail> {
+    template <typename Input>
+    static void apply(const Input& in, CreateTableStatement& statement)
+    {
+        statement.schema.value = statement.name.value;
+        statement.name.value = in.string();
+    }
+};
+
+template <>
+struct create_table_action<column_identifier> {
+    template <typename Input>
+    static void apply(const Input& in, CreateTableStatement& statement)
+    {
+        auto& column = statement.columns.emplace_back();
+        column.name.value = in.string();
+        column.not_null = false;
+        column.primary_key = false;
+        column.unique = false;
+        column.default_expression.reset();
+    }
+};
+
+template <>
+struct create_table_action<type_identifier> {
+    template <typename Input>
+    static void apply(const Input& in, CreateTableStatement& statement)
+    {
+        if (!statement.columns.empty()) {
+            statement.columns.back().type_name.value = in.string();
+        }
+    }
+};
+
+template <>
+struct create_table_action<constraint_not_null_rule> {
+    template <typename Input>
+    static void apply(const Input&, CreateTableStatement& statement)
+    {
+        if (!statement.columns.empty()) {
+            statement.columns.back().not_null = true;
+        }
+    }
+};
+
+template <>
+struct create_table_action<default_value_rule> {
+    template <typename Input>
+    static void apply(const Input& in, CreateTableStatement& statement)
+    {
+        if (!statement.columns.empty()) {
+            statement.columns.back().default_expression = in.string();
+        }
+    }
+};
+
+template <>
+struct create_table_action<primary_key_rule> {
+    template <typename Input>
+    static void apply(const Input&, CreateTableStatement& statement)
+    {
+        if (!statement.columns.empty()) {
+            auto& column = statement.columns.back();
+            column.primary_key = true;
+            column.not_null = true;
+        }
+    }
+};
+
+template <>
+struct create_table_action<unique_constraint_rule> {
+    template <typename Input>
+    static void apply(const Input&, CreateTableStatement& statement)
+    {
+        if (!statement.columns.empty()) {
+            statement.columns.back().unique = true;
+        }
+    }
+};
+
+template <typename Rule>
+struct drop_table_action {
+    template <typename Input>
+    static void apply(const Input&, DropTableStatement&)
+    {
+    }
+};
+
+template <>
+struct drop_table_action<if_exists_rule> {
+    template <typename Input>
+    static void apply(const Input&, DropTableStatement& statement)
+    {
+        statement.if_exists = true;
+    }
+};
+
+template <>
+struct drop_table_action<schema_name_head> {
+    template <typename Input>
+    static void apply(const Input& in, DropTableStatement& statement)
+    {
+        statement.schema.value.clear();
+        statement.name.value = in.string();
+    }
+};
+
+template <>
+struct drop_table_action<schema_name_tail> {
+    template <typename Input>
+    static void apply(const Input& in, DropTableStatement& statement)
+    {
+        statement.schema.value = statement.name.value;
+        statement.name.value = in.string();
+    }
+};
+
+template <>
+struct drop_table_action<cascade_rule> {
+    template <typename Input>
+    static void apply(const Input&, DropTableStatement& statement)
+    {
+        statement.cascade = true;
+    }
+};
+
 }  // namespace
 
 ParseResult<Identifier> parse_identifier(std::string_view input)
@@ -429,6 +711,56 @@ ParseResult<DropSchemaStatement> parse_drop_schema(std::string_view input)
             ParserDiagnostic diagnostic{};
             diagnostic.severity = ParserSeverity::Error;
             diagnostic.message = "input did not match DROP SCHEMA grammar";
+            diagnostic.line = 1U;
+            diagnostic.column = 1U;
+            result.diagnostics.push_back(std::move(diagnostic));
+        }
+    } catch (const pegtl::parse_error& error) {
+        result.diagnostics.push_back(make_parse_error(error));
+    }
+
+    return result;
+}
+
+ParseResult<CreateTableStatement> parse_create_table(std::string_view input)
+{
+    ParseResult<CreateTableStatement> result{};
+    pegtl::memory_input in(input, "create_table");
+    CreateTableStatement statement{};
+
+    try {
+        const auto parsed = pegtl::parse<create_table_grammar, create_table_action>(in, statement);
+        if (parsed) {
+            result.ast = std::move(statement);
+        } else {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "input did not match CREATE TABLE grammar";
+            diagnostic.line = 1U;
+            diagnostic.column = 1U;
+            result.diagnostics.push_back(std::move(diagnostic));
+        }
+    } catch (const pegtl::parse_error& error) {
+        result.diagnostics.push_back(make_parse_error(error));
+    }
+
+    return result;
+}
+
+ParseResult<DropTableStatement> parse_drop_table(std::string_view input)
+{
+    ParseResult<DropTableStatement> result{};
+    pegtl::memory_input in(input, "drop_table");
+    DropTableStatement statement{};
+
+    try {
+        const auto parsed = pegtl::parse<drop_table_grammar, drop_table_action>(in, statement);
+        if (parsed) {
+            result.ast = std::move(statement);
+        } else {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "input did not match DROP TABLE grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
             result.diagnostics.push_back(std::move(diagnostic));
