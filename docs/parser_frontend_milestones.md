@@ -16,7 +16,8 @@
 ## Milestone 1: DDL Statement Grammar (1 sprint)
 - [x] Implement CREATE/DROP DATABASE grammar and AST nodes.
 - [x] Implement CREATE/DROP SCHEMA grammar and AST nodes (including `IF NOT EXISTS` / `IF EXISTS`).
-- [ ] Extend CREATE SCHEMA grammar with `AUTHORIZATION` and embedded statement support.
+- [x] Extend CREATE SCHEMA grammar with `AUTHORIZATION` and embedded statement support.
+- [ ] Parse CREATE SCHEMA embedded statements into dedicated AST nodes rather than raw strings.
 - [ ] Extend DROP SCHEMA grammar with `RESTRICT` handling and multiple schema targets.
 - [x] Implement CREATE/DROP TABLE grammar with column definitions (type literals, `NOT NULL`, default expressions stubbed).
 - [x] Extend CREATE TABLE grammar with column default expressions and inline constraint variants (PRIMARY KEY, UNIQUE).

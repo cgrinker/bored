@@ -25,6 +25,8 @@ struct CreateSchemaStatement final {
     Identifier database{};
     Identifier name{};
     bool if_not_exists = false;
+    std::optional<Identifier> authorization{};
+    std::vector<std::string> embedded_statements{};
 };
 
 struct DropSchemaStatement final {

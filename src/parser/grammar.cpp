@@ -52,6 +52,9 @@ struct kw_schema : keyword<'S', 'C', 'H', 'E', 'M', 'A'> {
 struct kw_table : keyword<'T', 'A', 'B', 'L', 'E'> {
 };
 
+struct kw_authorization : keyword<'A', 'U', 'T', 'H', 'O', 'R', 'I', 'Z', 'A', 'T', 'I', 'O', 'N'> {
+};
+
 struct kw_default : keyword<'D', 'E', 'F', 'A', 'U', 'L', 'T'> {
 };
 
@@ -100,6 +103,27 @@ struct schema_name_rule
 };
 
 struct table_name_rule : schema_name_rule {
+};
+
+struct schema_authorization_identifier : identifier_rule {
+};
+
+struct authorization_clause_rule : pegtl::seq<kw_authorization, required_space, schema_authorization_identifier> {
+};
+
+struct schema_embedded_statement_content
+    : pegtl::seq<kw_create, required_space, pegtl::star<pegtl::not_one<';'>>> {
+};
+
+struct schema_embedded_statement_rule
+    : pegtl::seq<pegtl::star<pegtl::space>, schema_embedded_statement_content, semicolon> {
+};
+
+struct schema_embedded_statement_start : pegtl::seq<pegtl::star<pegtl::space>, kw_create> {
+};
+
+struct schema_embedded_statements_rule
+    : pegtl::star<pegtl::seq<pegtl::at<schema_embedded_statement_start>, schema_embedded_statement_rule>> {
 };
 
 struct left_paren : pegtl::one<'('> {
@@ -245,8 +269,10 @@ struct create_schema_grammar
                  required_space,
                  kw_schema,
                  required_space,
-                 pegtl::opt<pegtl::seq<if_not_exists_rule, required_space>>,
+                 pegtl::opt<pegtl::seq<if_not_exists_rule, pegtl::opt<required_space>>>,
                  schema_name_rule,
+                 pegtl::opt<pegtl::seq<required_space, authorization_clause_rule>>,
+                 schema_embedded_statements_rule,
                  optional_space,
                  pegtl::opt<pegtl::seq<semicolon, optional_space>>,
                  pegtl::eof> {
@@ -295,6 +321,16 @@ ParserDiagnostic make_parse_error(const pegtl::parse_error& error)
         diagnostic.column = static_cast<std::size_t>(position.column);
     }
     return diagnostic;
+}
+
+std::string trim_copy(std::string_view text)
+{
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return std::string{text.substr(first, last - first + 1)};
 }
 
 template <typename Rule>
@@ -392,6 +428,28 @@ struct create_schema_action<schema_name_tail> {
     {
         statement.database.value = statement.name.value;
         statement.name.value = in.string();
+    }
+};
+
+template <>
+struct create_schema_action<schema_authorization_identifier> {
+    template <typename Input>
+    static void apply(const Input& in, CreateSchemaStatement& statement)
+    {
+        statement.authorization = Identifier{};
+        statement.authorization->value = in.string();
+    }
+};
+
+template <>
+struct create_schema_action<schema_embedded_statement_content> {
+    template <typename Input>
+    static void apply(const Input& in, CreateSchemaStatement& statement)
+    {
+        auto text = trim_copy(in.string());
+        if (!text.empty()) {
+            statement.embedded_statements.push_back(std::move(text));
+        }
     }
 };
 
