@@ -21,6 +21,8 @@ struct ParserDiagnostic final {
     std::string message{};
     std::size_t line = 0U;
     std::size_t column = 0U;
+    std::string statement{};
+    std::vector<std::string> remediation_hints{};
 };
 
 template <typename T>

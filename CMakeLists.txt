@@ -15,6 +15,7 @@ add_library(${PROJECT_NAME}_lib
     src/ddl/ddl_dispatcher.cpp
     src/ddl/ddl_dependency_graph.cpp
     src/ddl/ddl_handlers.cpp
+    src/ddl/parser_diagnostics.cpp
     src/catalog/catalog_bootstrapper.cpp
     src/catalog/catalog_encoding.cpp
     src/catalog/catalog_ddl.cpp
@@ -137,6 +138,7 @@ if(BORED_ENABLE_TESTS)
                 tests/parser_ddl_database_tests.cpp
                 tests/parser_ddl_schema_tests.cpp
                 tests/parser_ddl_table_tests.cpp
+                tests/parser_diagnostics_tests.cpp
         )
     endif()
 

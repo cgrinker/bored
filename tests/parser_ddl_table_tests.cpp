@@ -160,6 +160,11 @@ TEST_CASE("parse_create_table rejects missing column list")
     const auto result = parse_create_table("CREATE TABLE accounts;");
     CHECK_FALSE(result.success());
     REQUIRE_FALSE(result.diagnostics.empty());
+    const auto& diagnostic = result.diagnostics.front();
+    CHECK(diagnostic.severity == ParserSeverity::Warning);
+    CHECK(diagnostic.statement == "CREATE TABLE accounts;");
+    REQUIRE_FALSE(diagnostic.remediation_hints.empty());
+    CHECK(diagnostic.remediation_hints.front() == "Review the SQL syntax near the reported token.");
 }
 
 TEST_CASE("parse_create_table reports duplicate column names")
@@ -168,8 +173,12 @@ TEST_CASE("parse_create_table reports duplicate column names")
     REQUIRE(result.success());
     REQUIRE(result.ast.has_value());
     REQUIRE_FALSE(result.diagnostics.empty());
-    CHECK(result.diagnostics[0].severity == ParserSeverity::Error);
-    CHECK(result.diagnostics[0].message == "Duplicate column name 'id'");
+    const auto& diagnostic = result.diagnostics[0];
+    CHECK(diagnostic.severity == ParserSeverity::Warning);
+    CHECK(diagnostic.message == "Duplicate column name 'id'");
+    CHECK(diagnostic.statement == "CREATE TABLE accounts (id INT, id INT);");
+    REQUIRE_FALSE(diagnostic.remediation_hints.empty());
+    CHECK(diagnostic.remediation_hints.front() == "Remove or rename the duplicate column before retrying the statement.");
 }
 
 TEST_CASE("parse_drop_table handles cascade clause")
@@ -188,4 +197,9 @@ TEST_CASE("parse_drop_table rejects missing name")
     const auto result = parse_drop_table("DROP TABLE IF EXISTS;");
     CHECK_FALSE(result.success());
     REQUIRE_FALSE(result.diagnostics.empty());
+    const auto& diagnostic = result.diagnostics.front();
+    CHECK(diagnostic.severity == ParserSeverity::Warning);
+    CHECK(diagnostic.statement == "DROP TABLE IF EXISTS;");
+    REQUIRE_FALSE(diagnostic.remediation_hints.empty());
+    CHECK(diagnostic.remediation_hints.front() == "Review the SQL syntax near the reported token.");
 }

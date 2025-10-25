@@ -24,8 +24,8 @@
 - [x] Extend CREATE TABLE grammar with column default expressions and inline constraint variants (PRIMARY KEY, UNIQUE).
 - [x] Support complex column default expressions (function calls, arithmetic) and inline constraint naming.
 - [x] Capture parser diagnostics for missing keywords and duplicate identifiers.
-- [ ] Extend diagnostics with remediation hints and statement context for complex scripts.
-- [ ] Translate parser diagnostics to `DdlCommandResponse` severity/hints (warning for user input issues, error for parser bugs).
+- [x] Extend diagnostics with remediation hints and statement context for complex scripts.
+- [x] Translate parser diagnostics to `DdlCommandResponse` severity/hints (warning for user input issues, error for parser bugs).
 - [ ] Extend unit tests with positive/negative coverage for each grammar element.
 
 ## Milestone 2: Grammar Infrastructure Hardening (1 sprint)

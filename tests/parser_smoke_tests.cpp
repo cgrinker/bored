@@ -121,7 +121,10 @@ TEST_CASE("parse_identifier rejects invalid identifiers")
             INFO("input: " << input);
             CHECK_FALSE(result.success());
             REQUIRE_FALSE(result.diagnostics.empty());
-            CHECK(result.diagnostics.front().severity == ParserSeverity::Error);
+            const auto& diagnostic = result.diagnostics.front();
+            CHECK(diagnostic.severity == ParserSeverity::Warning);
+            CHECK_FALSE(diagnostic.statement.empty());
+            CHECK_FALSE(diagnostic.remediation_hints.empty());
         }
     }
 }

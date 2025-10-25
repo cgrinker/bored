@@ -118,8 +118,12 @@ TEST_CASE("parse_drop_schema reports duplicate targets")
     REQUIRE(result.success());
     REQUIRE(result.ast.has_value());
     REQUIRE_FALSE(result.diagnostics.empty());
-    CHECK(result.diagnostics[0].severity == ParserSeverity::Error);
-    CHECK(result.diagnostics[0].message == "Duplicate schema 'analytics.stage' at positions 1 and 2");
+    const auto& diagnostic = result.diagnostics[0];
+    CHECK(diagnostic.severity == ParserSeverity::Warning);
+    CHECK(diagnostic.message == "Duplicate schema 'analytics.stage' at positions 1 and 2");
+    CHECK_FALSE(diagnostic.statement.empty());
+    REQUIRE_FALSE(diagnostic.remediation_hints.empty());
+    CHECK(diagnostic.remediation_hints.front() == "Remove duplicates or de-duplicate schema names when issuing DROP SCHEMA commands.");
 }
 
 TEST_CASE("parse_drop_schema supports per-schema IF EXISTS flags")

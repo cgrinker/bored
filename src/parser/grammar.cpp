@@ -481,8 +481,10 @@ std::string_view extract_token(std::string_view input, std::size_t offset)
 ParserDiagnostic make_parse_error(const pegtl::parse_error& error, std::string_view source)
 {
     ParserDiagnostic diagnostic{};
-    diagnostic.severity = ParserSeverity::Error;
+    diagnostic.severity = ParserSeverity::Warning;
     diagnostic.message = format_parse_message(error.message());
+    diagnostic.statement = trim_copy(source);
+    diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
 
     if (!error.positions().empty()) {
         const auto& position = error.positions().front();
@@ -504,6 +506,7 @@ ParserDiagnostic make_parse_error(const pegtl::parse_error& error, std::string_v
 }
 
 void append_duplicate_column_diagnostics(const CreateTableStatement& statement,
+                                         std::string_view source,
                                          std::vector<ParserDiagnostic>& diagnostics)
 {
     std::unordered_set<std::string> seen{};
@@ -511,14 +514,17 @@ void append_duplicate_column_diagnostics(const CreateTableStatement& statement,
         auto [_, inserted] = seen.insert(column.name.value);
         if (!inserted) {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "Duplicate column name '" + column.name.value + "'";
+            diagnostic.statement = trim_copy(source);
+            diagnostic.remediation_hints = {"Remove or rename the duplicate column before retrying the statement."};
             diagnostics.push_back(std::move(diagnostic));
         }
     }
 }
 
 void append_duplicate_schema_diagnostics(const DropSchemaStatement& statement,
+                                         std::string_view source,
                                          std::vector<ParserDiagnostic>& diagnostics)
 {
     std::unordered_map<std::string, std::size_t> seen{};
@@ -529,11 +535,13 @@ void append_duplicate_schema_diagnostics(const DropSchemaStatement& statement,
         auto [it, inserted] = seen.emplace(key, index);
         if (!inserted) {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             const auto first_position = it->second + 1U;
             const auto duplicate_position = index + 1U;
             diagnostic.message = "Duplicate schema '" + key + "' at positions "
                                  + std::to_string(first_position) + " and " + std::to_string(duplicate_position);
+            diagnostic.statement = trim_copy(source);
+            diagnostic.remediation_hints = {"Remove duplicates or de-duplicate schema names when issuing DROP SCHEMA commands."};
             diagnostics.push_back(std::move(diagnostic));
         }
     }
@@ -572,6 +580,8 @@ void convert_embedded_statements(const std::vector<std::string>& raw_statements,
                 ParserDiagnostic diagnostic{};
                 diagnostic.severity = ParserSeverity::Error;
                 diagnostic.message = "Failed to parse embedded CREATE TABLE statement";
+                diagnostic.statement = trimmed;
+                diagnostic.remediation_hints = {"Capture this embedded statement and file a parser bug report."};
                 diagnostics.push_back(std::move(diagnostic));
             }
             continue;
@@ -588,14 +598,18 @@ void convert_embedded_statements(const std::vector<std::string>& raw_statements,
                 ParserDiagnostic diagnostic{};
                 diagnostic.severity = ParserSeverity::Error;
                 diagnostic.message = "Failed to parse embedded CREATE VIEW statement";
+                diagnostic.statement = trimmed;
+                diagnostic.remediation_hints = {"Capture this embedded statement and file a parser bug report."};
                 diagnostics.push_back(std::move(diagnostic));
             }
             continue;
         }
 
         ParserDiagnostic diagnostic{};
-        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.severity = ParserSeverity::Warning;
         diagnostic.message = "Unsupported embedded CREATE statement '" + trimmed + "'";
+        diagnostic.statement = trimmed;
+        diagnostic.remediation_hints = {"Only CREATE TABLE and CREATE VIEW statements are supported inside CREATE SCHEMA blocks."};
         diagnostics.push_back(std::move(diagnostic));
     }
 }
@@ -1040,10 +1054,12 @@ ParseResult<Identifier> parse_identifier(std::string_view input)
             result.ast = std::move(identifier);
         } else {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "input did not match identifier grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
@@ -1065,10 +1081,12 @@ ParseResult<CreateDatabaseStatement> parse_create_database(std::string_view inpu
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "input did not match CREATE DATABASE grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
@@ -1090,10 +1108,12 @@ ParseResult<DropDatabaseStatement> parse_drop_database(std::string_view input)
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "input did not match DROP DATABASE grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
@@ -1117,10 +1137,12 @@ ParseResult<CreateSchemaStatement> parse_create_schema(std::string_view input)
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "input did not match CREATE SCHEMA grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
@@ -1140,14 +1162,16 @@ ParseResult<DropSchemaStatement> parse_drop_schema(std::string_view input)
     try {
         const auto parsed = pegtl::parse<drop_schema_grammar, drop_schema_action>(in, statement, state);
         if (parsed) {
-            append_duplicate_schema_diagnostics(statement, result.diagnostics);
+            append_duplicate_schema_diagnostics(statement, input, result.diagnostics);
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "input did not match DROP SCHEMA grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
@@ -1167,14 +1191,16 @@ ParseResult<CreateTableStatement> parse_create_table(std::string_view input)
     try {
         const auto parsed = pegtl::parse<create_table_grammar, create_table_action>(in, statement, state);
         if (parsed) {
-            append_duplicate_column_diagnostics(statement, result.diagnostics);
+            append_duplicate_column_diagnostics(statement, input, result.diagnostics);
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "input did not match CREATE TABLE grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
@@ -1196,10 +1222,12 @@ ParseResult<CreateViewStatement> parse_create_view(std::string_view input)
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "input did not match CREATE VIEW grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
@@ -1221,10 +1249,12 @@ ParseResult<DropTableStatement> parse_drop_table(std::string_view input)
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "input did not match DROP TABLE grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
