@@ -110,6 +110,21 @@ ddl::DdlTelemetrySnapshot& accumulate(ddl::DdlTelemetrySnapshot& target, const d
     return target;
 }
 
+bored::parser::ParserTelemetrySnapshot& accumulate(bored::parser::ParserTelemetrySnapshot& target,
+                                                   const bored::parser::ParserTelemetrySnapshot& source)
+{
+    target.scripts_attempted += source.scripts_attempted;
+    target.scripts_succeeded += source.scripts_succeeded;
+    target.statements_attempted += source.statements_attempted;
+    target.statements_succeeded += source.statements_succeeded;
+    target.diagnostics_info += source.diagnostics_info;
+    target.diagnostics_warning += source.diagnostics_warning;
+    target.diagnostics_error += source.diagnostics_error;
+    target.total_parse_duration_ns += source.total_parse_duration_ns;
+    target.last_parse_duration_ns = std::max(target.last_parse_duration_ns, source.last_parse_duration_ns);
+    return target;
+}
+
 template <typename Snapshot>
 Snapshot aggregate_snapshots(const std::vector<std::function<Snapshot()>>& samplers)
 {
@@ -368,6 +383,57 @@ void StorageTelemetryRegistry::visit_ddl(const DdlVisitor& visitor) const
         std::lock_guard guard(mutex_);
         entries.reserve(ddl_samplers_.size());
         for (const auto& [identifier, sampler] : ddl_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_parser(std::string identifier, ParserSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    parser_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_parser(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    parser_samplers_.erase(identifier);
+}
+
+bored::parser::ParserTelemetrySnapshot StorageTelemetryRegistry::aggregate_parser() const
+{
+    std::vector<ParserSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(parser_samplers_.size());
+        for (const auto& [_, sampler] : parser_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<bored::parser::ParserTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_parser(const ParserVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, ParserSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(parser_samplers_.size());
+        for (const auto& [identifier, sampler] : parser_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }

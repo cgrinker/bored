@@ -54,6 +54,8 @@ if(BORED_ENABLE_PARSER)
         PRIVATE
             src/parser/grammar.cpp
             src/parser/ddl_command_builder.cpp
+            src/parser/parser_telemetry.cpp
+            src/parser/ddl_script_executor.cpp
     )
     target_link_libraries(${PROJECT_NAME}_lib
         PUBLIC
@@ -141,9 +143,11 @@ if(BORED_ENABLE_TESTS)
                 tests/parser_ddl_table_tests.cpp
                 tests/parser_ddl_script_tests.cpp
                 tests/parser_ddl_view_tests.cpp
-        tests/parser_ddl_command_builder_tests.cpp
+                tests/parser_ddl_command_builder_tests.cpp
                 tests/parser_expression_primitives_tests.cpp
                 tests/parser_diagnostics_tests.cpp
+                tests/parser_telemetry_tests.cpp
+                tests/parser_ddl_integration_tests.cpp
         )
     endif()
 

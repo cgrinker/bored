@@ -15,6 +15,7 @@ struct StorageDiagnosticsOptions final {
     bool include_retention_details = true;
     bool include_catalog_details = true;
     bool include_ddl_details = true;
+    bool include_parser_details = true;
 };
 
 struct StorageDiagnosticsPageManagerEntry final {
@@ -42,6 +43,11 @@ struct StorageDiagnosticsDdlEntry final {
     bored::ddl::DdlTelemetrySnapshot snapshot;
 };
 
+struct StorageDiagnosticsParserEntry final {
+    std::string identifier;
+    bored::parser::ParserTelemetrySnapshot snapshot;
+};
+
 struct StorageDiagnosticsPageManagerSection final {
     PageManagerTelemetrySnapshot total{};
     std::vector<StorageDiagnosticsPageManagerEntry> details{};
@@ -67,12 +73,18 @@ struct StorageDiagnosticsDdlSection final {
     std::vector<StorageDiagnosticsDdlEntry> details{};
 };
 
+struct StorageDiagnosticsParserSection final {
+    bored::parser::ParserTelemetrySnapshot total{};
+    std::vector<StorageDiagnosticsParserEntry> details{};
+};
+
 struct StorageDiagnosticsDocument final {
     std::chrono::system_clock::time_point collected_at{};
     StorageDiagnosticsPageManagerSection page_managers{};
     StorageDiagnosticsCheckpointSection checkpoints{};
     StorageDiagnosticsRetentionSection retention{};
     StorageDiagnosticsCatalogSection catalog{};
+    StorageDiagnosticsParserSection parser{};
     StorageDiagnosticsDdlSection ddl{};
 };
 

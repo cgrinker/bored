@@ -220,6 +220,22 @@ void append_ddl_snapshot(std::string& out, const ddl::DdlTelemetrySnapshot& snap
     out.push_back('}');
 }
 
+void append_parser_snapshot(std::string& out, const bored::parser::ParserTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "scripts_attempted", snapshot.scripts_attempted, first);
+    append_field(out, "scripts_succeeded", snapshot.scripts_succeeded, first);
+    append_field(out, "statements_attempted", snapshot.statements_attempted, first);
+    append_field(out, "statements_succeeded", snapshot.statements_succeeded, first);
+    append_field(out, "diagnostics_info", snapshot.diagnostics_info, first);
+    append_field(out, "diagnostics_warning", snapshot.diagnostics_warning, first);
+    append_field(out, "diagnostics_error", snapshot.diagnostics_error, first);
+    append_field(out, "total_parse_duration_ns", snapshot.total_parse_duration_ns, first);
+    append_field(out, "last_parse_duration_ns", snapshot.last_parse_duration_ns, first);
+    out.push_back('}');
+}
+
 void append_page_manager_section(std::string& out, const StorageDiagnosticsPageManagerSection& section)
 {
     out.push_back('{');
@@ -335,6 +351,29 @@ void append_ddl_section(std::string& out, const StorageDiagnosticsDdlSection& se
     out.push_back('}');
 }
 
+void append_parser_section(std::string& out, const StorageDiagnosticsParserSection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_parser_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_parser_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 }  // namespace
 
 StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryRegistry& registry,
@@ -379,6 +418,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+    document.parser.total = registry.aggregate_parser();
+    if (options.include_parser_details) {
+        registry.visit_parser([&](const std::string& identifier, const bored::parser::ParserTelemetrySnapshot& snapshot) {
+            document.parser.details.push_back(StorageDiagnosticsParserEntry{identifier, snapshot});
+        });
+        std::sort(document.parser.details.begin(), document.parser.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+
     document.ddl.total = registry.aggregate_ddl();
     if (options.include_ddl_details) {
         registry.visit_ddl([&](const std::string& identifier, const ddl::DdlTelemetrySnapshot& snapshot) {
@@ -407,6 +455,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_retention_section(out, document.retention);
     out.append(",\"catalog\":");
     append_catalog_section(out, document.catalog);
+    out.append(",\"parser\":");
+    append_parser_section(out, document.parser);
     out.append(",\"ddl\":");
     append_ddl_section(out, document.ddl);
     out.push_back('}');

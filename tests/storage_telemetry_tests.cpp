@@ -11,6 +11,7 @@
 using namespace bored::storage;
 
 namespace ddl = bored::ddl;
+namespace parser = bored::parser;
 
 namespace {
 
@@ -138,6 +139,21 @@ ddl::DdlTelemetrySnapshot make_ddl_snapshot(std::uint64_t base)
     return snapshot;
 }
 
+parser::ParserTelemetrySnapshot make_parser_snapshot(std::uint64_t base)
+{
+    parser::ParserTelemetrySnapshot snapshot{};
+    snapshot.scripts_attempted = base + 1U;
+    snapshot.scripts_succeeded = base;
+    snapshot.statements_attempted = base + 2U;
+    snapshot.statements_succeeded = base + 1U;
+    snapshot.diagnostics_info = base + 3U;
+    snapshot.diagnostics_warning = base + 4U;
+    snapshot.diagnostics_error = base + 5U;
+    snapshot.total_parse_duration_ns = (base + 6U) * 20U;
+    snapshot.last_parse_duration_ns = (base + 7U) * 10U;
+    return snapshot;
+}
+
 }  // namespace
 
 TEST_CASE("StorageTelemetryRegistry aggregates page managers")
@@ -260,6 +276,43 @@ TEST_CASE("StorageTelemetryRegistry aggregates DDL telemetry")
     REQUIRE(total.failures.execution_failures == ((1U + 2U) + (4U + 2U)));
 }
 
+TEST_CASE("StorageTelemetryRegistry aggregates parser telemetry")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_parser("parser_a", [] { return make_parser_snapshot(2U); });
+    registry.register_parser("parser_b", [] { return make_parser_snapshot(5U); });
+
+    const auto total = registry.aggregate_parser();
+
+    REQUIRE(total.scripts_attempted == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(total.scripts_succeeded == (2U + 5U));
+    REQUIRE(total.statements_attempted == ((2U + 2U) + (5U + 2U)));
+    REQUIRE(total.diagnostics_warning == ((2U + 4U) + (5U + 4U)));
+    REQUIRE(total.diagnostics_error == ((2U + 5U) + (5U + 5U)));
+    REQUIRE(total.total_parse_duration_ns == ((2U + 6U) * 20U + (5U + 6U) * 20U));
+    REQUIRE(total.last_parse_duration_ns == ((5U + 7U) * 10U));
+}
+
+TEST_CASE("StorageTelemetryRegistry visits parser samplers")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_parser("parser_a", [] { return make_parser_snapshot(3U); });
+    registry.register_parser("parser_b", [] { return make_parser_snapshot(6U); });
+
+    std::vector<std::string> ids;
+    std::vector<parser::ParserTelemetrySnapshot> snapshots;
+
+    registry.visit_parser([&](const std::string& id, const parser::ParserTelemetrySnapshot& snapshot) {
+        ids.push_back(id);
+        snapshots.push_back(snapshot);
+    });
+
+    REQUIRE(ids.size() == 2U);
+    REQUIRE(std::find(ids.begin(), ids.end(), "parser_a") != ids.end());
+    REQUIRE(std::find(ids.begin(), ids.end(), "parser_b") != ids.end());
+    REQUIRE(snapshots.size() == 2U);
+}
+
 TEST_CASE("StorageTelemetryRegistry visits DDL samplers")
 {
     StorageTelemetryRegistry registry;
@@ -288,18 +341,21 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     registry.register_wal_retention("ret", [] { return make_retention_snapshot(1U); });
     registry.register_catalog("cat", [] { return make_catalog_snapshot(2U); });
     registry.register_ddl("ddl", [] { return make_ddl_snapshot(3U); });
+    registry.register_parser("parser", [] { return make_parser_snapshot(4U); });
 
     registry.unregister_page_manager("pm");
     registry.unregister_checkpoint_scheduler("ckpt");
     registry.unregister_wal_retention("ret");
     registry.unregister_catalog("cat");
     registry.unregister_ddl("ddl");
+    registry.unregister_parser("parser");
 
     auto pm_total = registry.aggregate_page_managers();
     auto ckpt_total = registry.aggregate_checkpoint_schedulers();
     auto ret_total = registry.aggregate_wal_retention();
     auto cat_total = registry.aggregate_catalog();
     auto ddl_total = registry.aggregate_ddl();
+    auto parser_total = registry.aggregate_parser();
 
     REQUIRE(pm_total.initialize.attempts == 0U);
     REQUIRE(ckpt_total.invocations == 0U);
@@ -312,4 +368,6 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     REQUIRE(ddl_total.failures.validation_failures == 0U);
     REQUIRE(ddl_total.failures.execution_failures == 0U);
     REQUIRE(ddl_total.failures.other_failures == 0U);
+    REQUIRE(parser_total.scripts_attempted == 0U);
+    REQUIRE(parser_total.diagnostics_error == 0U);
 }

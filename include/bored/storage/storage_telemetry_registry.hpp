@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/ddl/ddl_telemetry.hpp"
+#include "bored/parser/parser_telemetry.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -102,6 +103,9 @@ public:
     using DdlSampler = std::function<ddl::DdlTelemetrySnapshot()>;
     using DdlVisitor = std::function<void(const std::string&, const ddl::DdlTelemetrySnapshot&)>;
 
+    using ParserSampler = std::function<bored::parser::ParserTelemetrySnapshot()>;
+    using ParserVisitor = std::function<void(const std::string&, const bored::parser::ParserTelemetrySnapshot&)>;
+
     void register_page_manager(std::string identifier, PageManagerSampler sampler);
     void unregister_page_manager(const std::string& identifier);
     PageManagerTelemetrySnapshot aggregate_page_managers() const;
@@ -127,6 +131,11 @@ public:
     ddl::DdlTelemetrySnapshot aggregate_ddl() const;
     void visit_ddl(const DdlVisitor& visitor) const;
 
+    void register_parser(std::string identifier, ParserSampler sampler);
+    void unregister_parser(const std::string& identifier);
+    bored::parser::ParserTelemetrySnapshot aggregate_parser() const;
+    void visit_parser(const ParserVisitor& visitor) const;
+
 private:
     mutable std::mutex mutex_{};
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
@@ -134,6 +143,7 @@ private:
     std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
     std::unordered_map<std::string, CatalogSampler> catalog_samplers_{};
     std::unordered_map<std::string, DdlSampler> ddl_samplers_{};
+    std::unordered_map<std::string, ParserSampler> parser_samplers_{};
 };
 
 }  // namespace bored::storage

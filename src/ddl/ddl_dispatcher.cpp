@@ -158,6 +158,10 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
         mutator = std::make_unique<catalog::CatalogMutator>(mutator_config);
     }
 
+    if (mutator) {
+        mutator->set_commit_lsn_provider(config_.commit_lsn_provider);
+    }
+
     if (mutator && config_.catalog_dirty_hook) {
         auto hook = config_.catalog_dirty_hook;
         mutator->set_publish_listener([hook](const catalog::CatalogMutationBatch& batch) -> std::error_code {

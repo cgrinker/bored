@@ -37,9 +37,12 @@
 ## Milestone 3: Integration with Catalog Semantics (1 sprint)
 - [x] Map AST nodes to semantic structures consumed by DDL dispatcher (request structs, options).  \
 	Implemented `parser::build_ddl_commands`, which converts successful statement ASTs into `bored::ddl::DdlCommand` requests and propagates parser diagnostics.
-- [ ] Plug parser diagnostics into telemetry (parser failure counters, average parse duration).
-- [ ] Add integration tests that parse + dispatch CREATE TABLE / DROP TABLE flows end-to-end.
-- [ ] Update operator documentation to describe parser error messages and remediation hints.
+- [x] Plug parser diagnostics into telemetry (parser failure counters, average parse duration).  \
+	Added `parser::ParserTelemetry` + registry support, hooked into `StorageTelemetryRegistry`, and introduced `parser::DdlScriptExecutor` so end-users can track parse attempts, severities, and durations alongside existing storage metrics.
+- [x] Add integration tests that parse + dispatch CREATE TABLE / DROP TABLE flows end-to-end.  \
+	Created `parser::DdlScriptExecutor` to bridge `parse_ddl_script`, command translation, and the DDL dispatcher, with new integration tests covering success and failure flows plus telemetry aggregation.
+- [x] Update operator documentation to describe parser error messages and remediation hints.  \
+	Documented parser diagnostic severities, remediation workflows, and telemetry monitoring steps in `docs/parser_operator_guide.md` for operators running DDL workloads.
 
 ## Deliverables & Exit Criteria
 - PEGTL dependency committed and verified via CI build.

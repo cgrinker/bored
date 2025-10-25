@@ -386,6 +386,11 @@ void CatalogMutator::set_publish_listener(PublishListener listener)
     publish_listener_ = std::move(listener);
 }
 
+void CatalogMutator::set_commit_lsn_provider(std::function<std::uint64_t()> provider) noexcept
+{
+    commit_lsn_provider_ = std::move(provider);
+}
+
 std::error_code CatalogMutator::publish_staged_batch()
 {
     if (staged_.empty()) {

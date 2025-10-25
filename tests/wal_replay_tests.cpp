@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -523,6 +524,7 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
         return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage;
     });
     REQUIRE(before_it != plan.undo.end());
+    INFO("before_image_prev_lsn=" << before_it->header.prev_lsn << " lsn=" << before_it->header.lsn);
 
     auto before_view = bored::storage::decode_wal_tuple_before_image(std::span<const std::byte>(before_it->payload.data(), before_it->payload.size()));
     REQUIRE(before_view);
@@ -1116,6 +1118,8 @@ TEST_CASE("Wal crash drill restores catalog tuple before image")
 
     auto replay_span = std::span<const std::byte>(replay_page.data(), replay_page.size());
     auto baseline_span = std::span<const std::byte>(baseline_page.data(), baseline_page.size());
+    CAPTURE(insert_result.slot.offset);
+    CAPTURE(insert_result.slot.length);
     auto replay_header = bored::storage::page_header(replay_span);
     auto baseline_header = bored::storage::page_header(baseline_span);
     CHECK(replay_header.tuple_count == baseline_header.tuple_count);
@@ -1221,12 +1225,56 @@ TEST_CASE("Wal crash drill restores index descriptor before image")
     CHECK(restored_view->tuple.visibility_flags == pending_descriptor.tuple.visibility_flags);
     CHECK(restored_view->tuple.xmin == pending_descriptor.tuple.xmin);
 
+    auto baseline_tuple_span = bored::storage::read_tuple(std::span<const std::byte>(baseline_page.data(), baseline_page.size()),
+                                                         insert_result.slot.index);
+    REQUIRE(baseline_tuple_span.size() == tuple_span.size());
+    if (!std::equal(tuple_span.begin(), tuple_span.end(), baseline_tuple_span.begin(), baseline_tuple_span.end())) {
+        const auto mismatch = std::mismatch(tuple_span.begin(), tuple_span.end(), baseline_tuple_span.begin(), baseline_tuple_span.end());
+        const auto mismatch_index = std::distance(tuple_span.begin(), mismatch.first);
+        UNSCOPED_INFO("tuple mismatch index=" << mismatch_index << " replay_byte="
+                                                << std::to_integer<int>(*mismatch.first)
+                                                << " baseline_byte=" << std::to_integer<int>(*mismatch.second));
+    }
+    CHECK(std::equal(tuple_span.begin(), tuple_span.end(), baseline_tuple_span.begin(), baseline_tuple_span.end()));
+
     auto replay_header = bored::storage::page_header(std::span<const std::byte>(replay_page.data(), replay_page.size()));
     auto baseline_header = bored::storage::page_header(std::span<const std::byte>(baseline_page.data(), baseline_page.size()));
     CHECK(replay_header.tuple_count == baseline_header.tuple_count);
 
     auto replay_span = std::span<const std::byte>(replay_page.data(), replay_page.size());
     auto baseline_span = std::span<const std::byte>(baseline_page.data(), baseline_page.size());
+    const auto replay_header_meta = bored::storage::page_header(replay_span);
+    const auto baseline_header_meta = bored::storage::page_header(baseline_span);
+    CAPTURE(replay_span.size());
+    CAPTURE(baseline_span.size());
+    CAPTURE(replay_header_meta.lsn);
+    CAPTURE(baseline_header_meta.lsn);
+    CAPTURE(replay_header_meta.free_start);
+    CAPTURE(baseline_header_meta.free_start);
+    CAPTURE(replay_header_meta.free_end);
+    CAPTURE(baseline_header_meta.free_end);
+    CAPTURE(replay_header_meta.tuple_count);
+    CAPTURE(baseline_header_meta.tuple_count);
+    CAPTURE(replay_header_meta.fragment_count);
+    CAPTURE(baseline_header_meta.fragment_count);
+    auto mismatch = std::mismatch(replay_span.begin(), replay_span.end(), baseline_span.begin(), baseline_span.end());
+    CAPTURE(mismatch.second == baseline_span.end());
+    if (mismatch.first != replay_span.end()) {
+        const auto mismatch_index = std::distance(replay_span.begin(), mismatch.first);
+        CAPTURE(mismatch_index);
+        const auto replay_byte = std::to_integer<int>(*mismatch.first);
+        const auto baseline_byte = std::to_integer<int>(*mismatch.second);
+        CAPTURE(replay_byte);
+        CAPTURE(baseline_byte);
+        UNSCOPED_INFO("mismatch_index=" << mismatch_index << " replay_byte=" << replay_byte
+                                         << " baseline_byte=" << baseline_byte);
+    } else if (mismatch.second != baseline_span.end()) {
+        const auto mismatch_index = std::distance(baseline_span.begin(), mismatch.second);
+        CAPTURE(mismatch_index);
+        const auto baseline_byte = std::to_integer<int>(*mismatch.second);
+        CAPTURE(baseline_byte);
+        UNSCOPED_INFO("extra_baseline_byte index=" << mismatch_index << " value=" << baseline_byte);
+    }
     REQUIRE(std::equal(replay_span.begin(), replay_span.end(), baseline_span.begin(), baseline_span.end()));
 
     (void)std::filesystem::remove_all(wal_dir);
@@ -1442,6 +1490,12 @@ TEST_CASE("Wal crash drill preserves committed allocator counters during concurr
         return static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage;
     });
     CHECK(undo_has_before);
+    for (const auto& record : plan.undo) {
+        if (static_cast<WalRecordType>(record.header.type) == WalRecordType::TupleBeforeImage) {
+            INFO("before_image_prev_lsn=" << record.header.prev_lsn << " lsn=" << record.header.lsn);
+            break;
+        }
+    }
 
     FreeSpaceMap replay_fsm;
     WalReplayContext context{PageType::Meta, &replay_fsm};
@@ -1469,6 +1523,38 @@ TEST_CASE("Wal crash drill preserves committed allocator counters during concurr
 
     auto replay_span = std::span<const std::byte>(replay_page.data(), replay_page.size());
     auto committed_span = std::span<const std::byte>(committed_page.data(), committed_page.size());
+    const auto replay_header_committed = bored::storage::page_header(replay_span);
+    const auto committed_header_meta = bored::storage::page_header(committed_span);
+    CAPTURE(replay_span.size());
+    CAPTURE(committed_span.size());
+    CAPTURE(replay_header_committed.lsn);
+    CAPTURE(committed_header_meta.lsn);
+    CAPTURE(replay_header_committed.free_start);
+    CAPTURE(committed_header_meta.free_start);
+    CAPTURE(replay_header_committed.free_end);
+    CAPTURE(committed_header_meta.free_end);
+    CAPTURE(replay_header_committed.tuple_count);
+    CAPTURE(committed_header_meta.tuple_count);
+    CAPTURE(replay_header_committed.fragment_count);
+    CAPTURE(committed_header_meta.fragment_count);
+    auto mismatch = std::mismatch(replay_span.begin(), replay_span.end(), committed_span.begin(), committed_span.end());
+    CAPTURE(mismatch.second == committed_span.end());
+    if (mismatch.first != replay_span.end()) {
+        const auto mismatch_index = std::distance(replay_span.begin(), mismatch.first);
+        CAPTURE(mismatch_index);
+        const auto replay_byte = std::to_integer<int>(*mismatch.first);
+        const auto committed_byte = std::to_integer<int>(*mismatch.second);
+        CAPTURE(replay_byte);
+        CAPTURE(committed_byte);
+        UNSCOPED_INFO("mismatch_index=" << mismatch_index << " replay_byte=" << replay_byte
+                                         << " committed_byte=" << committed_byte);
+    } else if (mismatch.second != committed_span.end()) {
+        const auto mismatch_index = std::distance(committed_span.begin(), mismatch.second);
+        CAPTURE(mismatch_index);
+        const auto committed_byte = std::to_integer<int>(*mismatch.second);
+        CAPTURE(committed_byte);
+        UNSCOPED_INFO("extra_committed_byte index=" << mismatch_index << " value=" << committed_byte);
+    }
     REQUIRE(std::equal(replay_span.begin(), replay_span.end(), committed_span.begin(), committed_span.end()));
 
     (void)std::filesystem::remove_all(wal_dir);

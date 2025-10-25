@@ -113,6 +113,7 @@ public:
 
     using PublishListener = std::function<std::error_code(const CatalogMutationBatch&)>;
     void set_publish_listener(PublishListener listener);
+    void set_commit_lsn_provider(std::function<std::uint64_t()> provider) noexcept;
 
     static CatalogMutationTelemetrySnapshot telemetry() noexcept;
     static void reset_telemetry() noexcept;
