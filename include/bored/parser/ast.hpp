@@ -15,6 +15,7 @@ struct Identifier final {
 struct SchemaName final {
     Identifier database{};
     Identifier name{};
+    bool if_exists = false;
 };
 
 struct ColumnDefinition final {

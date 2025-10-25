@@ -85,6 +85,7 @@ TEST_CASE("parse_drop_schema handles cascade clause")
     const auto& schema = result.ast->schemas.front();
     CHECK(schema.database.value == "system");
     CHECK(schema.name.value == "analytics");
+    CHECK_FALSE(schema.if_exists);
     CHECK(result.ast->behavior == DropSchemaStatement::Behavior::Cascade);
 }
 
@@ -104,8 +105,10 @@ TEST_CASE("parse_drop_schema supports restrict and multiple targets")
     REQUIRE(result.ast->schemas.size() == 2);
     CHECK(result.ast->schemas[0].database.value == "sales");
     CHECK(result.ast->schemas[0].name.value == "stage");
+    CHECK_FALSE(result.ast->schemas[0].if_exists);
     CHECK(result.ast->schemas[1].database.value == "public");
     CHECK(result.ast->schemas[1].name.value == "temp");
+    CHECK_FALSE(result.ast->schemas[1].if_exists);
     CHECK(result.ast->behavior == DropSchemaStatement::Behavior::Restrict);
 }
 
@@ -116,5 +119,23 @@ TEST_CASE("parse_drop_schema reports duplicate targets")
     REQUIRE(result.ast.has_value());
     REQUIRE_FALSE(result.diagnostics.empty());
     CHECK(result.diagnostics[0].severity == ParserSeverity::Error);
-    CHECK(result.diagnostics[0].message == "Duplicate schema 'analytics.stage' in DROP SCHEMA list");
+    CHECK(result.diagnostics[0].message == "Duplicate schema 'analytics.stage' at positions 1 and 2");
+}
+
+TEST_CASE("parse_drop_schema supports per-schema IF EXISTS flags")
+{
+    const auto result = parse_drop_schema("DROP SCHEMA sales.stage, IF EXISTS public.temp, IF EXISTS archive.history");
+    REQUIRE(result.success());
+    REQUIRE(result.ast.has_value());
+    CHECK_FALSE(result.ast->if_exists);
+    REQUIRE(result.ast->schemas.size() == 3);
+    CHECK(result.ast->schemas[0].database.value == "sales");
+    CHECK(result.ast->schemas[0].name.value == "stage");
+    CHECK_FALSE(result.ast->schemas[0].if_exists);
+    CHECK(result.ast->schemas[1].database.value == "public");
+    CHECK(result.ast->schemas[1].name.value == "temp");
+    CHECK(result.ast->schemas[1].if_exists);
+    CHECK(result.ast->schemas[2].database.value == "archive");
+    CHECK(result.ast->schemas[2].name.value == "history");
+    CHECK(result.ast->schemas[2].if_exists);
 }

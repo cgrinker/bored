@@ -3,6 +3,7 @@
 #include <tao/pegtl.hpp>
 
 #include <cctype>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -113,9 +114,18 @@ struct schema_name_rule
                  pegtl::opt<pegtl::seq<optional_space, dot, optional_space, schema_name_tail>>> {
 };
 
+struct schema_if_exists_rule : if_exists_rule {
+};
+
+struct schema_entry_rule
+    : pegtl::seq<optional_space,
+                 pegtl::opt<pegtl::seq<schema_if_exists_rule, required_space>>,
+                 schema_name_rule> {
+};
+
 struct schema_name_list_rule
-    : pegtl::seq<schema_name_rule,
-                 pegtl::star<pegtl::seq<optional_space, pegtl::one<','>, optional_space, schema_name_rule>>> {
+    : pegtl::seq<schema_entry_rule,
+                 pegtl::star<pegtl::seq<optional_space, pegtl::one<','>, schema_entry_rule>>> {
 };
 
 struct table_name_rule : schema_name_rule {
@@ -469,19 +479,27 @@ void append_duplicate_column_diagnostics(const CreateTableStatement& statement,
 void append_duplicate_schema_diagnostics(const DropSchemaStatement& statement,
                                          std::vector<ParserDiagnostic>& diagnostics)
 {
-    std::unordered_set<std::string> seen{};
-    for (const auto& schema : statement.schemas) {
+    std::unordered_map<std::string, std::size_t> seen{};
+    for (std::size_t index = 0; index < statement.schemas.size(); ++index) {
+        const auto& schema = statement.schemas[index];
         std::string key = schema.database.value.empty() ? schema.name.value
                                                         : schema.database.value + "." + schema.name.value;
-        auto [_, inserted] = seen.insert(key);
+        auto [it, inserted] = seen.emplace(key, index);
         if (!inserted) {
             ParserDiagnostic diagnostic{};
             diagnostic.severity = ParserSeverity::Error;
-            diagnostic.message = "Duplicate schema '" + key + "' in DROP SCHEMA list";
+            const auto first_position = it->second + 1U;
+            const auto duplicate_position = index + 1U;
+            diagnostic.message = "Duplicate schema '" + key + "' at positions "
+                                 + std::to_string(first_position) + " and " + std::to_string(duplicate_position);
             diagnostics.push_back(std::move(diagnostic));
         }
     }
 }
+
+struct DropSchemaParseState final {
+    bool next_if_exists = false;
+};
 
 void convert_embedded_statements(const std::vector<std::string>& raw_statements,
                                  CreateSchemaStatement& statement,
@@ -661,7 +679,7 @@ struct create_schema_action<schema_embedded_statement_content> {
 template <typename Rule>
 struct drop_schema_action {
     template <typename Input>
-    static void apply(const Input&, DropSchemaStatement&)
+    static void apply(const Input&, DropSchemaStatement&, DropSchemaParseState&)
     {
     }
 };
@@ -669,27 +687,38 @@ struct drop_schema_action {
 template <>
 struct drop_schema_action<if_exists_rule> {
     template <typename Input>
-    static void apply(const Input&, DropSchemaStatement& statement)
+    static void apply(const Input&, DropSchemaStatement& statement, DropSchemaParseState&)
     {
         statement.if_exists = true;
     }
 };
 
 template <>
+struct drop_schema_action<schema_if_exists_rule> {
+    template <typename Input>
+    static void apply(const Input&, DropSchemaStatement&, DropSchemaParseState& state)
+    {
+        state.next_if_exists = true;
+    }
+};
+
+template <>
 struct drop_schema_action<schema_name_head> {
     template <typename Input>
-    static void apply(const Input& in, DropSchemaStatement& statement)
+    static void apply(const Input& in, DropSchemaStatement& statement, DropSchemaParseState& state)
     {
         auto& schema = statement.schemas.emplace_back();
         schema.database.value.clear();
         schema.name.value = in.string();
+        schema.if_exists = state.next_if_exists;
+        state.next_if_exists = false;
     }
 };
 
 template <>
 struct drop_schema_action<schema_name_tail> {
     template <typename Input>
-    static void apply(const Input& in, DropSchemaStatement& statement)
+    static void apply(const Input& in, DropSchemaStatement& statement, DropSchemaParseState&)
     {
         if (!statement.schemas.empty()) {
             auto& schema = statement.schemas.back();
@@ -702,7 +731,7 @@ struct drop_schema_action<schema_name_tail> {
 template <>
 struct drop_schema_action<cascade_rule> {
     template <typename Input>
-    static void apply(const Input&, DropSchemaStatement& statement)
+    static void apply(const Input&, DropSchemaStatement& statement, DropSchemaParseState&)
     {
         statement.behavior = DropSchemaStatement::Behavior::Cascade;
     }
@@ -711,7 +740,7 @@ struct drop_schema_action<cascade_rule> {
 template <>
 struct drop_schema_action<kw_restrict> {
     template <typename Input>
-    static void apply(const Input&, DropSchemaStatement& statement)
+    static void apply(const Input&, DropSchemaStatement& statement, DropSchemaParseState&)
     {
         statement.behavior = DropSchemaStatement::Behavior::Restrict;
     }
@@ -1026,9 +1055,10 @@ ParseResult<DropSchemaStatement> parse_drop_schema(std::string_view input)
     ParseResult<DropSchemaStatement> result{};
     pegtl::memory_input in(input, "drop_schema");
     DropSchemaStatement statement{};
+    DropSchemaParseState state{};
 
     try {
-        const auto parsed = pegtl::parse<drop_schema_grammar, drop_schema_action>(in, statement);
+        const auto parsed = pegtl::parse<drop_schema_grammar, drop_schema_action>(in, statement, state);
         if (parsed) {
             append_duplicate_schema_diagnostics(statement, result.diagnostics);
             result.ast = std::move(statement);

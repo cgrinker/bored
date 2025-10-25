@@ -19,7 +19,7 @@
 - [x] Extend CREATE SCHEMA grammar with `AUTHORIZATION` and embedded statement support.
 - [x] Parse CREATE SCHEMA embedded statements into dedicated AST nodes rather than raw strings.
 - [x] Extend DROP SCHEMA grammar with `RESTRICT` handling and multiple schema targets.
-- [ ] Support per-schema `IF EXISTS` flags and richer diagnostic context for bulk drops.
+- [x] Support per-schema `IF EXISTS` flags and richer diagnostic context for bulk drops.
 - [x] Implement CREATE/DROP TABLE grammar with column definitions (type literals, `NOT NULL`, default expressions stubbed).
 - [x] Extend CREATE TABLE grammar with column default expressions and inline constraint variants (PRIMARY KEY, UNIQUE).
 - [ ] Support complex column default expressions (function calls, arithmetic) and inline constraint naming.
