@@ -138,6 +138,7 @@ if(BORED_ENABLE_TESTS)
                 tests/parser_ddl_database_tests.cpp
                 tests/parser_ddl_schema_tests.cpp
                 tests/parser_ddl_table_tests.cpp
+                tests/parser_ddl_script_tests.cpp
                 tests/parser_ddl_view_tests.cpp
                 tests/parser_diagnostics_tests.cpp
         )

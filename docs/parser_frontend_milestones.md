@@ -29,7 +29,7 @@
 - [x] Extend unit tests with positive/negative coverage for each grammar element.
 
 ## Milestone 2: Grammar Infrastructure Hardening (1 sprint)
-- [ ] Introduce error-recovery hooks (synchronise at statement terminators) to continue parsing multi-statement scripts.
+- [x] Introduce error-recovery hooks (synchronise at statement terminators) to continue parsing multi-statement scripts.
 - [ ] Implement common expression grammar primitives (string literals, numeric literals) needed for defaults and expressions.
 - [ ] Benchmark parser performance using representative scripts; set baseline targets for future regressions.
 - [ ] Document grammar extension guidelines (naming, action hooks, AST mapping) in `docs/parser_frontend_milestones.md` appendix.

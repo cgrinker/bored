@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <variant>
 
 namespace bored::parser {
 
@@ -33,6 +34,37 @@ struct ParseResult final {
     [[nodiscard]] bool success() const noexcept { return ast.has_value(); }
 };
 
+enum class StatementType : std::uint8_t {
+    Unknown = 0,
+    CreateDatabase,
+    DropDatabase,
+    CreateSchema,
+    DropSchema,
+    CreateTable,
+    DropTable,
+    CreateView
+};
+
+using StatementAst = std::variant<std::monostate,
+                                   CreateDatabaseStatement,
+                                   DropDatabaseStatement,
+                                   CreateSchemaStatement,
+                                   DropSchemaStatement,
+                                   CreateTableStatement,
+                                   DropTableStatement,
+                                   CreateViewStatement>;
+
+struct ScriptStatement final {
+    StatementType type = StatementType::Unknown;
+    std::string text{};
+    StatementAst ast{};
+    std::vector<ParserDiagnostic> diagnostics{};
+    bool success = false;
+};
+
+struct ScriptParseResult final {
+    std::vector<ScriptStatement> statements{};
+};
 ParseResult<Identifier> parse_identifier(std::string_view input);
 ParseResult<CreateDatabaseStatement> parse_create_database(std::string_view input);
 ParseResult<DropDatabaseStatement> parse_drop_database(std::string_view input);
@@ -42,4 +74,5 @@ ParseResult<CreateTableStatement> parse_create_table(std::string_view input);
 ParseResult<DropTableStatement> parse_drop_table(std::string_view input);
 ParseResult<CreateViewStatement> parse_create_view(std::string_view input);
 
+ScriptParseResult parse_ddl_script(std::string_view input);
 }  // namespace bored::parser

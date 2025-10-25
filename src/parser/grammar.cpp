@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <optional>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -547,6 +548,79 @@ void append_duplicate_schema_diagnostics(const DropSchemaStatement& statement,
     }
 }
 
+std::size_t find_statement_terminator(std::string_view input, std::size_t start)
+{
+    bool in_single_quote = false;
+    bool in_double_quote = false;
+    bool in_line_comment = false;
+    bool in_block_comment = false;
+
+    for (std::size_t index = start; index < input.size(); ++index) {
+        const char ch = input[index];
+
+        if (in_line_comment) {
+            if (ch == '\n') {
+                in_line_comment = false;
+            }
+            continue;
+        }
+
+        if (in_block_comment) {
+            if (ch == '*' && index + 1U < input.size() && input[index + 1U] == '/') {
+                in_block_comment = false;
+                ++index;
+            }
+            continue;
+        }
+
+        if (in_single_quote) {
+            if (ch == '\'' && (index + 1U >= input.size() || input[index + 1U] != '\'')) {
+                in_single_quote = false;
+            } else if (ch == '\'' && index + 1U < input.size()) {
+                ++index;
+            }
+            continue;
+        }
+
+        if (in_double_quote) {
+            if (ch == '"' && (index + 1U >= input.size() || input[index + 1U] != '"')) {
+                in_double_quote = false;
+            } else if (ch == '"' && index + 1U < input.size()) {
+                ++index;
+            }
+            continue;
+        }
+
+        if (ch == '-' && index + 1U < input.size() && input[index + 1U] == '-') {
+            in_line_comment = true;
+            ++index;
+            continue;
+        }
+
+        if (ch == '/' && index + 1U < input.size() && input[index + 1U] == '*') {
+            in_block_comment = true;
+            ++index;
+            continue;
+        }
+
+        if (ch == '\'') {
+            in_single_quote = true;
+            continue;
+        }
+
+        if (ch == '"') {
+            in_double_quote = true;
+            continue;
+        }
+
+        if (ch == ';') {
+            return index;
+        }
+    }
+
+    return std::string_view::npos;
+}
+
 struct DropSchemaParseState final {
     bool next_if_exists = false;
 };
@@ -1040,6 +1114,131 @@ struct drop_table_action<cascade_rule> {
     }
 };
 
+StatementType classify_statement(std::string_view text)
+{
+    std::size_t offset = 0U;
+    const auto first = next_token(text, offset);
+    const auto second = next_token(text, offset);
+
+    if (iequals(first, "CREATE")) {
+        if (iequals(second, "DATABASE")) {
+            return StatementType::CreateDatabase;
+        }
+        if (iequals(second, "SCHEMA")) {
+            return StatementType::CreateSchema;
+        }
+        if (iequals(second, "TABLE")) {
+            return StatementType::CreateTable;
+        }
+        if (iequals(second, "VIEW")) {
+            return StatementType::CreateView;
+        }
+    }
+
+    if (iequals(first, "DROP")) {
+        if (iequals(second, "DATABASE")) {
+            return StatementType::DropDatabase;
+        }
+        if (iequals(second, "SCHEMA")) {
+            return StatementType::DropSchema;
+        }
+        if (iequals(second, "TABLE")) {
+            return StatementType::DropTable;
+        }
+    }
+
+    return StatementType::Unknown;
+}
+
+ScriptStatement parse_script_statement(std::string text)
+{
+    ScriptStatement statement{};
+    statement.text = trim_copy(text);
+    if (statement.text.empty()) {
+        return statement;
+    }
+
+    while (!statement.text.empty()) {
+        if (statement.text.rfind("--", 0) == 0U) {
+            const auto newline = statement.text.find('\n');
+            if (newline == std::string::npos) {
+                statement.text.clear();
+                break;
+            }
+            statement.text.erase(0, newline + 1U);
+            statement.text = trim_copy(statement.text);
+            continue;
+        }
+
+        if (statement.text.rfind("/*", 0) == 0U) {
+            const auto terminator = statement.text.find("*/");
+            if (terminator == std::string::npos) {
+                statement.text.clear();
+                break;
+            }
+            statement.text.erase(0, terminator + 2U);
+            statement.text = trim_copy(statement.text);
+            continue;
+        }
+
+        break;
+    }
+
+    if (statement.text.empty()) {
+        return statement;
+    }
+
+    statement.type = classify_statement(statement.text);
+
+    auto propagate = [&statement](auto&& parse_result) {
+        statement.diagnostics = std::move(parse_result.diagnostics);
+        if (parse_result.ast) {
+            statement.success = true;
+            using AstType = std::decay_t<decltype(*parse_result.ast)>;
+            statement.ast.emplace<AstType>(std::move(*parse_result.ast));
+        }
+    };
+
+    switch (statement.type) {
+        case StatementType::CreateDatabase:
+            propagate(parse_create_database(statement.text));
+            break;
+        case StatementType::DropDatabase:
+            propagate(parse_drop_database(statement.text));
+            break;
+        case StatementType::CreateSchema:
+            propagate(parse_create_schema(statement.text));
+            break;
+        case StatementType::DropSchema:
+            propagate(parse_drop_schema(statement.text));
+            break;
+        case StatementType::CreateTable:
+            propagate(parse_create_table(statement.text));
+            break;
+        case StatementType::DropTable:
+            propagate(parse_drop_table(statement.text));
+            break;
+        case StatementType::CreateView:
+            propagate(parse_create_view(statement.text));
+            break;
+        case StatementType::Unknown:
+        default: {
+            if (!statement.text.empty()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Warning;
+                diagnostic.message = "Unsupported DDL statement; only CREATE or DROP commands for DATABASE, "
+                                     "SCHEMA, TABLE, and VIEW are recognised.";
+                diagnostic.statement = statement.text;
+                diagnostic.remediation_hints = {"Remove unsupported statements or extend the parser grammar."};
+                statement.diagnostics.push_back(std::move(diagnostic));
+            }
+            break;
+        }
+    }
+
+    return statement;
+}
+
 }  // namespace
 
 ParseResult<Identifier> parse_identifier(std::string_view input)
@@ -1259,6 +1458,31 @@ ParseResult<DropTableStatement> parse_drop_table(std::string_view input)
         }
     } catch (const pegtl::parse_error& error) {
         result.diagnostics.push_back(make_parse_error(error, input));
+    }
+
+    return result;
+}
+
+ScriptParseResult parse_ddl_script(std::string_view input)
+{
+    ScriptParseResult result{};
+    std::size_t offset = 0U;
+
+    while (offset < input.size()) {
+        const auto terminator = find_statement_terminator(input, offset);
+        const auto end = terminator == std::string_view::npos ? input.size() : terminator;
+        const auto length = end >= offset ? end - offset : 0U;
+        const auto raw = input.substr(offset, length);
+        auto statement = parse_script_statement(std::string{raw});
+        if (!statement.text.empty()) {
+            result.statements.push_back(std::move(statement));
+        }
+
+        if (terminator == std::string_view::npos) {
+            break;
+        }
+
+        offset = terminator + 1U;
     }
 
     return result;
