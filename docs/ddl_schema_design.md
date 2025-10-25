@@ -62,7 +62,7 @@
   - [x] Expand crash drills to cover identifier allocator updates during concurrent DDL, ensuring WAL replay restores counters and metadata consistently.
   - [x] Integrate DDL activity telemetry into `storage_diagnostics.hpp` for operator surfaces (per-verb latency distribution, failure taxonomy).
   - [x] Enhance error propagation with structured diagnostics (error code, severity, remediation hints) surfaced via CLI/API.
-  - [ ] Document DDL verb semantics, failure modes, and recovery behaviors.
+  - [x] Document DDL verb semantics, failure modes, and recovery behaviors (`docs/ddl_verb_reference.md`).
   - Tests: negative-path suites (duplicate names, missing dependencies), concurrency simulations for conflicting DDL, and documentation lint checks.
 
 ## Open Questions
@@ -74,4 +74,4 @@
 - Align milestone sequencing with overall relational roadmap (update `relational_layer_design.md` accordingly).
 - Prepare engineering tickets for Milestone 0 tasks, including parser stub integration and telemetry wiring.
 - Schedule design review to confirm dependency handling strategy and rollback expectations before implementation starts.
-- Draft operator-facing documentation that explains new DDL diagnostics payloads and remaining verb semantics work.
+- Socialise `docs/ddl_verb_reference.md` with operators and integrate its guidance into release documentation.
