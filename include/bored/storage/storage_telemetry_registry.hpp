@@ -1,5 +1,7 @@
 #pragma once
 
+#include "bored/ddl/ddl_telemetry.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -97,6 +99,9 @@ public:
     using CatalogSampler = std::function<CatalogTelemetrySnapshot()>;
     using CatalogVisitor = std::function<void(const std::string&, const CatalogTelemetrySnapshot&)>;
 
+    using DdlSampler = std::function<ddl::DdlTelemetrySnapshot()>;
+    using DdlVisitor = std::function<void(const std::string&, const ddl::DdlTelemetrySnapshot&)>;
+
     void register_page_manager(std::string identifier, PageManagerSampler sampler);
     void unregister_page_manager(const std::string& identifier);
     PageManagerTelemetrySnapshot aggregate_page_managers() const;
@@ -117,12 +122,18 @@ public:
     CatalogTelemetrySnapshot aggregate_catalog() const;
     void visit_catalog(const CatalogVisitor& visitor) const;
 
+    void register_ddl(std::string identifier, DdlSampler sampler);
+    void unregister_ddl(const std::string& identifier);
+    ddl::DdlTelemetrySnapshot aggregate_ddl() const;
+    void visit_ddl(const DdlVisitor& visitor) const;
+
 private:
     mutable std::mutex mutex_{};
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
     std::unordered_map<std::string, CheckpointSampler> checkpoint_samplers_{};
     std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
     std::unordered_map<std::string, CatalogSampler> catalog_samplers_{};
+    std::unordered_map<std::string, DdlSampler> ddl_samplers_{};
 };
 
 }  // namespace bored::storage

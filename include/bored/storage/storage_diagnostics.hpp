@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bored/ddl/ddl_telemetry.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 
 #include <chrono>
@@ -13,6 +14,7 @@ struct StorageDiagnosticsOptions final {
     bool include_checkpoint_details = true;
     bool include_retention_details = true;
     bool include_catalog_details = true;
+    bool include_ddl_details = true;
 };
 
 struct StorageDiagnosticsPageManagerEntry final {
@@ -35,6 +37,11 @@ struct StorageDiagnosticsCatalogEntry final {
     CatalogTelemetrySnapshot snapshot;
 };
 
+struct StorageDiagnosticsDdlEntry final {
+    std::string identifier;
+    bored::ddl::DdlTelemetrySnapshot snapshot;
+};
+
 struct StorageDiagnosticsPageManagerSection final {
     PageManagerTelemetrySnapshot total{};
     std::vector<StorageDiagnosticsPageManagerEntry> details{};
@@ -55,12 +62,18 @@ struct StorageDiagnosticsCatalogSection final {
     std::vector<StorageDiagnosticsCatalogEntry> details{};
 };
 
+struct StorageDiagnosticsDdlSection final {
+    bored::ddl::DdlTelemetrySnapshot total{};
+    std::vector<StorageDiagnosticsDdlEntry> details{};
+};
+
 struct StorageDiagnosticsDocument final {
     std::chrono::system_clock::time_point collected_at{};
     StorageDiagnosticsPageManagerSection page_managers{};
     StorageDiagnosticsCheckpointSection checkpoints{};
     StorageDiagnosticsRetentionSection retention{};
     StorageDiagnosticsCatalogSection catalog{};
+    StorageDiagnosticsDdlSection ddl{};
 };
 
 StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryRegistry& registry,

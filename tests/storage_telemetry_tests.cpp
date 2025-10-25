@@ -10,6 +10,8 @@
 
 using namespace bored::storage;
 
+namespace ddl = bored::ddl;
+
 namespace {
 
 PageManagerTelemetrySnapshot make_page_snapshot(std::uint64_t base)
@@ -112,6 +114,30 @@ CatalogTelemetrySnapshot make_catalog_snapshot(std::uint64_t base)
     return snapshot;
 }
 
+ddl::DdlTelemetrySnapshot make_ddl_snapshot(std::uint64_t base)
+{
+    ddl::DdlTelemetrySnapshot snapshot{};
+
+    const auto set_verb = [&](ddl::DdlVerb verb, std::uint64_t offset) {
+        const auto index = static_cast<std::size_t>(verb);
+        snapshot.verbs[index].attempts = base + offset;
+        snapshot.verbs[index].successes = base + offset + 1U;
+        snapshot.verbs[index].failures = base + offset - 1U;
+        snapshot.verbs[index].total_duration_ns = (base + offset) * 10U;
+        snapshot.verbs[index].last_duration_ns = (base + offset) * 5U;
+    };
+
+    set_verb(ddl::DdlVerb::CreateDatabase, 1U);
+    set_verb(ddl::DdlVerb::CreateTable, 3U);
+    set_verb(ddl::DdlVerb::DropTable, 4U);
+
+    snapshot.failures.handler_missing = base;
+    snapshot.failures.validation_failures = base + 1U;
+    snapshot.failures.execution_failures = base + 2U;
+    snapshot.failures.other_failures = base + 3U;
+    return snapshot;
+}
+
 }  // namespace
 
 TEST_CASE("StorageTelemetryRegistry aggregates page managers")
@@ -210,6 +236,50 @@ TEST_CASE("StorageTelemetryRegistry aggregates catalog telemetry")
     REQUIRE(total.aborted_mutations == ((1U + 10U) + (4U + 10U)));
 }
 
+TEST_CASE("StorageTelemetryRegistry aggregates DDL telemetry")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_ddl("ddl_a", [] { return make_ddl_snapshot(1U); });
+    registry.register_ddl("ddl_b", [] { return make_ddl_snapshot(4U); });
+
+    const auto total = registry.aggregate_ddl();
+
+    const auto create_database = static_cast<std::size_t>(ddl::DdlVerb::CreateDatabase);
+    const auto create_table = static_cast<std::size_t>(ddl::DdlVerb::CreateTable);
+
+    REQUIRE(total.verbs[create_database].attempts == ((1U + 1U) + (4U + 1U)));
+    REQUIRE(total.verbs[create_database].successes == ((1U + 2U) + (4U + 2U)));
+    REQUIRE(total.verbs[create_database].failures == ((1U + 0U) + (4U + 0U)));
+    REQUIRE(total.verbs[create_database].total_duration_ns == ((1U + 1U) * 10U + (4U + 1U) * 10U));
+    REQUIRE(total.verbs[create_database].last_duration_ns == ((4U + 1U) * 5U));
+
+    REQUIRE(total.verbs[create_table].attempts == ((1U + 3U) + (4U + 3U)));
+    REQUIRE(total.verbs[create_table].successes == ((1U + 4U) + (4U + 4U)));
+    REQUIRE(total.failures.handler_missing == (1U + 4U));
+    REQUIRE(total.failures.validation_failures == ((1U + 1U) + (4U + 1U)));
+    REQUIRE(total.failures.execution_failures == ((1U + 2U) + (4U + 2U)));
+}
+
+TEST_CASE("StorageTelemetryRegistry visits DDL samplers")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_ddl("ddl_a", [] { return make_ddl_snapshot(2U); });
+    registry.register_ddl("ddl_b", [] { return make_ddl_snapshot(5U); });
+
+    std::vector<std::string> ids;
+    std::vector<ddl::DdlTelemetrySnapshot> snapshots;
+
+    registry.visit_ddl([&](const std::string& id, const ddl::DdlTelemetrySnapshot& snapshot) {
+        ids.push_back(id);
+        snapshots.push_back(snapshot);
+    });
+
+    REQUIRE(ids.size() == 2U);
+    REQUIRE(snapshots.size() == 2U);
+    REQUIRE(std::find(ids.begin(), ids.end(), "ddl_a") != ids.end());
+    REQUIRE(std::find(ids.begin(), ids.end(), "ddl_b") != ids.end());
+}
+
 TEST_CASE("StorageTelemetryRegistry unregisters samplers")
 {
     StorageTelemetryRegistry registry;
@@ -217,19 +287,29 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint_snapshot(1U); });
     registry.register_wal_retention("ret", [] { return make_retention_snapshot(1U); });
     registry.register_catalog("cat", [] { return make_catalog_snapshot(2U); });
+    registry.register_ddl("ddl", [] { return make_ddl_snapshot(3U); });
 
     registry.unregister_page_manager("pm");
     registry.unregister_checkpoint_scheduler("ckpt");
     registry.unregister_wal_retention("ret");
     registry.unregister_catalog("cat");
+    registry.unregister_ddl("ddl");
 
     auto pm_total = registry.aggregate_page_managers();
     auto ckpt_total = registry.aggregate_checkpoint_schedulers();
     auto ret_total = registry.aggregate_wal_retention();
     auto cat_total = registry.aggregate_catalog();
+    auto ddl_total = registry.aggregate_ddl();
 
     REQUIRE(pm_total.initialize.attempts == 0U);
     REQUIRE(ckpt_total.invocations == 0U);
     REQUIRE(ret_total.invocations == 0U);
     REQUIRE(cat_total.cache_hits == 0U);
+    REQUIRE(std::all_of(ddl_total.verbs.begin(), ddl_total.verbs.end(), [](const auto& verb) {
+        return verb.attempts == 0U && verb.successes == 0U && verb.failures == 0U && verb.total_duration_ns == 0U && verb.last_duration_ns == 0U;
+    }));
+    REQUIRE(ddl_total.failures.handler_missing == 0U);
+    REQUIRE(ddl_total.failures.validation_failures == 0U);
+    REQUIRE(ddl_total.failures.execution_failures == 0U);
+    REQUIRE(ddl_total.failures.other_failures == 0U);
 }

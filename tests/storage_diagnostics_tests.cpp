@@ -6,6 +6,7 @@
 #include <string>
 
 using namespace bored::storage;
+namespace ddl = bored::ddl;
 
 namespace {
 
@@ -58,6 +59,31 @@ CatalogTelemetrySnapshot make_catalog(std::uint64_t seed)
     return snapshot;
 }
 
+ddl::DdlTelemetrySnapshot make_ddl(std::uint64_t seed)
+{
+    ddl::DdlTelemetrySnapshot snapshot{};
+    const auto create_table = static_cast<std::size_t>(ddl::DdlVerb::CreateTable);
+    const auto drop_table = static_cast<std::size_t>(ddl::DdlVerb::DropTable);
+
+    snapshot.verbs[create_table].attempts = seed + 1U;
+    snapshot.verbs[create_table].successes = seed + 2U;
+    snapshot.verbs[create_table].failures = seed;
+    snapshot.verbs[create_table].total_duration_ns = (seed + 3U) * 7U;
+    snapshot.verbs[create_table].last_duration_ns = (seed + 4U) * 3U;
+
+    snapshot.verbs[drop_table].attempts = seed + 5U;
+    snapshot.verbs[drop_table].successes = seed + 6U;
+    snapshot.verbs[drop_table].failures = seed + 1U;
+    snapshot.verbs[drop_table].total_duration_ns = (seed + 6U) * 11U;
+    snapshot.verbs[drop_table].last_duration_ns = (seed + 7U) * 5U;
+
+    snapshot.failures.handler_missing = seed;
+    snapshot.failures.validation_failures = seed + 1U;
+    snapshot.failures.execution_failures = seed + 2U;
+    snapshot.failures.other_failures = seed + 3U;
+    return snapshot;
+}
+
 }  // namespace
 
 TEST_CASE("collect_storage_diagnostics aggregates totals and details")
@@ -70,6 +96,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     registry.register_wal_retention("ret_a", [] { return make_retention(3U); });
     registry.register_catalog("cat_a", [] { return make_catalog(1U); });
     registry.register_catalog("cat_b", [] { return make_catalog(4U); });
+    registry.register_ddl("ddl_a", [] { return make_ddl(2U); });
+    registry.register_ddl("ddl_b", [] { return make_ddl(6U); });
 
     const StorageDiagnosticsOptions options{};
     const auto doc = collect_storage_diagnostics(registry, options);
@@ -82,10 +110,16 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.retention.total.pruned_segments == (3U + 2U));
     REQUIRE(doc.catalog.details.size() == 2U);
     REQUIRE(doc.catalog.total.cache_hits == ((1U + 1U) * 10U + (4U + 1U) * 10U));
+    REQUIRE(doc.ddl.details.size() == 2U);
+    const auto create_table = static_cast<std::size_t>(ddl::DdlVerb::CreateTable);
+    REQUIRE(doc.ddl.total.verbs[create_table].attempts == ((2U + 1U) + (6U + 1U)));
+    REQUIRE(doc.ddl.total.failures.execution_failures == ((2U + 2U) + (6U + 2U)));
     REQUIRE(doc.collected_at.time_since_epoch().count() != 0);
 
     REQUIRE(doc.page_managers.details.front().identifier == "pm_a");
     REQUIRE(doc.page_managers.details.back().identifier == "pm_b");
+    REQUIRE(doc.ddl.details.front().identifier == "ddl_a");
+    REQUIRE(doc.ddl.details.back().identifier == "ddl_b");
 }
 
 TEST_CASE("collect_storage_diagnostics honors detail options")
@@ -95,12 +129,14 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(1U); });
     registry.register_wal_retention("ret", [] { return make_retention(1U); });
     registry.register_catalog("cat", [] { return make_catalog(2U); });
+    registry.register_ddl("ddl", [] { return make_ddl(3U); });
 
     StorageDiagnosticsOptions options{};
     options.include_page_manager_details = false;
     options.include_checkpoint_details = false;
     options.include_retention_details = false;
     options.include_catalog_details = false;
+    options.include_ddl_details = false;
 
     const auto doc = collect_storage_diagnostics(registry, options);
 
@@ -108,6 +144,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     REQUIRE(doc.checkpoints.details.empty());
     REQUIRE(doc.retention.details.empty());
     REQUIRE(doc.catalog.details.empty());
+    REQUIRE(doc.ddl.details.empty());
 }
 
 TEST_CASE("storage_diagnostics_to_json serialises expected fields")
@@ -117,6 +154,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(5U); });
     registry.register_wal_retention("ret", [] { return make_retention(7U); });
     registry.register_catalog("cat", [] { return make_catalog(4U); });
+    registry.register_ddl("ddl", [] { return make_ddl(5U); });
 
     const auto doc = collect_storage_diagnostics(registry);
     const auto json = storage_diagnostics_to_json(doc);
@@ -127,5 +165,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"checkpoints\"") != std::string::npos);
     REQUIRE(json.find("\"retention\"") != std::string::npos);
     REQUIRE(json.find("\"catalog\"") != std::string::npos);
+    REQUIRE(json.find("\"ddl\"") != std::string::npos);
     REQUIRE(json.find("\"pruned_segments\":9") != std::string::npos);
+    REQUIRE(json.find("\"create_table\"") != std::string::npos);
 }

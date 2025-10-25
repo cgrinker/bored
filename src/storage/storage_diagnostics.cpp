@@ -1,9 +1,16 @@
 #include "bored/storage/storage_diagnostics.hpp"
 
 #include <algorithm>
+#include <array>
 
 namespace bored::storage {
 namespace {
+
+namespace ddl = bored::ddl;
+
+constexpr std::array<const char*, static_cast<std::size_t>(ddl::DdlVerb::Count)> kDdlVerbNames = {
+    "create_database", "drop_database", "create_schema", "drop_schema", "create_table",
+    "drop_table",     "alter_table",   "create_index",  "drop_index"};
 
 void append_field(std::string& out, const char* name, std::uint64_t value, bool& first)
 {
@@ -169,6 +176,50 @@ void append_catalog_snapshot(std::string& out, const CatalogTelemetrySnapshot& s
     out.push_back('}');
 }
 
+void append_ddl_verb_snapshot(std::string& out, const ddl::DdlVerbTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "attempts", snapshot.attempts, first);
+    append_field(out, "successes", snapshot.successes, first);
+    append_field(out, "failures", snapshot.failures, first);
+    append_field(out, "total_duration_ns", snapshot.total_duration_ns, first);
+    append_field(out, "last_duration_ns", snapshot.last_duration_ns, first);
+    out.push_back('}');
+}
+
+void append_ddl_failures_snapshot(std::string& out, const ddl::DdlFailureTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "handler_missing", snapshot.handler_missing, first);
+    append_field(out, "validation_failures", snapshot.validation_failures, first);
+    append_field(out, "execution_failures", snapshot.execution_failures, first);
+    append_field(out, "other_failures", snapshot.other_failures, first);
+    out.push_back('}');
+}
+
+void append_ddl_snapshot(std::string& out, const ddl::DdlTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    out.append("\"verbs\":{");
+    bool first = true;
+    for (std::size_t i = 0; i < snapshot.verbs.size(); ++i) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('"');
+        out.append(kDdlVerbNames[i]);
+        out.append("\":");
+        append_ddl_verb_snapshot(out, snapshot.verbs[i]);
+    }
+    out.push_back('}');
+    out.append(",\"failures\":");
+    append_ddl_failures_snapshot(out, snapshot.failures);
+    out.push_back('}');
+}
+
 void append_page_manager_section(std::string& out, const StorageDiagnosticsPageManagerSection& section)
 {
     out.push_back('{');
@@ -261,6 +312,29 @@ void append_catalog_section(std::string& out, const StorageDiagnosticsCatalogSec
     out.push_back('}');
 }
 
+void append_ddl_section(std::string& out, const StorageDiagnosticsDdlSection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_ddl_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_ddl_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 }  // namespace
 
 StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryRegistry& registry,
@@ -305,6 +379,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+    document.ddl.total = registry.aggregate_ddl();
+    if (options.include_ddl_details) {
+        registry.visit_ddl([&](const std::string& identifier, const ddl::DdlTelemetrySnapshot& snapshot) {
+            document.ddl.details.push_back(StorageDiagnosticsDdlEntry{identifier, snapshot});
+        });
+        std::sort(document.ddl.details.begin(), document.ddl.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+
     return document;
 }
 
@@ -324,6 +407,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_retention_section(out, document.retention);
     out.append(",\"catalog\":");
     append_catalog_section(out, document.catalog);
+    out.append(",\"ddl\":");
+    append_ddl_section(out, document.ddl);
     out.push_back('}');
     return out;
 }

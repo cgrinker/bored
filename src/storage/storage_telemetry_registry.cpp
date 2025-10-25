@@ -93,6 +93,23 @@ CatalogTelemetrySnapshot& accumulate(CatalogTelemetrySnapshot& target, const Cat
     return target;
 }
 
+ddl::DdlTelemetrySnapshot& accumulate(ddl::DdlTelemetrySnapshot& target, const ddl::DdlTelemetrySnapshot& source)
+{
+    for (std::size_t i = 0; i < target.verbs.size(); ++i) {
+        target.verbs[i].attempts += source.verbs[i].attempts;
+        target.verbs[i].successes += source.verbs[i].successes;
+        target.verbs[i].failures += source.verbs[i].failures;
+        target.verbs[i].total_duration_ns += source.verbs[i].total_duration_ns;
+        target.verbs[i].last_duration_ns = std::max(target.verbs[i].last_duration_ns, source.verbs[i].last_duration_ns);
+    }
+
+    target.failures.handler_missing += source.failures.handler_missing;
+    target.failures.validation_failures += source.failures.validation_failures;
+    target.failures.execution_failures += source.failures.execution_failures;
+    target.failures.other_failures += source.failures.other_failures;
+    return target;
+}
+
 template <typename Snapshot>
 Snapshot aggregate_snapshots(const std::vector<std::function<Snapshot()>>& samplers)
 {
@@ -300,6 +317,57 @@ void StorageTelemetryRegistry::visit_catalog(const CatalogVisitor& visitor) cons
         std::lock_guard guard(mutex_);
         entries.reserve(catalog_samplers_.size());
         for (const auto& [identifier, sampler] : catalog_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_ddl(std::string identifier, DdlSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    ddl_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_ddl(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    ddl_samplers_.erase(identifier);
+}
+
+ddl::DdlTelemetrySnapshot StorageTelemetryRegistry::aggregate_ddl() const
+{
+    std::vector<DdlSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(ddl_samplers_.size());
+        for (const auto& [_, sampler] : ddl_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<ddl::DdlTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_ddl(const DdlVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, DdlSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(ddl_samplers_.size());
+        for (const auto& [identifier, sampler] : ddl_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }
