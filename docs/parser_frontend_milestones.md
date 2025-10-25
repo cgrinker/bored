@@ -26,7 +26,7 @@
 - [x] Capture parser diagnostics for missing keywords and duplicate identifiers.
 - [x] Extend diagnostics with remediation hints and statement context for complex scripts.
 - [x] Translate parser diagnostics to `DdlCommandResponse` severity/hints (warning for user input issues, error for parser bugs).
-- [ ] Extend unit tests with positive/negative coverage for each grammar element.
+- [x] Extend unit tests with positive/negative coverage for each grammar element.
 
 ## Milestone 2: Grammar Infrastructure Hardening (1 sprint)
 - [ ] Introduce error-recovery hooks (synchronise at statement terminators) to continue parsing multi-statement scripts.
