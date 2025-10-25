@@ -23,7 +23,8 @@
 - [x] Implement CREATE/DROP TABLE grammar with column definitions (type literals, `NOT NULL`, default expressions stubbed).
 - [x] Extend CREATE TABLE grammar with column default expressions and inline constraint variants (PRIMARY KEY, UNIQUE).
 - [ ] Support complex column default expressions (function calls, arithmetic) and inline constraint naming.
-- [ ] Capture parser diagnostics: unexpected token, missing keywords, duplicate identifiers.
+- [x] Capture parser diagnostics for missing keywords and duplicate identifiers.
+- [ ] Extend diagnostics with remediation hints and statement context for complex scripts.
 - [ ] Translate parser diagnostics to `DdlCommandResponse` severity/hints (warning for user input issues, error for parser bugs).
 - [ ] Extend unit tests with positive/negative coverage for each grammar element.
 

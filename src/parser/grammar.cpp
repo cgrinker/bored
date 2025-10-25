@@ -2,6 +2,8 @@
 
 #include <tao/pegtl.hpp>
 
+#include <cctype>
+#include <unordered_set>
 #include <utility>
 
 namespace bored::parser {
@@ -318,19 +320,6 @@ struct identifier_action<identifier_rule> {
     }
 };
 
-ParserDiagnostic make_parse_error(const pegtl::parse_error& error)
-{
-    ParserDiagnostic diagnostic{};
-    diagnostic.severity = ParserSeverity::Error;
-    diagnostic.message = error.message();
-    if (!error.positions().empty()) {
-        const auto& position = error.positions().front();
-        diagnostic.line = static_cast<std::size_t>(position.line);
-        diagnostic.column = static_cast<std::size_t>(position.column);
-    }
-    return diagnostic;
-}
-
 std::string trim_copy(std::string_view text)
 {
     const auto first = text.find_first_not_of(" \t\r\n");
@@ -339,6 +328,102 @@ std::string trim_copy(std::string_view text)
     }
     const auto last = text.find_last_not_of(" \t\r\n");
     return std::string{text.substr(first, last - first + 1)};
+}
+
+std::string format_parse_message(std::string_view message)
+{
+    constexpr std::string_view expected_prefix = "expected ";
+    if (message.rfind(expected_prefix, 0) == 0U && message.size() > expected_prefix.size()) {
+        auto detail = message.substr(expected_prefix.size());
+        if (!detail.empty() && detail.front() == '\'' && detail.back() == '\'' && detail.size() > 2) {
+            detail = detail.substr(1, detail.size() - 2);
+        }
+        return "Missing " + std::string{detail};
+    }
+    return std::string{message};
+}
+
+std::string_view extract_token(std::string_view input, std::size_t offset)
+{
+    if (input.empty()) {
+        return {};
+    }
+
+    offset = std::min(offset, input.size() - 1U);
+
+    auto is_separator = [](char ch) {
+        const auto unsigned_ch = static_cast<unsigned char>(ch);
+        return std::isspace(unsigned_ch) != 0 || ch == ';' || ch == ',' || ch == '(' || ch == ')';
+    };
+
+    std::size_t begin = offset;
+    while (begin > 0U && !is_separator(input[begin - 1U])) {
+        --begin;
+    }
+
+    std::size_t end = offset;
+    while (end < input.size() && !is_separator(input[end])) {
+        ++end;
+    }
+
+    return input.substr(begin, end - begin);
+}
+
+ParserDiagnostic make_parse_error(const pegtl::parse_error& error, std::string_view source)
+{
+    ParserDiagnostic diagnostic{};
+    diagnostic.severity = ParserSeverity::Error;
+    diagnostic.message = format_parse_message(error.message());
+
+    if (!error.positions().empty()) {
+        const auto& position = error.positions().front();
+        diagnostic.line = static_cast<std::size_t>(position.line);
+        diagnostic.column = static_cast<std::size_t>(position.column);
+
+        const auto byte_index = static_cast<std::size_t>(position.byte);
+        if (!source.empty() && byte_index < source.size()) {
+            const auto token = trim_copy(extract_token(source, byte_index));
+            if (!token.empty()) {
+                diagnostic.message += " near '" + token + "'";
+            }
+        } else if (byte_index >= source.size()) {
+            diagnostic.message += " at end of input";
+        }
+    }
+
+    return diagnostic;
+}
+
+void append_duplicate_column_diagnostics(const CreateTableStatement& statement,
+                                         std::vector<ParserDiagnostic>& diagnostics)
+{
+    std::unordered_set<std::string> seen{};
+    for (const auto& column : statement.columns) {
+        auto [_, inserted] = seen.insert(column.name.value);
+        if (!inserted) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "Duplicate column name '" + column.name.value + "'";
+            diagnostics.push_back(std::move(diagnostic));
+        }
+    }
+}
+
+void append_duplicate_schema_diagnostics(const DropSchemaStatement& statement,
+                                         std::vector<ParserDiagnostic>& diagnostics)
+{
+    std::unordered_set<std::string> seen{};
+    for (const auto& schema : statement.schemas) {
+        std::string key = schema.database.value.empty() ? schema.name.value
+                                                        : schema.database.value + "." + schema.name.value;
+        auto [_, inserted] = seen.insert(key);
+        if (!inserted) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "Duplicate schema '" + key + "' in DROP SCHEMA list";
+            diagnostics.push_back(std::move(diagnostic));
+        }
+    }
 }
 
 template <typename Rule>
@@ -695,7 +780,7 @@ ParseResult<Identifier> parse_identifier(std::string_view input)
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
-        result.diagnostics.push_back(make_parse_error(error));
+        result.diagnostics.push_back(make_parse_error(error, input));
     }
 
     return result;
@@ -720,7 +805,7 @@ ParseResult<CreateDatabaseStatement> parse_create_database(std::string_view inpu
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
-        result.diagnostics.push_back(make_parse_error(error));
+        result.diagnostics.push_back(make_parse_error(error, input));
     }
 
     return result;
@@ -745,7 +830,7 @@ ParseResult<DropDatabaseStatement> parse_drop_database(std::string_view input)
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
-        result.diagnostics.push_back(make_parse_error(error));
+        result.diagnostics.push_back(make_parse_error(error, input));
     }
 
     return result;
@@ -770,7 +855,7 @@ ParseResult<CreateSchemaStatement> parse_create_schema(std::string_view input)
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
-        result.diagnostics.push_back(make_parse_error(error));
+        result.diagnostics.push_back(make_parse_error(error, input));
     }
 
     return result;
@@ -785,6 +870,7 @@ ParseResult<DropSchemaStatement> parse_drop_schema(std::string_view input)
     try {
         const auto parsed = pegtl::parse<drop_schema_grammar, drop_schema_action>(in, statement);
         if (parsed) {
+            append_duplicate_schema_diagnostics(statement, result.diagnostics);
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
@@ -795,7 +881,7 @@ ParseResult<DropSchemaStatement> parse_drop_schema(std::string_view input)
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
-        result.diagnostics.push_back(make_parse_error(error));
+        result.diagnostics.push_back(make_parse_error(error, input));
     }
 
     return result;
@@ -810,6 +896,7 @@ ParseResult<CreateTableStatement> parse_create_table(std::string_view input)
     try {
         const auto parsed = pegtl::parse<create_table_grammar, create_table_action>(in, statement);
         if (parsed) {
+            append_duplicate_column_diagnostics(statement, result.diagnostics);
             result.ast = std::move(statement);
         } else {
             ParserDiagnostic diagnostic{};
@@ -820,7 +907,7 @@ ParseResult<CreateTableStatement> parse_create_table(std::string_view input)
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
-        result.diagnostics.push_back(make_parse_error(error));
+        result.diagnostics.push_back(make_parse_error(error, input));
     }
 
     return result;
@@ -845,7 +932,7 @@ ParseResult<DropTableStatement> parse_drop_table(std::string_view input)
             result.diagnostics.push_back(std::move(diagnostic));
         }
     } catch (const pegtl::parse_error& error) {
-        result.diagnostics.push_back(make_parse_error(error));
+        result.diagnostics.push_back(make_parse_error(error, input));
     }
 
     return result;

@@ -97,3 +97,13 @@ TEST_CASE("parse_drop_schema supports restrict and multiple targets")
     CHECK(result.ast->schemas[1].name.value == "temp");
     CHECK(result.ast->behavior == DropSchemaStatement::Behavior::Restrict);
 }
+
+TEST_CASE("parse_drop_schema reports duplicate targets")
+{
+    const auto result = parse_drop_schema("DROP SCHEMA analytics.stage, analytics.stage");
+    REQUIRE(result.success());
+    REQUIRE(result.ast.has_value());
+    REQUIRE_FALSE(result.diagnostics.empty());
+    CHECK(result.diagnostics[0].severity == ParserSeverity::Error);
+    CHECK(result.diagnostics[0].message == "Duplicate schema 'analytics.stage' in DROP SCHEMA list");
+}

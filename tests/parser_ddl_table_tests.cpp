@@ -77,6 +77,16 @@ TEST_CASE("parse_create_table rejects missing column list")
     REQUIRE_FALSE(result.diagnostics.empty());
 }
 
+TEST_CASE("parse_create_table reports duplicate column names")
+{
+    const auto result = parse_create_table("CREATE TABLE accounts (id INT, id INT);");
+    REQUIRE(result.success());
+    REQUIRE(result.ast.has_value());
+    REQUIRE_FALSE(result.diagnostics.empty());
+    CHECK(result.diagnostics[0].severity == ParserSeverity::Error);
+    CHECK(result.diagnostics[0].message == "Duplicate column name 'id'");
+}
+
 TEST_CASE("parse_drop_table handles cascade clause")
 {
     const auto result = parse_drop_table("DROP TABLE IF EXISTS analytics.events CASCADE;");
