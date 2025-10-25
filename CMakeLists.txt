@@ -134,6 +134,8 @@ if(BORED_ENABLE_TESTS)
         target_sources(${PROJECT_NAME}_tests
             PRIVATE
                 tests/parser_smoke_tests.cpp
+                tests/parser_ddl_database_tests.cpp
+                tests/parser_ddl_schema_tests.cpp
         )
     endif()
 

@@ -32,5 +32,9 @@ struct ParseResult final {
 };
 
 ParseResult<Identifier> parse_identifier(std::string_view input);
+ParseResult<CreateDatabaseStatement> parse_create_database(std::string_view input);
+ParseResult<DropDatabaseStatement> parse_drop_database(std::string_view input);
+ParseResult<CreateSchemaStatement> parse_create_schema(std::string_view input);
+ParseResult<DropSchemaStatement> parse_drop_schema(std::string_view input);
 
 }  // namespace bored::parser

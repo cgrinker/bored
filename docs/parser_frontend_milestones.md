@@ -14,8 +14,10 @@
 - [x] Wire parser build flag (`BORED_ENABLE_PARSER`) so downstream consumers can opt-in during bring-up.
 
 ## Milestone 1: DDL Statement Grammar (1 sprint)
-- [ ] Implement CREATE/DROP DATABASE grammar and AST nodes.
-- [ ] Implement CREATE/DROP SCHEMA grammar and AST nodes (including `IF NOT EXISTS` / `IF EXISTS`).
+- [x] Implement CREATE/DROP DATABASE grammar and AST nodes.
+- [x] Implement CREATE/DROP SCHEMA grammar and AST nodes (including `IF NOT EXISTS` / `IF EXISTS`).
+- [ ] Extend CREATE SCHEMA grammar with `AUTHORIZATION` and embedded statement support.
+- [ ] Extend DROP SCHEMA grammar with `RESTRICT` handling and multiple schema targets.
 - [ ] Implement CREATE/DROP TABLE grammar with column definitions (type literals, `NOT NULL`, default expressions stubbed).
 - [ ] Capture parser diagnostics: unexpected token, missing keywords, duplicate identifiers.
 - [ ] Translate parser diagnostics to `DdlCommandResponse` severity/hints (warning for user input issues, error for parser bugs).
