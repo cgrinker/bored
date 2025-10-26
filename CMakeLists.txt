@@ -56,6 +56,7 @@ if(BORED_ENABLE_PARSER)
             src/parser/ddl_command_builder.cpp
             src/parser/parser_telemetry.cpp
             src/parser/ddl_script_executor.cpp
+            src/parser/relational_ast.cpp
     )
     target_link_libraries(${PROJECT_NAME}_lib
         PUBLIC
@@ -149,6 +150,7 @@ if(BORED_ENABLE_TESTS)
                 tests/parser_diagnostics_tests.cpp
                 tests/parser_telemetry_tests.cpp
                 tests/parser_ddl_integration_tests.cpp
+        tests/parser_relational_ast_tests.cpp
         )
     endif()
 

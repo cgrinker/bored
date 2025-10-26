@@ -32,7 +32,7 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
      - Implement modular grammars (lexical rules, expressions, statements) with PEGTL actions building AST nodes.
      - Create parser error reporting aligned with diagnostic surfaces.
 
-4. **AST & Logical IR Layer**
+4. **AST & Logical IR Layer** _(Milestones tracked in [ast_logical_ir_design.md](ast_logical_ir_design.md))_
    - **Responsibilities:** Represent parsed SQL in a structured, type-safe form for planning and optimization.
    - **Prerequisites:** Parser front-end to construct AST nodes; catalog metadata types for semantic annotations.
    - **Key Tasks:**
