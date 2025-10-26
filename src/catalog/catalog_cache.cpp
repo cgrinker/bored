@@ -34,6 +34,11 @@ void CatalogCache::configure(const Config& config)
     evict_if_needed_locked();
 }
 
+void CatalogCache::reset()
+{
+    reset(Config{});
+}
+
 void CatalogCache::reset(const Config& config)
 {
     std::lock_guard guard(mutex_);

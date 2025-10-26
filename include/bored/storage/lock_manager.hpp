@@ -17,7 +17,8 @@ public:
         bool enable_reentrancy = true;
     };
 
-    explicit LockManager(Config config = {});
+    LockManager();
+    explicit LockManager(Config config);
 
     LockManager(const LockManager&) = delete;
     LockManager& operator=(const LockManager&) = delete;

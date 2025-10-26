@@ -122,6 +122,7 @@ Redo records always run in log order to rebuild page images, while undo records 
   };
   ```
   Concrete `IoRingDispatcher` (Windows) and `IoUringDispatcher` (Linux) implementations translate descriptors into native SQE submissions and monitor CQEs to fulfil the returned futures/promises.
+- **macOS backend:** `DispatchAsyncIo` binds the same interface to Grand Central Dispatch queues, throttles concurrency with semaphores, performs `pread`/`pwrite` under the covers, and elevates durability guarantees with either `fsync` or `fcntl(F_FULLFSYNC)` depending on `AsyncIoConfig::use_full_fsync` (default controllable via `BORED_STORAGE_PREFER_FULL_FSYNC`).
 - **Factory selection:** `create_async_io()` inspects the `AsyncIoBackend` hint in `AsyncIoConfig` (`Auto`, `ThreadPool`, `WindowsIoRing`, `LinuxIoUring`). It instantiates the requested backend when available, otherwise falls back to the portable thread-pool implementation so the storage layer stays asynchronous on every platform today.
 - **Threading model:** A dedicated dispatcher thread owns the submission/completion queues. Storage components (buffer manager, WAL writer, checkpoint worker) run on separate threads and await their futures. This enables non-blocking prefetching, batched WAL writes, and overlapping flushes.
 - **Scheduling policy:**
@@ -149,6 +150,8 @@ Deferred items covering benchmark automation and telemetry surfaces are tracked 
   - Capture and publish latch contention, checkpoint latency, and retention activity metrics for operators and regression dashboards.
 6. **Benchmarking & Tooling** (Later)
   - Establish reproducible benchmarks for FSM refresh, overflow replay, and retention throughput; finalise operational runbooks and visual documentation.
+- **Async IO backlog: macOS descriptor cache**
+  - Extend `DispatchAsyncIo` with a small LRU of open descriptors/dispatch channels so repeated WAL appends skip `open`/`close`, defer `fsync`/`F_FULLFSYNC` to flush boundaries, and expose cache telemetry (hits/misses/evictions).
 - **Deferred: Linux io_uring backend roadmap**
   - Target liburing 2.x to mirror the Windows IoRing dispatcher with queue-depth aware submission, per-file-class backpressure, and dsync-aware flush handling.
   - Translate Linux `io_uring_cqe::res` results into `std::error_code` values using `std::system_category()` while preserving errno semantics.

@@ -93,3 +93,56 @@ TEST_CASE("Async IO returns error when file missing")
     REQUIRE(result.status == std::make_error_code(std::errc::no_such_file_or_directory));
     io->shutdown();
 }
+
+#if defined(__APPLE__)
+
+TEST_CASE("Dispatch async IO writes and reads data on macOS")
+{
+    const auto path = temp_file_path();
+    AsyncIoConfig config{};
+    config.queue_depth = 8U;
+    config.shutdown_timeout = std::chrono::milliseconds{2000};
+    config.backend = AsyncIoBackend::MacDispatch;
+    config.use_full_fsync = false;
+    auto io = bored::storage::create_async_io(config);
+    REQUIRE(io);
+
+    constexpr std::string_view payload = "dispatch-async-io";
+    std::array<std::byte, payload.size()> write_buffer{};
+    std::transform(payload.begin(), payload.end(), write_buffer.begin(), [](char ch) {
+        return std::byte(static_cast<unsigned char>(ch));
+    });
+
+    WriteRequest write_req{};
+    write_req.path = path;
+    write_req.offset = 0U;
+    write_req.file_class = FileClass::WriteAheadLog;
+    write_req.data = write_buffer.data();
+    write_req.size = write_buffer.size();
+    write_req.flags = IoFlag::Dsync;
+
+    auto write_result = io->submit_write(write_req).get();
+    REQUIRE_FALSE(write_result.status);
+    REQUIRE(write_result.bytes_transferred == write_buffer.size());
+
+    auto flush_result = io->flush(FileClass::WriteAheadLog).get();
+    REQUIRE_FALSE(flush_result.status);
+
+    std::array<std::byte, payload.size()> read_buffer{};
+    ReadRequest read_req{};
+    read_req.path = path;
+    read_req.offset = 0U;
+    read_req.file_class = FileClass::WriteAheadLog;
+    read_req.data = read_buffer.data();
+    read_req.size = read_buffer.size();
+
+    auto read_result = io->submit_read(read_req).get();
+    REQUIRE_FALSE(read_result.status);
+    REQUIRE(read_result.bytes_transferred == read_buffer.size());
+    REQUIRE(std::equal(read_buffer.begin(), read_buffer.end(), write_buffer.begin(), write_buffer.end()));
+
+    io->shutdown();
+    std::filesystem::remove(path);
+}
+
+#endif

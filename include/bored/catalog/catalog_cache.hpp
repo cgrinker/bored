@@ -43,7 +43,8 @@ public:
     static CatalogCache& instance();
 
     void configure(const Config& config);
-    void reset(const Config& config = {});
+    void reset();
+    void reset(const Config& config);
 
     [[nodiscard]] std::shared_ptr<const CachedRelation> materialize(RelationId relation_id,
                                                                     const RelationScanner& scanner);

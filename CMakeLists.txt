@@ -91,6 +91,7 @@ target_link_libraries(${PROJECT_NAME}
     ${PROJECT_NAME}_lib
 )
 
+
 option(BORED_ENABLE_TESTS "Build and enable tests" ON)
 option(BORED_ENABLE_BENCHMARKS "Build storage benchmarking harness" ON)
 

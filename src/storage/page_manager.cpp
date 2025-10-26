@@ -131,6 +131,11 @@ void PageManager::OperationScope::set_success(bool value) noexcept
     success_ = value;
 }
 
+PageManager::PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer)
+    : PageManager(fsm, std::move(wal_writer), Config{})
+{
+}
+
 PageManager::PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer, Config config)
     : fsm_{fsm}
     , wal_writer_{std::move(wal_writer)}

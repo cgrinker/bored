@@ -4,6 +4,7 @@
 #include "bored/storage/wal_format.hpp"
 
 #include <algorithm>
+#include <utility>
 
 namespace bored::storage {
 
@@ -17,6 +18,16 @@ namespace {
 }
 
 }  // namespace
+
+CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager)
+    : CheckpointScheduler(std::move(checkpoint_manager), Config{}, RetentionHook{})
+{
+}
+
+CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager, Config config)
+    : CheckpointScheduler(std::move(checkpoint_manager), std::move(config), RetentionHook{})
+{
+}
 
 CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager,
                                          Config config,

@@ -60,7 +60,8 @@ public:
         std::vector<WalCompactionEntry> relocations{};
     };
 
-    PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer, Config config = {});
+    PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer);
+    PageManager(FreeSpaceMap* fsm, std::shared_ptr<WalWriter> wal_writer, Config config);
     ~PageManager();
 
     PageManager(const PageManager&) = delete;

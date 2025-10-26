@@ -40,9 +40,11 @@ public:
     using SnapshotProvider = std::function<std::error_code(CheckpointSnapshot&)>;
     using RetentionHook = std::function<std::error_code(const WalRetentionConfig&, std::uint64_t, WalRetentionStats*)>;
 
+    CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager);
+    CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager, Config config);
     CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager,
-                        Config config = {},
-                        RetentionHook retention_hook = {});
+                        Config config,
+                        RetentionHook retention_hook);
     ~CheckpointScheduler();
 
     [[nodiscard]] std::error_code maybe_run(std::chrono::steady_clock::time_point now,

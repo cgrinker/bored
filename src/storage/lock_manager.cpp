@@ -11,6 +11,11 @@ namespace {
 
 }  // namespace
 
+LockManager::LockManager()
+    : LockManager(Config{})
+{
+}
+
 LockManager::LockManager(Config config)
     : config_{config}
 {

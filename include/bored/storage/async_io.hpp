@@ -63,14 +63,20 @@ enum class AsyncIoBackend : std::uint8_t {
 	Auto,
 	ThreadPool,
 	WindowsIoRing,
-	LinuxIoUring
+	LinuxIoUring,
+	MacDispatch
 };
+
+#ifndef BORED_STORAGE_PREFER_FULL_FSYNC
+#    define BORED_STORAGE_PREFER_FULL_FSYNC 1
+#endif
 
 struct AsyncIoConfig {
 	std::size_t worker_threads = 4U;
 	std::size_t queue_depth = 128U;
 	std::chrono::milliseconds shutdown_timeout{1000};
 	AsyncIoBackend backend = AsyncIoBackend::Auto;
+	bool use_full_fsync = BORED_STORAGE_PREFER_FULL_FSYNC != 0;
 };
 
 class AsyncIo {

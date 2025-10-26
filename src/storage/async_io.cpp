@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -17,6 +18,14 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+
+#if defined(__APPLE__)
+#    include <dispatch/dispatch.h>
+#    include <fcntl.h>
+#    include <sys/stat.h>
+#    include <sys/types.h>
+#    include <unistd.h>
+#endif
 
 #if defined(_WIN32)
 #    ifndef NOMINMAX
@@ -41,6 +50,9 @@
 namespace bored::storage {
 
 namespace {
+
+constexpr std::size_t kFileClassCount = static_cast<std::size_t>(FileClass::WriteAheadLog) + 1U;
+static_assert(kFileClassCount >= 2U, "Unexpected FileClass enumeration ordering");
 
 IoResult perform_read(const ReadRequest& request)
 {
@@ -235,6 +247,362 @@ private:
     std::condition_variable inflight_cv_{};
     std::size_t inflight_operations_ = 0U;
 };
+
+#if defined(__APPLE__)
+
+class DispatchAsyncIo final : public AsyncIo {
+public:
+    explicit DispatchAsyncIo(const AsyncIoConfig& config)
+        : config_{config}
+    {
+        const auto depth = std::max<std::size_t>(1U, config_.queue_depth);
+        queue_ = dispatch_queue_create("bored.storage.asyncio.dispatch", DISPATCH_QUEUE_CONCURRENT);
+        slots_ = dispatch_semaphore_create(static_cast<long>(depth));
+        if (queue_ == nullptr || slots_ == nullptr) {
+            if (queue_ != nullptr) {
+                dispatch_release(queue_);
+                queue_ = nullptr;
+            }
+            if (slots_ != nullptr) {
+                dispatch_release(slots_);
+                slots_ = nullptr;
+            }
+            throw std::system_error(std::make_error_code(std::errc::not_enough_memory),
+                                    "Failed to create dispatch async IO resources");
+        }
+        running_.store(true, std::memory_order_release);
+    }
+
+    ~DispatchAsyncIo() override
+    {
+        shutdown();
+        if (queue_ != nullptr) {
+            dispatch_release(queue_);
+            queue_ = nullptr;
+        }
+        if (slots_ != nullptr) {
+            dispatch_release(slots_);
+            slots_ = nullptr;
+        }
+    }
+
+    std::future<IoResult> submit_read(ReadRequest request) override
+    {
+        if (request.data == nullptr || request.size == 0U) {
+            return invalid_argument_future();
+        }
+        return enqueue<ReadRequest, DispatchReadContext, &DispatchAsyncIo::dispatch_read_trampoline>(std::move(request));
+    }
+
+    std::future<IoResult> submit_write(WriteRequest request) override
+    {
+        if (request.data == nullptr || request.size == 0U) {
+            return invalid_argument_future();
+        }
+        return enqueue<WriteRequest, DispatchWriteContext, &DispatchAsyncIo::dispatch_write_trampoline>(std::move(request));
+    }
+
+    std::future<IoResult> flush(FileClass file_class) override
+    {
+        return std::async(std::launch::async, [this, file_class]() {
+            IoResult result{};
+            std::unique_lock lock(inflight_mutex_);
+            const auto index = class_index(file_class);
+            auto ready = [this, index]() {
+                const auto running = running_.load(std::memory_order_acquire);
+                if (index >= inflight_by_class_.size()) {
+                    return true;
+                }
+                return inflight_by_class_[index] == 0U || !running;
+            };
+
+            if (config_.shutdown_timeout.count() > 0) {
+                if (!inflight_cv_.wait_for(lock, config_.shutdown_timeout, ready)) {
+                    result.status = std::make_error_code(std::errc::timed_out);
+                    return result;
+                }
+            } else {
+                inflight_cv_.wait(lock, ready);
+            }
+
+            if (!running_.load(std::memory_order_acquire) && index < inflight_by_class_.size()
+                && inflight_by_class_[index] != 0U) {
+                result.status = std::make_error_code(std::errc::operation_canceled);
+            }
+            return result;
+        });
+    }
+
+    void shutdown() override
+    {
+        bool expected = true;
+        if (!running_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        inflight_cv_.notify_all();
+
+        if (queue_ != nullptr) {
+            dispatch_barrier_sync_f(queue_, nullptr, &DispatchAsyncIo::barrier_noop);
+        }
+
+        std::unique_lock lock(inflight_mutex_);
+        if (config_.shutdown_timeout.count() > 0) {
+            inflight_cv_.wait_for(lock, config_.shutdown_timeout, [this]() {
+                return inflight_total_ == 0U;
+            });
+        } else {
+            inflight_cv_.wait(lock, [this]() {
+                return inflight_total_ == 0U;
+            });
+        }
+    }
+
+private:
+    struct DispatchOperationBase {
+        DispatchAsyncIo* self = nullptr;
+        std::shared_ptr<std::promise<IoResult>> promise{};
+        std::size_t class_index = 0U;
+    };
+
+    struct DispatchReadContext : DispatchOperationBase {
+        ReadRequest request{};
+    };
+
+    struct DispatchWriteContext : DispatchOperationBase {
+        WriteRequest request{};
+    };
+
+    template <typename Request, typename Context, void (*Trampoline)(void*)>
+    std::future<IoResult> enqueue(Request request)
+    {
+        if (!running_.load(std::memory_order_acquire)) {
+            return cancelled_future();
+        }
+
+        if (slots_ != nullptr) {
+            dispatch_semaphore_wait(slots_, DISPATCH_TIME_FOREVER);
+            if (!running_.load(std::memory_order_acquire)) {
+                dispatch_semaphore_signal(slots_);
+                return cancelled_future();
+            }
+        }
+
+        auto promise = std::make_shared<std::promise<IoResult>>();
+        auto future = promise->get_future();
+        const auto index = class_index(request.file_class);
+
+        {
+            std::lock_guard guard(inflight_mutex_);
+            ++inflight_total_;
+            if (index < inflight_by_class_.size()) {
+                ++inflight_by_class_[index];
+            }
+        }
+
+        auto* context = new Context{};
+        context->self = this;
+        context->promise = std::move(promise);
+        context->class_index = index;
+        context->request = std::move(request);
+
+        dispatch_async_f(queue_, context, Trampoline);
+
+        return future;
+    }
+
+    static void dispatch_read_trampoline(void* raw)
+    {
+        auto* context = static_cast<DispatchReadContext*>(raw);
+        context->self->process_read(*context);
+        delete context;
+    }
+
+    static void dispatch_write_trampoline(void* raw)
+    {
+        auto* context = static_cast<DispatchWriteContext*>(raw);
+        context->self->process_write(*context);
+        delete context;
+    }
+
+    static void barrier_noop(void*) {}
+
+    void process_read(DispatchReadContext& context)
+    {
+        auto result = perform_read_request(context.request);
+        complete_operation(context.class_index, std::move(context.promise), result);
+    }
+
+    void process_write(DispatchWriteContext& context)
+    {
+        auto result = perform_write_request(context.request);
+        complete_operation(context.class_index, std::move(context.promise), result);
+    }
+
+    IoResult perform_read_request(const ReadRequest& request)
+    {
+        IoResult result{};
+        if (request.data == nullptr || request.size == 0U) {
+            result.status = std::make_error_code(std::errc::invalid_argument);
+            return result;
+        }
+
+        const auto path_native = request.path.native();
+        const int fd = open(path_native.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            const int open_error = errno;
+            result.status = std::error_code(open_error, std::generic_category());
+            return result;
+        }
+
+        std::size_t total_read = 0U;
+        std::size_t remaining = request.size;
+        const auto base_offset = static_cast<off_t>(request.offset);
+
+        while (remaining > 0U) {
+            const auto current_offset = base_offset + static_cast<off_t>(total_read);
+            const auto chunk = std::min<std::size_t>(remaining, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+            const ssize_t read_count = pread(fd, request.data + total_read, chunk, current_offset);
+            if (read_count < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                result.status = std::error_code(errno, std::generic_category());
+                break;
+            }
+            if (read_count == 0) {
+                break;
+            }
+            total_read += static_cast<std::size_t>(read_count);
+            remaining -= static_cast<std::size_t>(read_count);
+        }
+
+        if (close(fd) != 0 && !result.status) {
+            const int close_error = errno;
+            result.status = std::error_code(close_error, std::generic_category());
+        }
+
+        result.bytes_transferred = total_read;
+        return result;
+    }
+
+    IoResult perform_write_request(const WriteRequest& request)
+    {
+        IoResult result{};
+        if (request.data == nullptr || request.size == 0U) {
+            result.status = std::make_error_code(std::errc::invalid_argument);
+            return result;
+        }
+
+        const auto path_native = request.path.native();
+        const int fd = open(path_native.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+        if (fd < 0) {
+            const int open_error = errno;
+            result.status = std::error_code(open_error, std::generic_category());
+            return result;
+        }
+
+        std::size_t total_written = 0U;
+        std::size_t remaining = request.size;
+        const auto base_offset = static_cast<off_t>(request.offset);
+
+        while (remaining > 0U) {
+            const auto current_offset = base_offset + static_cast<off_t>(total_written);
+            const auto chunk = std::min<std::size_t>(remaining, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+            const ssize_t write_count = pwrite(fd, request.data + total_written, chunk, current_offset);
+            if (write_count < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                result.status = std::error_code(errno, std::generic_category());
+                break;
+            }
+            total_written += static_cast<std::size_t>(write_count);
+            remaining -= static_cast<std::size_t>(write_count);
+        }
+
+        if (!result.status && any(request.flags & IoFlag::Dsync)) {
+            if (config_.use_full_fsync) {
+                if (fcntl(fd, F_FULLFSYNC) != 0) {
+                    const int sync_error = errno;
+                    result.status = std::error_code(sync_error, std::generic_category());
+                }
+            } else {
+                if (fsync(fd) != 0) {
+                    const int sync_error = errno;
+                    result.status = std::error_code(sync_error, std::generic_category());
+                }
+            }
+        }
+
+        if (close(fd) != 0 && !result.status) {
+            const int close_error = errno;
+            result.status = std::error_code(close_error, std::generic_category());
+        }
+
+        result.bytes_transferred = total_written;
+        return result;
+    }
+
+    void complete_operation(std::size_t class_index, std::shared_ptr<std::promise<IoResult>> promise, IoResult result)
+    {
+        if (promise) {
+            promise->set_value(result);
+        }
+
+        if (slots_ != nullptr) {
+            dispatch_semaphore_signal(slots_);
+        }
+
+        {
+            std::lock_guard guard(inflight_mutex_);
+            if (inflight_total_ > 0U) {
+                --inflight_total_;
+            }
+            if (class_index < inflight_by_class_.size() && inflight_by_class_[class_index] > 0U) {
+                --inflight_by_class_[class_index];
+            }
+        }
+        inflight_cv_.notify_all();
+    }
+
+    static std::future<IoResult> invalid_argument_future()
+    {
+        std::promise<IoResult> promise;
+        auto future = promise.get_future();
+        IoResult result{};
+        result.status = std::make_error_code(std::errc::invalid_argument);
+        promise.set_value(result);
+        return future;
+    }
+
+    static std::future<IoResult> cancelled_future()
+    {
+        std::promise<IoResult> promise;
+        auto future = promise.get_future();
+        IoResult result{};
+        result.status = std::make_error_code(std::errc::operation_canceled);
+        promise.set_value(result);
+        return future;
+    }
+
+    static constexpr std::size_t class_index(FileClass file_class)
+    {
+        return static_cast<std::size_t>(file_class);
+    }
+
+    AsyncIoConfig config_{};
+    dispatch_queue_t queue_ = nullptr;
+    dispatch_semaphore_t slots_ = nullptr;
+    std::atomic<bool> running_{false};
+
+    std::mutex inflight_mutex_{};
+    std::condition_variable inflight_cv_{};
+    std::array<std::size_t, kFileClassCount> inflight_by_class_{};
+    std::size_t inflight_total_ = 0U;
+};
+
+#endif  // defined(__APPLE__)
 
 #if BORED_STORAGE_HAVE_IORING
 
@@ -844,37 +1212,50 @@ std::unique_ptr<AsyncIo> create_platform_async_io(const AsyncIoConfig& config)
         case AsyncIoBackend::ThreadPool:
             return nullptr;
         case AsyncIoBackend::WindowsIoRing:
-        case AsyncIoBackend::Auto:
 #if BORED_STORAGE_HAVE_IORING
-            try {
-                return std::make_unique<IoRingDispatcher>(config);
-            } catch (const std::system_error&) {
-                if (config.backend == AsyncIoBackend::WindowsIoRing) {
-                    throw;
-                }
-                return nullptr;
-            }
+            return std::make_unique<IoRingDispatcher>(config);
 #else
-                        std::cout << "[ioring-dispatcher] PopIoRingCompletion failed hr=" << std::hex << hr << std::dec << std::endl;
-            if (config.backend == AsyncIoBackend::WindowsIoRing) {
-                throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
-                                        "Windows IORing not available in this build");
-            }
-            return nullptr;
+            throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
+                                    "Windows IORing not available in this build");
 #endif
         case AsyncIoBackend::LinuxIoUring:
-        default:
 #if defined(__linux__)
             // TODO: Provide IoUringDispatcher implementation rooted in liburing once available.
             return nullptr;
 #else
-            if (config.backend == AsyncIoBackend::LinuxIoUring) {
-                throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
-                                        "Linux io_uring not available on this platform");
-            }
-            return nullptr;
+            throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
+                                    "Linux io_uring not available on this platform");
 #endif
+        case AsyncIoBackend::MacDispatch:
+#if defined(__APPLE__)
+            return std::make_unique<DispatchAsyncIo>(config);
+#else
+            throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
+                                    "macOS dispatch backend not available on this platform");
+#endif
+        case AsyncIoBackend::Auto:
+        default:
+            break;
     }
+
+#if defined(__APPLE__)
+    try {
+        return std::make_unique<DispatchAsyncIo>(config);
+    } catch (const std::system_error&) {
+    }
+#endif
+
+#if BORED_STORAGE_HAVE_IORING
+    try {
+        return std::make_unique<IoRingDispatcher>(config);
+    } catch (const std::system_error&) {
+    }
+#endif
+
+#if defined(__linux__)
+    // TODO: Provide IoUringDispatcher implementation rooted in liburing once available.
+#endif
+    return nullptr;
 }
 
 }  // namespace
