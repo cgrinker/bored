@@ -39,6 +39,9 @@ struct semicolon : pegtl::one<';'> {
 struct dot : pegtl::one<'.'> {
 };
 
+struct comma : pegtl::one<','> {
+};
+
 template <char... Cs>
 struct keyword : pegtl::seq<pegtl::istring<Cs...>, pegtl::not_at<identifier_tail>> {
 };
@@ -59,6 +62,45 @@ struct kw_table : keyword<'T', 'A', 'B', 'L', 'E'> {
 };
 
 struct kw_view : keyword<'V', 'I', 'E', 'W'> {
+};
+
+struct kw_select : keyword<'S', 'E', 'L', 'E', 'C', 'T'> {
+};
+
+struct kw_distinct : keyword<'D', 'I', 'S', 'T', 'I', 'N', 'C', 'T'> {
+};
+
+struct kw_from : keyword<'F', 'R', 'O', 'M'> {
+};
+
+struct kw_where : keyword<'W', 'H', 'E', 'R', 'E'> {
+};
+
+struct kw_order : keyword<'O', 'R', 'D', 'E', 'R'> {
+};
+
+struct kw_by : keyword<'B', 'Y'> {
+};
+
+struct kw_limit : keyword<'L', 'I', 'M', 'I', 'T'> {
+};
+
+struct kw_offset : keyword<'O', 'F', 'F', 'S', 'E', 'T'> {
+};
+
+struct kw_true_literal : keyword<'T', 'R', 'U', 'E'> {
+};
+
+struct kw_false_literal : keyword<'F', 'A', 'L', 'S', 'E'> {
+};
+
+struct kw_null_literal : keyword<'N', 'U', 'L', 'L'> {
+};
+
+struct kw_asc : keyword<'A', 'S', 'C'> {
+};
+
+struct kw_desc : keyword<'D', 'E', 'S', 'C'> {
 };
 
 struct kw_as : keyword<'A', 'S'> {
@@ -1102,6 +1144,652 @@ struct drop_table_action<cascade_rule> {
     }
 };
 
+struct SelectParseState final {
+    relational::AstArena* arena = nullptr;
+    relational::SelectStatement* statement = nullptr;
+    relational::QuerySpecification* query = nullptr;
+    relational::SelectItem* current_select_item = nullptr;
+    relational::TableReference* current_table = nullptr;
+    relational::OrderByItem* current_order_item = nullptr;
+    relational::LimitClause* limit_clause = nullptr;
+    std::vector<relational::Expression*> expression_stack{};
+    relational::BinaryOperator pending_operator = relational::BinaryOperator::Equal;
+    bool has_pending_operator = false;
+    relational::QualifiedName star_qualifier{};
+};
+
+Identifier make_identifier(std::string_view text)
+{
+    Identifier identifier{};
+    identifier.value = trim_copy(text);
+    return identifier;
+}
+
+relational::QualifiedName make_qualified_name(std::string_view text)
+{
+    relational::QualifiedName name{};
+    std::string part{};
+    for (const char ch : text) {
+        if (ch == '.') {
+            if (!part.empty()) {
+                Identifier identifier{};
+                identifier.value = part;
+                name.parts.push_back(std::move(identifier));
+                part.clear();
+            }
+            continue;
+        }
+
+        if (!std::isspace(static_cast<unsigned char>(ch))) {
+            part.push_back(ch);
+        }
+    }
+
+    if (!part.empty()) {
+        Identifier identifier{};
+        identifier.value = std::move(part);
+        name.parts.push_back(std::move(identifier));
+    }
+
+    return name;
+}
+
+std::string unescape_string_literal(std::string_view text)
+{
+    std::string result{};
+    if (text.size() >= 2U && text.front() == '\'' && text.back() == '\'') {
+        for (std::size_t index = 1U; index + 1U < text.size(); ++index) {
+            const char ch = text[index];
+            if (ch == '\'' && index + 1U < text.size() - 1U && text[index + 1U] == '\'') {
+                result.push_back('\'');
+                ++index;
+            } else {
+                result.push_back(ch);
+            }
+        }
+        return result;
+    }
+
+    result.assign(text.begin(), text.end());
+    return result;
+}
+
+void push_expression(SelectParseState& state, relational::Expression& expression)
+{
+    state.expression_stack.push_back(&expression);
+}
+
+relational::Expression* pop_expression(SelectParseState& state)
+{
+    if (state.expression_stack.empty()) {
+        return nullptr;
+    }
+
+    auto* expression = state.expression_stack.back();
+    state.expression_stack.pop_back();
+    return expression;
+}
+
+struct select_identifier_rule
+    : pegtl::seq<identifier_rule,
+                 pegtl::star<pegtl::seq<optional_space, dot, optional_space, identifier_rule>>> {
+};
+
+struct select_column_identifier_rule : select_identifier_rule {
+};
+
+struct select_table_identifier_rule : select_identifier_rule {
+};
+
+struct select_star_qualifier_rule : select_identifier_rule {
+};
+
+struct select_alias_identifier_rule : identifier_rule {
+};
+
+struct select_table_alias_identifier_rule : identifier_rule {
+};
+
+struct select_string_literal_rule : expr::string_literal {
+};
+
+struct select_numeric_literal_rule : expr::numeric_literal {
+};
+
+struct select_boolean_true_rule : kw_true_literal {
+};
+
+struct select_boolean_false_rule : kw_false_literal {
+};
+
+struct select_boolean_literal_rule : pegtl::sor<select_boolean_true_rule, select_boolean_false_rule> {
+};
+
+struct select_null_literal_rule : kw_null_literal {
+};
+
+struct select_star_token : pegtl::one<'*'> {
+};
+
+struct select_star_expression_rule
+    : pegtl::sor<pegtl::seq<select_star_qualifier_rule, optional_space, dot, optional_space, select_star_token>,
+                 select_star_token> {
+};
+
+struct select_literal_rule
+    : pegtl::sor<select_null_literal_rule,
+                 select_boolean_literal_rule,
+                 select_numeric_literal_rule,
+                 select_string_literal_rule> {
+};
+
+struct select_primary_expression_rule
+    : pegtl::sor<select_literal_rule, select_star_expression_rule, select_column_identifier_rule> {
+};
+
+struct select_not_equal_operator_rule : pegtl::string<'<', '>'> {
+};
+
+struct select_less_equal_operator_rule : pegtl::string<'<', '='> {
+};
+
+struct select_greater_equal_operator_rule : pegtl::string<'>', '='> {
+};
+
+struct select_less_operator_rule : pegtl::one<'<'> {
+};
+
+struct select_greater_operator_rule : pegtl::one<'>'> {
+};
+
+struct select_equal_operator_rule : pegtl::one<'='> {
+};
+
+struct select_comparison_operator_rule
+    : pegtl::sor<select_less_equal_operator_rule,
+                 select_greater_equal_operator_rule,
+                 select_not_equal_operator_rule,
+                 select_less_operator_rule,
+                 select_greater_operator_rule,
+                 select_equal_operator_rule> {
+};
+
+struct select_comparison_expression_rule
+    : pegtl::seq<select_primary_expression_rule,
+                 optional_space,
+                 select_comparison_operator_rule,
+                 optional_space,
+                 select_primary_expression_rule> {
+};
+
+struct select_expression_rule
+    : pegtl::sor<select_comparison_expression_rule, select_primary_expression_rule> {
+};
+
+struct select_value_expression_rule : select_expression_rule {
+};
+
+struct where_expression_rule : select_expression_rule {
+};
+
+struct order_expression_rule : select_expression_rule {
+};
+
+struct limit_row_expression_rule : select_expression_rule {
+};
+
+struct limit_offset_expression_rule : select_expression_rule {
+};
+
+struct select_alias_rule
+    : pegtl::seq<kw_as, required_space, select_alias_identifier_rule> {
+};
+
+struct select_item_rule
+    : pegtl::seq<select_value_expression_rule, pegtl::opt<required_space, select_alias_rule>> {
+};
+
+struct select_list_rule
+    : pegtl::seq<select_item_rule,
+                 pegtl::star<optional_space, comma, optional_space, select_item_rule>> {
+};
+
+struct select_table_reference_rule
+    : pegtl::seq<select_table_identifier_rule,
+                 pegtl::opt<required_space,
+                            pegtl::seq<kw_as, required_space, select_table_alias_identifier_rule>>> {
+};
+
+struct from_clause_rule : pegtl::seq<kw_from, required_space, select_table_reference_rule> {
+};
+
+struct where_clause_rule : pegtl::seq<kw_where, required_space, where_expression_rule> {
+};
+
+struct order_desc_keyword : kw_desc {
+};
+
+struct order_asc_keyword : kw_asc {
+};
+
+struct order_direction_rule : pegtl::sor<order_asc_keyword, order_desc_keyword> {
+};
+
+struct order_item_rule
+    : pegtl::seq<order_expression_rule, pegtl::opt<required_space, order_direction_rule>> {
+};
+
+struct order_list_rule
+    : pegtl::seq<order_item_rule,
+                 pegtl::star<optional_space, comma, optional_space, order_item_rule>> {
+};
+
+struct order_by_clause_rule
+    : pegtl::seq<kw_order, required_space, kw_by, required_space, order_list_rule> {
+};
+
+struct limit_clause_rule
+    : pegtl::seq<kw_limit,
+                 required_space,
+                 limit_row_expression_rule,
+                 pegtl::opt<required_space, kw_offset, required_space, limit_offset_expression_rule>> {
+};
+
+struct select_statement_grammar
+    : pegtl::seq<optional_space,
+                 kw_select,
+                 pegtl::opt<required_space, kw_distinct>,
+                 required_space,
+                 select_list_rule,
+                 pegtl::opt<required_space, from_clause_rule>,
+                 pegtl::opt<required_space, where_clause_rule>,
+                 pegtl::opt<required_space, order_by_clause_rule>,
+                 pegtl::opt<required_space, limit_clause_rule>,
+                 optional_space,
+                 pegtl::opt<semicolon, optional_space>,
+                 pegtl::eof> {
+};
+
+template <typename Rule>
+struct select_action {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState&)
+    {
+    }
+};
+
+template <>
+struct select_action<kw_distinct> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.query != nullptr) {
+            state.query->distinct = true;
+        }
+    }
+};
+
+template <>
+struct select_action<select_string_literal_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        if (state.arena == nullptr) {
+            return;
+        }
+
+        auto& literal = state.arena->make<relational::LiteralExpression>();
+        literal.tag = relational::LiteralTag::String;
+        literal.text = unescape_string_literal(in.string());
+        push_expression(state, literal);
+    }
+};
+
+template <>
+struct select_action<select_numeric_literal_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        if (state.arena == nullptr) {
+            return;
+        }
+
+        auto text = trim_copy(in.string());
+        auto& literal = state.arena->make<relational::LiteralExpression>();
+        if (text.find_first_of(".eE") != std::string::npos) {
+            literal.tag = relational::LiteralTag::Decimal;
+        } else {
+            literal.tag = relational::LiteralTag::Integer;
+        }
+        literal.text = std::move(text);
+        push_expression(state, literal);
+    }
+};
+
+template <>
+struct select_action<select_boolean_true_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr) {
+            return;
+        }
+
+        auto& literal = state.arena->make<relational::LiteralExpression>();
+        literal.tag = relational::LiteralTag::Boolean;
+        literal.boolean_value = true;
+        literal.text = "TRUE";
+        push_expression(state, literal);
+    }
+};
+
+template <>
+struct select_action<select_boolean_false_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr) {
+            return;
+        }
+
+        auto& literal = state.arena->make<relational::LiteralExpression>();
+        literal.tag = relational::LiteralTag::Boolean;
+        literal.boolean_value = false;
+        literal.text = "FALSE";
+        push_expression(state, literal);
+    }
+};
+
+template <>
+struct select_action<select_null_literal_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr) {
+            return;
+        }
+
+        auto& literal = state.arena->make<relational::LiteralExpression>();
+        literal.tag = relational::LiteralTag::Null;
+        literal.text = "NULL";
+        push_expression(state, literal);
+    }
+};
+
+template <>
+struct select_action<select_column_identifier_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        if (state.arena == nullptr) {
+            return;
+        }
+
+        auto& identifier = state.arena->make<relational::IdentifierExpression>();
+        identifier.name = make_qualified_name(in.string());
+        push_expression(state, identifier);
+    }
+};
+
+template <>
+struct select_action<select_star_qualifier_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        state.star_qualifier = make_qualified_name(in.string());
+    }
+};
+
+template <>
+struct select_action<select_star_token> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr) {
+            return;
+        }
+
+        auto& star = state.arena->make<relational::StarExpression>();
+        star.qualifier = state.star_qualifier;
+        state.star_qualifier.parts.clear();
+        push_expression(state, star);
+    }
+};
+
+template <>
+struct select_action<select_comparison_operator_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        const auto op = in.string();
+        if (op == "=") {
+            state.pending_operator = relational::BinaryOperator::Equal;
+        } else if (op == "<>") {
+            state.pending_operator = relational::BinaryOperator::NotEqual;
+        } else if (op == "<") {
+            state.pending_operator = relational::BinaryOperator::Less;
+        } else if (op == "<=") {
+            state.pending_operator = relational::BinaryOperator::LessOrEqual;
+        } else if (op == ">") {
+            state.pending_operator = relational::BinaryOperator::Greater;
+        } else if (op == ">=") {
+            state.pending_operator = relational::BinaryOperator::GreaterOrEqual;
+        }
+        state.has_pending_operator = true;
+    }
+};
+
+template <>
+struct select_action<select_comparison_expression_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr || !state.has_pending_operator) {
+            state.expression_stack.clear();
+            state.has_pending_operator = false;
+            return;
+        }
+
+        auto* right = pop_expression(state);
+        auto* left = pop_expression(state);
+        if (left == nullptr || right == nullptr) {
+            state.expression_stack.clear();
+            state.has_pending_operator = false;
+            return;
+        }
+
+        auto& binary = state.arena->make<relational::BinaryExpression>();
+        binary.op = state.pending_operator;
+        binary.left = left;
+        binary.right = right;
+        push_expression(state, binary);
+        state.has_pending_operator = false;
+    }
+};
+
+template <>
+struct select_action<select_value_expression_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr || state.query == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        auto* expression = pop_expression(state);
+        if (expression == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        auto& item = state.arena->make<relational::SelectItem>();
+        item.expression = expression;
+        state.query->select_items.push_back(&item);
+        state.current_select_item = &item;
+        state.expression_stack.clear();
+    }
+};
+
+template <>
+struct select_action<select_item_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        state.current_select_item = nullptr;
+    }
+};
+
+template <>
+struct select_action<select_alias_identifier_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        if (state.current_select_item != nullptr) {
+            state.current_select_item->alias = make_identifier(in.string());
+        }
+    }
+};
+
+template <>
+struct select_action<select_table_identifier_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        if (state.arena == nullptr || state.query == nullptr) {
+            return;
+        }
+
+        auto& table = state.arena->make<relational::TableReference>();
+        table.name = make_qualified_name(in.string());
+        state.query->from = &table;
+        state.current_table = &table;
+    }
+};
+
+template <>
+struct select_action<select_table_alias_identifier_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        if (state.current_table != nullptr) {
+            state.current_table->alias = make_identifier(in.string());
+        }
+    }
+};
+
+template <>
+struct select_action<where_expression_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.query == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        state.query->where = pop_expression(state);
+        state.expression_stack.clear();
+    }
+};
+
+template <>
+struct select_action<order_expression_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr || state.query == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        auto* expression = pop_expression(state);
+        if (expression == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        auto& item = state.arena->make<relational::OrderByItem>();
+        item.expression = expression;
+        item.direction = relational::OrderByItem::Direction::Ascending;
+        state.query->order_by.push_back(&item);
+        state.current_order_item = &item;
+        state.expression_stack.clear();
+    }
+};
+
+template <>
+struct select_action<order_item_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        state.current_order_item = nullptr;
+    }
+};
+
+template <>
+struct select_action<order_desc_keyword> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.current_order_item != nullptr) {
+            state.current_order_item->direction = relational::OrderByItem::Direction::Descending;
+        }
+    }
+};
+
+template <>
+struct select_action<order_asc_keyword> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.current_order_item != nullptr) {
+            state.current_order_item->direction = relational::OrderByItem::Direction::Ascending;
+        }
+    }
+};
+
+template <>
+struct select_action<limit_row_expression_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr || state.query == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        auto* expression = pop_expression(state);
+        if (expression == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        if (state.limit_clause == nullptr) {
+            state.limit_clause = &state.arena->make<relational::LimitClause>();
+        }
+
+        state.limit_clause->row_count = expression;
+        state.query->limit = state.limit_clause;
+        state.expression_stack.clear();
+    }
+};
+
+template <>
+struct select_action<limit_offset_expression_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.limit_clause == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        state.limit_clause->offset = pop_expression(state);
+        state.expression_stack.clear();
+    }
+};
+
 StatementType classify_statement(std::string_view text)
 {
     std::size_t offset = 0U;
@@ -1471,6 +2159,42 @@ ScriptParseResult parse_ddl_script(std::string_view input)
         }
 
         offset = terminator + 1U;
+    }
+
+    return result;
+}
+
+SelectParseResult parse_select(std::string_view input)
+{
+    SelectParseResult result{};
+    SelectParseState state{};
+    state.arena = &result.arena;
+    state.statement = &result.arena.make<relational::SelectStatement>();
+    state.query = &result.arena.make<relational::QuerySpecification>();
+    state.statement->query = state.query;
+
+    pegtl::memory_input in(input, "select_statement");
+
+    try {
+        const auto parsed = pegtl::parse<select_statement_grammar, select_action>(in, state);
+        if (parsed) {
+            result.statement = state.statement;
+        } else {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Warning;
+            diagnostic.message = "input did not match SELECT grammar";
+            diagnostic.line = 1U;
+            diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            result.statement = nullptr;
+            result.arena.reset();
+        }
+    } catch (const pegtl::parse_error& error) {
+        result.diagnostics.push_back(make_parse_error(error, input));
+        result.statement = nullptr;
+        result.arena.reset();
     }
 
     return result;

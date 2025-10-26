@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/parser/ast.hpp"
+#include "bored/parser/relational/ast.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -75,4 +76,13 @@ ParseResult<DropTableStatement> parse_drop_table(std::string_view input);
 ParseResult<CreateViewStatement> parse_create_view(std::string_view input);
 
 ScriptParseResult parse_ddl_script(std::string_view input);
+struct SelectParseResult final {
+    relational::AstArena arena{};
+    relational::SelectStatement* statement = nullptr;
+    std::vector<ParserDiagnostic> diagnostics{};
+
+    [[nodiscard]] bool success() const noexcept { return statement != nullptr; }
+};
+
+SelectParseResult parse_select(std::string_view input);
 }  // namespace bored::parser

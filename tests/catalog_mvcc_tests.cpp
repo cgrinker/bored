@@ -1,4 +1,5 @@
 #include "bored/catalog/catalog_accessor.hpp"
+#include "bored/catalog/catalog_cache.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/catalog/catalog_mvcc.hpp"
 #include "bored/catalog/catalog_transaction.hpp"
@@ -60,6 +61,8 @@ struct RelationStorage final {
 
 TEST_CASE("Catalog tuple visibility honors MVCC snapshot")
 {
+    CatalogCache::instance().reset();
+
     bored::txn::Snapshot snapshot{};
     snapshot.xmin = 10U;
     snapshot.xmax = 40U;
@@ -89,6 +92,8 @@ TEST_CASE("Catalog tuple visibility honors MVCC snapshot")
 
 TEST_CASE("Catalog accessor caches relation scans and filters visibility")
 {
+    CatalogCache::instance().reset();
+
     bored::txn::Snapshot snapshot{};
     snapshot.xmin = 5U;
     snapshot.xmax = 20U;
@@ -159,6 +164,8 @@ TEST_CASE("Catalog accessor caches relation scans and filters visibility")
 
 TEST_CASE("Catalog accessor cache invalidation reloads relation data")
 {
+    CatalogCache::instance().reset();
+
     bored::txn::Snapshot snapshot{};
     snapshot.xmin = 5U;
     snapshot.xmax = 20U;
@@ -219,6 +226,8 @@ TEST_CASE("Catalog accessor cache invalidation reloads relation data")
 
 TEST_CASE("Catalog accessor snapshot differences affect visibility")
 {
+    CatalogCache::instance().reset();
+
     RelationStorage storage;
 
     CatalogDatabaseDescriptor database_base{tuple_descriptor(2U, 0U), kSystemDatabaseId, kSystemSchemaId, "system"};
@@ -257,6 +266,8 @@ TEST_CASE("Catalog accessor snapshot differences affect visibility")
 
 TEST_CASE("Wal replayer preserves catalog tuple mvcc metadata")
 {
+    CatalogCache::instance().reset();
+
     using namespace bored::storage;
 
     CatalogTableDescriptor descriptor{tuple_descriptor(42U, 0U), RelationId{1234U}, SchemaId{56U}, CatalogTableType::Catalog, 789U, "test_table"};

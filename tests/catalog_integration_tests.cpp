@@ -1,4 +1,5 @@
 #include "bored/catalog/catalog_accessor.hpp"
+#include "bored/catalog/catalog_cache.hpp"
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
 #include "bored/catalog/catalog_ddl.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
@@ -125,6 +126,11 @@ struct WalRetentionSpy final {
 };
 
 struct CatalogIntegrationHarness final {
+    CatalogIntegrationHarness()
+    {
+        CatalogCache::instance().reset();
+    }
+
     InMemoryCatalogStorage storage;
     WalRetentionSpy retention;
 

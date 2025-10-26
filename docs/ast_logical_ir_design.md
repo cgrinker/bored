@@ -23,7 +23,7 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 2. ✅ Implement lightweight arena allocation and node interning helpers to avoid deep copy overhead.
 3. ✅ Provide visitor interfaces and pattern-matching helpers for statements and expressions.
 4. ✅ Build pretty-printer / debug serialization utilities to visualize ASTs during diagnostics and tests.
-5. ☐ Update PEGTL actions to emit the new AST nodes and add Catch2 coverage for basic DDL/SELECT statements.
+5. ✅ Update PEGTL actions to emit the new AST nodes and add Catch2 coverage for basic DDL/SELECT statements (SELECT grammar now drives relational AST allocations with new Catch2 coverage in `parser_select_tests.cpp`).
 
 ### Milestone 2: Semantic Analysis & Binding
 **Goal:** Annotate AST nodes with catalog-validated bindings, resolved types, and coercion rules.

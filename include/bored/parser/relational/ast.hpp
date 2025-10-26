@@ -17,8 +17,8 @@ public:
     AstArena() = default;
     AstArena(const AstArena&) = delete;
     AstArena& operator=(const AstArena&) = delete;
-    AstArena(AstArena&&) = delete;
-    AstArena& operator=(AstArena&&) = delete;
+    AstArena(AstArena&&) noexcept = default;
+    AstArena& operator=(AstArena&&) noexcept = default;
     ~AstArena() noexcept;
 
     template <typename T, typename... Args>
