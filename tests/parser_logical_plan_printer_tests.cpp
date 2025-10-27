@@ -1,6 +1,7 @@
 #include "bored/parser/grammar.hpp"
 #include "bored/parser/relational/binder.hpp"
 #include "bored/parser/relational/logical_lowering.hpp"
+#include "bored/parser/relational/logical_plan_dump.hpp"
 #include "bored/parser/relational/logical_plan_printer.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -124,4 +125,58 @@ TEST_CASE("plan printer handles bare projections", "[parser][logical_plan_printe
     const auto text = relational::describe_plan(*plan);
     CHECK(text.find("Project columns=[inv.id:INT64?", 0) != std::string::npos);
     CHECK(text.find("Scan table=sales.inventory", 0) != std::string::npos);
+}
+
+TEST_CASE("lower_select invokes plan sink when configured", "[parser][logical_plan_printer]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    const std::string sql =
+        "SELECT inv.quantity AS qty FROM sales.inventory AS inv WHERE inv.quantity > 10 ORDER BY qty LIMIT 5;";
+
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    relational::BinderConfig binder_config{};
+    binder_config.catalog = &catalog_adapter;
+    binder_config.default_schema = std::string{"sales"};
+
+    auto binding = relational::bind_select(binder_config, *parse_result.statement);
+    REQUIRE(binding.success());
+
+    bool sink_invoked = false;
+    relational::LoweringConfig lowering_config{};
+    lowering_config.plan_sink = [&](const relational::LogicalOperator& plan) {
+        sink_invoked = true;
+        const auto text = relational::describe_plan(plan);
+        CHECK(text.find("Limit row_count=5") != std::string::npos);
+    };
+
+    auto lowering = relational::lower_select(*parse_result.statement, lowering_config);
+    if (!lowering.diagnostics.empty()) {
+        CAPTURE(lowering.diagnostics.front().message);
+    }
+    REQUIRE(lowering.success());
+    CHECK(sink_invoked);
+}
+
+TEST_CASE("plan dump utility produces plan text", "[parser][logical_plan_printer]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::LogicalPlanDumpOptions options{};
+    options.binder_config.catalog = &catalog_adapter;
+    options.binder_config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.quantity AS qty FROM sales.inventory AS inv WHERE inv.quantity > 10 ORDER BY qty LIMIT 5;";
+
+    const auto dump = relational::dump_select_plan(sql, options);
+    REQUIRE(dump.success());
+    CAPTURE(dump.plan_text);
+    CHECK(dump.plan_text.find("Sort keys=[") != std::string::npos);
+    CHECK(dump.plan_text.find("Scan table=sales.inventory alias=inv") != std::string::npos);
 }

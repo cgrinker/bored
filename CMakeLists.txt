@@ -60,6 +60,7 @@ if(BORED_ENABLE_PARSER)
             src/parser/relational_binder.cpp
             src/parser/relational_logical_lowering.cpp
             src/parser/relational_logical_normalization.cpp
+        src/parser/relational_logical_plan_dump.cpp
         src/parser/relational_logical_plan_printer.cpp
     )
     target_link_libraries(${PROJECT_NAME}_lib

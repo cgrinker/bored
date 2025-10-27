@@ -62,7 +62,8 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 	Added `logical_lowering.hpp`/`.cpp` to translate bound SELECT statements into scan/filter/project/sort/limit pipelines, preserving inferred types in output schemas and surfacing diagnostics for unsupported shapes, validated by dedicated Catch2 coverage.
 3. ✅ Introduce normalization hooks for predicate separation, projection ordering, and join criteria classification.  \
 	Added `logical_normalization.hpp`/`.cpp` to walk logical plans, collect filter predicates, preserve projection ordering, and provide join classification stubs (ready for future join support), validated via Catch2 normalization tests.
-4. Surface logical plan dumps for diagnostics and integrate unit tests comparing expected operator trees for representative queries.
+4. ✅ Surface logical plan dumps for diagnostics and integrate unit tests comparing expected operator trees for representative queries.  \
+	Added `logical_plan_printer.hpp`/`.cpp` plus the new `dump_select_plan` helper so tooling can capture plan text after binding/lowering, and expanded Catch2 coverage in `parser_logical_plan_printer_tests.cpp` to assert filter/sort/limit pipelines render as expected and that lowering emits trace callbacks when configured.
 5. Document extension points for the query planner and executor teams, ensuring IR stability guarantees.
 
 ### Milestone 4: Testing & Tooling Integration

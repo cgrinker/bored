@@ -33,8 +33,9 @@ std::vector<LogicalColumn> propagate_schema(const LogicalOperatorPtr& input)
 
 class LoweringContext final {
 public:
-    explicit LoweringContext(const SelectStatement& statement)
+    LoweringContext(const SelectStatement& statement, const LoweringConfig& config)
         : statement_(statement)
+        , config_(config)
     {
     }
 
@@ -60,6 +61,9 @@ public:
         }
 
         result.plan = std::move(plan);
+        if (config_.plan_sink && result.plan != nullptr) {
+            config_.plan_sink(*result.plan);
+        }
         return result;
     }
 
@@ -200,14 +204,21 @@ private:
     }
 
     const SelectStatement& statement_;
+    const LoweringConfig& config_;
 };
 
 }  // namespace
 
+LoweringResult lower_select(const SelectStatement& statement, const LoweringConfig& config)
+{
+    LoweringContext context(statement, config);
+    return context.run();
+}
+
 LoweringResult lower_select(const SelectStatement& statement)
 {
-    LoweringContext context(statement);
-    return context.run();
+    LoweringConfig config{};
+    return lower_select(statement, config);
 }
 
 }  // namespace bored::parser::relational
