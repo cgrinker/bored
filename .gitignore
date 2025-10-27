@@ -1,3 +1,5 @@
+.vscode/
+
 # CMake build artifacts
 build/
 build-macos
@@ -11,3 +13,4 @@ Makefile
 # Presets and user-specific configuration
 CMakeUserPresets.json
 CMakePresets.json.user
+
