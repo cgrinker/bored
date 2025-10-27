@@ -42,6 +42,8 @@ class TransactionIdAllocator {
 public:
     virtual ~TransactionIdAllocator() = default;
     virtual TransactionId allocate() = 0;
+    virtual TransactionId peek_next() const noexcept = 0;
+    virtual void advance_to(TransactionId high_water_mark) = 0;
 };
 
 class TransactionIdAllocatorStub final : public TransactionIdAllocator {
@@ -54,6 +56,18 @@ public:
     TransactionId allocate() override
     {
         return next_++;
+    }
+
+    TransactionId peek_next() const noexcept override
+    {
+        return next_;
+    }
+
+    void advance_to(TransactionId high_water_mark) override
+    {
+        if (high_water_mark >= next_) {
+            next_ = high_water_mark + 1U;
+        }
     }
 
 private:

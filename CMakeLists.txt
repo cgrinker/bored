@@ -45,6 +45,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/storage_telemetry_registry.cpp
     src/storage/storage_diagnostics.cpp
     src/txn/transaction_manager.cpp
+    src/txn/persistent_transaction_id_allocator.cpp
 )
 
 option(BORED_ENABLE_PARSER "Build parser front-end components" ON)

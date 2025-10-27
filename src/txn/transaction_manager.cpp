@@ -55,27 +55,23 @@ TransactionContext::operator bool() const noexcept
     return static_cast<bool>(state_);
 }
 
-TransactionManager::TransactionManager(TransactionIdAllocator& id_allocator,
-                                       SnapshotManager& snapshot_manager)
+TransactionManager::TransactionManager(TransactionIdAllocator& id_allocator)
     : id_allocator_{&id_allocator}
-    , snapshot_manager_{&snapshot_manager}
 {
 }
 
 TransactionContext TransactionManager::begin(const TransactionOptions& options)
 {
-    const auto txn_id = id_allocator_->allocate();
-    auto snapshot = snapshot_manager_->capture_snapshot(txn_id);
     auto state = std::make_shared<TransactionContext::State>();
-    state->id = txn_id;
-    state->snapshot = std::move(snapshot);
     state->options = options;
-    state->state = TransactionState::Active;
 
     {
         std::scoped_lock lock{mutex_};
-        last_allocated_id_ = txn_id;
+        state->id = id_allocator_->allocate();
+        state->state = TransactionState::Active;
+        last_allocated_id_ = state->id;
         record_state_locked(state);
+        state->snapshot = build_snapshot_locked(state->id);
     }
 
     return TransactionContext{std::move(state)};
@@ -138,21 +134,47 @@ void TransactionManager::abort(TransactionContext& ctx)
     state->abort_callbacks.clear();
 }
 
-Snapshot TransactionManager::current_snapshot() const
+void TransactionManager::refresh_snapshot(TransactionContext& ctx)
 {
-    TransactionId current_id = 0U;
-    {
-        std::scoped_lock lock{mutex_};
-        current_id = last_allocated_id_;
+    auto state = ctx.state_;
+    if (!state) {
+        throw std::logic_error{"TransactionManager::refresh_snapshot requires active context"};
     }
 
-    return snapshot_manager_->capture_snapshot(current_id);
+    std::scoped_lock lock{mutex_};
+    state->snapshot = build_snapshot_locked(state->id);
+}
+
+Snapshot TransactionManager::current_snapshot() const
+{
+    std::scoped_lock lock{mutex_};
+    return build_snapshot_locked(0U);
 }
 
 TransactionId TransactionManager::oldest_active_transaction() const
 {
     std::scoped_lock lock{mutex_};
     return oldest_active_ != 0U ? oldest_active_ : external_low_water_mark_;
+}
+
+TransactionId TransactionManager::next_transaction_id() const noexcept
+{
+    return id_allocator_ != nullptr ? id_allocator_->peek_next() : 0U;
+}
+
+std::size_t TransactionManager::active_transaction_count() const
+{
+    std::scoped_lock lock{mutex_};
+    std::size_t count = 0U;
+    for (auto it = active_.begin(); it != active_.end();) {
+        if (it->second.expired()) {
+            it = active_.erase(it);
+            continue;
+        }
+        ++count;
+        ++it;
+    }
+    return count;
 }
 
 void TransactionManager::advance_low_water_mark(TransactionId txn_id)
@@ -191,10 +213,55 @@ void TransactionManager::recompute_oldest_locked()
         ++it;
     }
 
-    oldest_active_ = candidate;
-    if (oldest_active_ == 0U && external_low_water_mark_ != 0U) {
-        oldest_active_ = external_low_water_mark_;
+    if (candidate == 0U || (external_low_water_mark_ != 0U && external_low_water_mark_ < candidate)) {
+        candidate = external_low_water_mark_;
     }
+
+    oldest_active_ = candidate;
+}
+
+Snapshot TransactionManager::build_snapshot_locked(TransactionId self_id) const
+{
+    Snapshot snapshot{};
+    snapshot.read_lsn = 0U;  // Commit sequencing will populate this once integrated with WAL.
+    snapshot.xmax = id_allocator_ != nullptr ? id_allocator_->peek_next() : 0U;
+
+    std::vector<TransactionId> in_progress;
+    in_progress.reserve(active_.size());
+
+    TransactionId xmin_candidate = snapshot.xmax;
+
+    for (auto it = active_.begin(); it != active_.end();) {
+        auto shared = it->second.lock();
+        if (!shared) {
+            it = active_.erase(it);
+            continue;
+        }
+
+        const auto active_id = it->first;
+        if (active_id != self_id) {
+            in_progress.push_back(active_id);
+        }
+        if (active_id < xmin_candidate) {
+            xmin_candidate = active_id;
+        }
+
+        ++it;
+    }
+
+    if (self_id != 0U && (xmin_candidate == 0U || self_id < xmin_candidate)) {
+        xmin_candidate = self_id;
+    }
+
+    if (xmin_candidate == 0U) {
+        xmin_candidate = snapshot.xmax;
+    }
+
+    std::sort(in_progress.begin(), in_progress.end());
+
+    snapshot.xmin = xmin_candidate;
+    snapshot.in_progress = std::move(in_progress);
+    return snapshot;
 }
 
 }  // namespace bored::txn

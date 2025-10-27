@@ -43,15 +43,17 @@ private:
 
 class TransactionManager final {
 public:
-    TransactionManager(TransactionIdAllocator& id_allocator,
-                       SnapshotManager& snapshot_manager);
+    explicit TransactionManager(TransactionIdAllocator& id_allocator);
 
     TransactionContext begin(const TransactionOptions& options = {});
     void commit(TransactionContext& ctx);
     void abort(TransactionContext& ctx);
+    void refresh_snapshot(TransactionContext& ctx);
 
     Snapshot current_snapshot() const;
     TransactionId oldest_active_transaction() const;
+    TransactionId next_transaction_id() const noexcept;
+    std::size_t active_transaction_count() const;
 
     void advance_low_water_mark(TransactionId txn_id);
 
@@ -61,9 +63,9 @@ private:
     void record_state_locked(const StatePtr& state);
     void erase_state_locked(TransactionId id);
     void recompute_oldest_locked();
+    Snapshot build_snapshot_locked(TransactionId self_id) const;
 
     TransactionIdAllocator* id_allocator_ = nullptr;
-    SnapshotManager* snapshot_manager_ = nullptr;
 
     mutable std::mutex mutex_{};
     mutable std::map<TransactionId, std::weak_ptr<TransactionContext::State>> active_{};

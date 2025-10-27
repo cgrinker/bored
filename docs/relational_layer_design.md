@@ -43,10 +43,12 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
 5. **Transaction & Concurrency Control Manager** _(Milestones tracked in [transaction_concurrency_milestones.md](transaction_concurrency_milestones.md); design blueprint in [transaction_concurrency_design.md](transaction_concurrency_design.md))_
    - **Responsibilities:** Coordinate transactional lifecycle, isolation levels, and conflict detection (e.g., MVCC).
    - **Prerequisites:** Catalog visibility rules; WAL/page manager hooks for transaction IDs and LSN tracking.
+   - **Status:** Milestone 0 complete (self-managed snapshots and persistent allocator); Milestone 1 in progress (WAL commit metadata plus catalog snapshot plumbing).
    - **Key Tasks:**
-  - Choose concurrency model (basic MVCC captured in design blueprint).
-     - Instrument page and tuple access with latching/locking APIs.
-     - Integrate with WAL commit protocol and retention manager.
+     - Emit commit metadata into WAL segments and checkpoint persistent allocator state.
+     - Teach catalog and planner entry points to consume `TransactionManager` snapshots.
+     - Instrument page and tuple access with latching and locking APIs.
+     - Extend retention manager coordination so obsolete snapshots retire safely.
 
 6. **Query Planner & Optimizer**
    - **Responsibilities:** Transform logical plans into executable physical plans, applying rule-based and cost-based optimizations.

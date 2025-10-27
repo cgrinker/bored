@@ -2,35 +2,26 @@
 
 #include "bored/txn/transaction_manager.hpp"
 
-namespace {
-
-bored::txn::Snapshot make_snapshot(std::uint64_t xmin, std::uint64_t xmax)
-{
-    bored::txn::Snapshot snapshot{};
-    snapshot.read_lsn = xmax;
-    snapshot.xmin = xmin;
-    snapshot.xmax = xmax;
-    return snapshot;
-}
-
-}  // namespace
-
 TEST_CASE("TransactionManager assigns monotonically increasing transaction ids", "[txn]")
 {
     bored::txn::TransactionIdAllocatorStub allocator{41U};
-    bored::txn::SnapshotManagerStub snapshot_manager{make_snapshot(10U, 100U)};
-    bored::txn::TransactionManager manager{allocator, snapshot_manager};
+    bored::txn::TransactionManager manager{allocator};
 
     auto first = manager.begin();
     REQUIRE(first);
     CHECK(first.id() == 41U);
-    CHECK(first.snapshot().xmin == 10U);
-    CHECK(first.snapshot().xmax == 100U);
+    CHECK(first.snapshot().xmin == 41U);
+    CHECK(first.snapshot().xmax == 42U);
+    CHECK(first.snapshot().in_progress.empty());
     CHECK(manager.oldest_active_transaction() == 41U);
 
     auto second = manager.begin();
     REQUIRE(second);
     CHECK(second.id() == 42U);
+    CHECK(second.snapshot().xmin == 41U);
+    CHECK(second.snapshot().xmax == 43U);
+    REQUIRE(second.snapshot().in_progress.size() == 1U);
+    CHECK(second.snapshot().in_progress.front() == 41U);
     CHECK(manager.oldest_active_transaction() == 41U);
 
     second.on_commit([&]() {
@@ -49,8 +40,7 @@ TEST_CASE("TransactionManager assigns monotonically increasing transaction ids",
 TEST_CASE("TransactionManager abort triggers callbacks and clears active set", "[txn]")
 {
     bored::txn::TransactionIdAllocatorStub allocator{7U};
-    bored::txn::SnapshotManagerStub snapshot_manager{make_snapshot(1U, 5U)};
-    bored::txn::TransactionManager manager{allocator, snapshot_manager};
+    bored::txn::TransactionManager manager{allocator};
 
     auto ctx = manager.begin();
     bool abort_called = false;
@@ -66,8 +56,7 @@ TEST_CASE("TransactionManager abort triggers callbacks and clears active set", "
 TEST_CASE("TransactionManager low water mark advances once active set drains", "[txn]")
 {
     bored::txn::TransactionIdAllocatorStub allocator{80U};
-    bored::txn::SnapshotManagerStub snapshot_manager{make_snapshot(2U, 10U)};
-    bored::txn::TransactionManager manager{allocator, snapshot_manager};
+    bored::txn::TransactionManager manager{allocator};
 
     auto ctx = manager.begin();
     manager.commit(ctx);
@@ -76,5 +65,7 @@ TEST_CASE("TransactionManager low water mark advances once active set drains", "
     CHECK(manager.oldest_active_transaction() == 70U);
 
     auto snapshot = manager.current_snapshot();
-    CHECK(snapshot.read_lsn == 10U);
+    CHECK(snapshot.xmin == snapshot.xmax);
+    CHECK(snapshot.xmax == manager.next_transaction_id());
+    CHECK(snapshot.in_progress.empty());
 }
