@@ -15,17 +15,19 @@
 
 ## Milestone 1: Transaction Identity & Visibility Plumbing (1 sprint)
 - [x] Introduce `TxnId` generator backed by WAL/LSN monotonicity and persist allocator state across checkpoints.
-- [ ] Wire catalog lookups to accept a snapshot descriptor (`TxnSnapshot`) and filter entries according to MVCC visibility rules.
+- [x] Wire catalog lookups to accept a snapshot descriptor (`TxnSnapshot`) and filter entries according to MVCC visibility rules.
 - [x] Extend WAL commit records with transaction metadata (txn id, commit timestamp/LSN) for recovery replay.
-- [ ] Capture oldest-active/oldest-commit LSNs for retention management and checkpoint coordination.
-- [ ] Add telemetry counters for active transactions, commits, aborts, and snapshot age.
+- [x] Capture oldest-active/oldest-commit LSNs for retention management and checkpoint coordination.
+- [x] Add telemetry counters for active transactions, commits, aborts, and snapshot age.
 
 ## Milestone 2: MVCC Tuple Versioning & Buffer Integration (1.5 sprints)
-- [ ] Extend page and tuple headers with creation/deletion transaction identifiers plus `undo` linkage for version chains.
-- [ ] Update `PageManager` mutation paths to emit MVCC-aware WAL records and maintain in-page version chains.
+- [x] Extend page and tuple headers with creation/deletion transaction identifiers plus `undo` linkage for version chains (tuple headers now persisted alongside payloads and mirrored into WAL records).
+- [x] Update `PageManager` mutation paths to emit MVCC-aware WAL records and maintain in-page version chains (tuple header wiring landed; undo chain population remains TODO).
 - [ ] Teach `WalReplayer` and `WalUndoWalker` to respect MVCC metadata when rehydrating and undoing tuples.
 - [ ] Introduce vacuum-style background task scaffolding to prune committed obsolete versions once safe.
 - [ ] Expand unit tests to cover concurrent insert/update/delete visibility across transaction snapshots.
+
+**Next Task:** Teach `WalReplayer`/`WalUndoWalker` to replay and undo tuples using the new MVCC tuple header fields.
 
 ## Milestone 3: Locking, Latching, and Conflict Detection (1 sprint)
 - [ ] Implement row/page-intent lock hierarchy with deadlock detection or timeout policy.

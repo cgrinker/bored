@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/storage/page_format.hpp"
+#include "bored/txn/transaction_types.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +29,54 @@ constexpr std::size_t overflow_tuple_header_size()
     return sizeof(OverflowTupleHeader);
 }
 
+enum class TupleFlag : std::uint16_t {
+    None = 0U,
+    HasOverflow = 1U << 0U
+};
+
+inline constexpr bool any(TupleFlag flag) noexcept
+{
+    return static_cast<std::uint16_t>(flag) != 0U;
+}
+
+inline constexpr TupleFlag operator|(TupleFlag lhs, TupleFlag rhs) noexcept
+{
+    return static_cast<TupleFlag>(static_cast<std::uint16_t>(lhs) | static_cast<std::uint16_t>(rhs));
+}
+
+inline constexpr TupleFlag operator&(TupleFlag lhs, TupleFlag rhs) noexcept
+{
+    return static_cast<TupleFlag>(static_cast<std::uint16_t>(lhs) & static_cast<std::uint16_t>(rhs));
+}
+
+inline constexpr TupleFlag& operator|=(TupleFlag& lhs, TupleFlag rhs) noexcept
+{
+    lhs = lhs | rhs;
+    return lhs;
+}
+
+struct TupleHeader final {
+    txn::TransactionId created_transaction_id = 0U;
+    txn::TransactionId deleted_transaction_id = 0U;
+    std::uint64_t undo_next_lsn = 0U;
+    std::uint16_t flags = 0U;
+    std::uint16_t reserved = 0U;
+    std::uint32_t reserved_padding = 0U;
+};
+
+constexpr std::size_t tuple_header_size()
+{
+    return sizeof(TupleHeader);
+}
+
+constexpr std::size_t tuple_storage_length(std::size_t payload_length)
+{
+    return tuple_header_size() + payload_length;
+}
+
+std::optional<TupleHeader> read_tuple_header(std::span<const std::byte> page, std::uint16_t slot_index);
+bool write_tuple_header(std::span<std::byte> page, std::uint16_t slot_index, const TupleHeader& header);
+std::span<const std::byte> read_tuple_storage(std::span<const std::byte> page, std::uint16_t slot_index);
 bool is_overflow_tuple(std::span<const std::byte> tuple);
 std::optional<OverflowTupleHeader> parse_overflow_tuple(std::span<const std::byte> tuple);
 std::span<const std::byte> overflow_tuple_inline_payload(std::span<const std::byte> tuple,
@@ -62,9 +111,18 @@ bool initialize_page(std::span<std::byte> page,
                      FreeSpaceMap* fsm = nullptr);
 
 std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
+                                      const TupleHeader& header,
                                       std::span<const std::byte> payload,
                                       std::uint64_t lsn,
                                       FreeSpaceMap* fsm = nullptr);
+
+inline std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
+                                             std::span<const std::byte> payload,
+                                             std::uint64_t lsn,
+                                             FreeSpaceMap* fsm = nullptr)
+{
+    return append_tuple(page, TupleHeader{}, payload, lsn, fsm);
+}
 
 std::optional<AppendTuplePlan> prepare_append_tuple(std::span<const std::byte> page,
                                                     std::size_t payload_length);

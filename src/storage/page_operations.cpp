@@ -16,6 +16,8 @@ constexpr std::uint16_t to_u16(std::size_t value)
     return static_cast<std::uint16_t>(value);
 }
 
+constexpr std::size_t tuple_header_storage_size = tuple_header_size();
+
 SlotPointer* locate_slot(PageHeader& header, std::span<std::byte> page, std::size_t index)
 {
     if (index >= header.tuple_count) {
@@ -53,6 +55,8 @@ void mark_dirty(PageHeader& header)
 }
 
 }  // namespace
+
+static_assert(tuple_header_storage_size % alignof(std::uint64_t) == 0U, "Tuple header must be 64-bit aligned");
 
 PageHeader& page_header(std::span<std::byte> page)
 {
@@ -152,6 +156,7 @@ bool initialize_page(std::span<std::byte> page,
 }
 
 std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
+                                      const TupleHeader& tuple_header,
                                       std::span<const std::byte> payload,
                                       std::uint64_t lsn,
                                       FreeSpaceMap* fsm)
@@ -165,28 +170,37 @@ std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
         return std::nullopt;
     }
 
-    if (payload.empty() || payload.size() > std::numeric_limits<std::uint16_t>::max()) {
+    if (payload.empty()) {
+        return std::nullopt;
+    }
+
+    const auto total_length = tuple_storage_length(payload.size());
+    if (total_length > std::numeric_limits<std::uint16_t>::max()) {
         return std::nullopt;
     }
 
     auto reusable = find_reusable_slot(header, page);
     const std::size_t slot_overhead = reusable ? 0U : sizeof(SlotPointer);
-    if (compute_free_bytes(header) < payload.size() + slot_overhead) {
+    if (compute_free_bytes(header) < total_length + slot_overhead) {
         return std::nullopt;
     }
 
-    const auto payload_length = to_u16(payload.size());
     const auto write_offset = header.free_start;
-    std::memcpy(page.data() + write_offset, payload.data(), payload.size());
-    header.free_start = to_u16(static_cast<std::size_t>(header.free_start) + payload.size());
+    std::memcpy(page.data() + write_offset, &tuple_header, tuple_header_storage_size);
+    if (!payload.empty()) {
+        std::memcpy(page.data() + write_offset + tuple_header_storage_size, payload.data(), payload.size());
+    }
+    header.free_start = to_u16(static_cast<std::size_t>(header.free_start) + total_length);
 
     mark_dirty(header);
     header.lsn = lsn;
 
+    const auto total_length_u16 = to_u16(total_length);
+
     if (reusable) {
         auto* slot = locate_slot(header, page, *reusable);
         slot->offset = write_offset;
-        slot->length = payload_length;
+        slot->length = total_length_u16;
         if (header.fragment_count > 0U) {
             --header.fragment_count;
         }
@@ -195,13 +209,13 @@ std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
             sync_free_space(*fsm, page);
         }
 
-        return TupleSlot{to_u16(*reusable), write_offset, payload_length};
+        return TupleSlot{to_u16(*reusable), write_offset, total_length_u16};
     }
 
     header.free_end = to_u16(static_cast<std::size_t>(header.free_end) - sizeof(SlotPointer));
     auto* new_slot = reinterpret_cast<SlotPointer*>(page.data() + header.free_end);
     new_slot->offset = write_offset;
-    new_slot->length = payload_length;
+    new_slot->length = total_length_u16;
 
     const std::uint16_t slot_index = header.tuple_count;
     ++header.tuple_count;
@@ -210,7 +224,7 @@ std::optional<TupleSlot> append_tuple(std::span<std::byte> page,
         sync_free_space(*fsm, page);
     }
 
-    return TupleSlot{slot_index, write_offset, payload_length};
+    return TupleSlot{slot_index, write_offset, total_length_u16};
 }
 
 std::optional<AppendTuplePlan> prepare_append_tuple(std::span<const std::byte> page,
@@ -225,20 +239,21 @@ std::optional<AppendTuplePlan> prepare_append_tuple(std::span<const std::byte> p
         return std::nullopt;
     }
 
-    if (payload_length == 0U || payload_length > std::numeric_limits<std::uint16_t>::max()) {
+    const auto total_length = tuple_storage_length(payload_length);
+    if (payload_length == 0U || total_length > std::numeric_limits<std::uint16_t>::max()) {
         return std::nullopt;
     }
 
     auto reusable = find_reusable_slot(header, page);
     const std::size_t slot_overhead = reusable ? 0U : sizeof(SlotPointer);
-    if (compute_free_bytes(header) < payload_length + slot_overhead) {
+    if (compute_free_bytes(header) < total_length + slot_overhead) {
         return std::nullopt;
     }
 
     AppendTuplePlan plan{};
     plan.slot_index = reusable ? static_cast<std::uint16_t>(*reusable) : header.tuple_count;
     plan.write_offset = header.free_start;
-    plan.tuple_length = static_cast<std::uint16_t>(payload_length);
+    plan.tuple_length = static_cast<std::uint16_t>(total_length);
     plan.reuses_slot = reusable.has_value();
     return plan;
 }
@@ -274,7 +289,40 @@ bool delete_tuple(std::span<std::byte> page,
     return true;
 }
 
-std::span<const std::byte> read_tuple(std::span<const std::byte> page, std::uint16_t slot_index)
+std::optional<TupleHeader> read_tuple_header(std::span<const std::byte> page, std::uint16_t slot_index)
+{
+    auto storage = read_tuple_storage(page, slot_index);
+    if (storage.size() < tuple_header_storage_size) {
+        return std::nullopt;
+    }
+
+    TupleHeader header{};
+    std::memcpy(&header, storage.data(), tuple_header_storage_size);
+    return header;
+}
+
+bool write_tuple_header(std::span<std::byte> page, std::uint16_t slot_index, const TupleHeader& tuple_header)
+{
+    if (page.size() != kPageSize) {
+        return false;
+    }
+
+    auto& header = page_header(page);
+    if (!is_valid(header) || slot_index >= header.tuple_count) {
+        return false;
+    }
+
+    auto* slot = locate_slot(header, page, slot_index);
+    if (slot == nullptr || slot->length < tuple_header_storage_size) {
+        return false;
+    }
+
+    std::memcpy(page.data() + slot->offset, &tuple_header, tuple_header_storage_size);
+    mark_dirty(header);
+    return true;
+}
+
+std::span<const std::byte> read_tuple_storage(std::span<const std::byte> page, std::uint16_t slot_index)
 {
     if (page.size() != kPageSize) {
         return {};
@@ -290,7 +338,20 @@ std::span<const std::byte> read_tuple(std::span<const std::byte> page, std::uint
         return {};
     }
 
+    if (static_cast<std::size_t>(slot->offset) + slot->length > page.size()) {
+        return {};
+    }
+
     return {page.data() + slot->offset, slot->length};
+}
+
+std::span<const std::byte> read_tuple(std::span<const std::byte> page, std::uint16_t slot_index)
+{
+    auto storage = read_tuple_storage(page, slot_index);
+    if (storage.size() <= tuple_header_storage_size) {
+        return {};
+    }
+    return storage.subspan(tuple_header_storage_size);
 }
 
 bool compact_page(std::span<std::byte> page,

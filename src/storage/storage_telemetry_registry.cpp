@@ -125,6 +125,20 @@ bored::parser::ParserTelemetrySnapshot& accumulate(bored::parser::ParserTelemetr
     return target;
 }
 
+bored::txn::TransactionTelemetrySnapshot& accumulate(bored::txn::TransactionTelemetrySnapshot& target,
+                                                      const bored::txn::TransactionTelemetrySnapshot& source)
+{
+    target.active_transactions += source.active_transactions;
+    target.committed_transactions += source.committed_transactions;
+    target.aborted_transactions += source.aborted_transactions;
+    if (target.last_snapshot_xmin == 0U || (source.last_snapshot_xmin != 0U && source.last_snapshot_xmin < target.last_snapshot_xmin)) {
+        target.last_snapshot_xmin = source.last_snapshot_xmin;
+    }
+    target.last_snapshot_xmax = std::max(target.last_snapshot_xmax, source.last_snapshot_xmax);
+    target.last_snapshot_age = std::max(target.last_snapshot_age, source.last_snapshot_age);
+    return target;
+}
+
 template <typename Snapshot>
 Snapshot aggregate_snapshots(const std::vector<std::function<Snapshot()>>& samplers)
 {
@@ -402,6 +416,57 @@ void StorageTelemetryRegistry::register_parser(std::string identifier, ParserSam
     }
     std::lock_guard guard(mutex_);
     parser_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::register_transaction(std::string identifier, TransactionSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    transaction_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_transaction(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    transaction_samplers_.erase(identifier);
+}
+
+bored::txn::TransactionTelemetrySnapshot StorageTelemetryRegistry::aggregate_transactions() const
+{
+    std::vector<TransactionSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(transaction_samplers_.size());
+        for (const auto& [_, sampler] : transaction_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<bored::txn::TransactionTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_transactions(const TransactionVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, TransactionSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(transaction_samplers_.size());
+        for (const auto& [identifier, sampler] : transaction_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
 }
 
 void StorageTelemetryRegistry::unregister_parser(const std::string& identifier)

@@ -104,9 +104,15 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
         return std::make_error_code(std::errc::invalid_argument);
     }
 
-    const bool inserted_overflow = is_overflow_tuple(payload);
-    const auto previous_lsn = page_header(page).lsn;
+    if (payload.size() <= tuple_header_size()) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
 
+    TupleHeader tuple_header{};
+    std::memcpy(&tuple_header, payload.data(), tuple_header_size());
+    auto tuple_payload = payload.subspan(tuple_header_size());
+    const bool inserted_overflow = is_overflow_tuple(tuple_payload);
+    const auto previous_lsn = page_header(page).lsn;
     if (force) {
         auto& header_ref = page_header(page);
         if (payload.size() != meta.tuple_length) {
@@ -186,7 +192,7 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
         return {};
     }
 
-    auto appended = append_tuple(page, payload, header.lsn, fsm);
+    auto appended = append_tuple(page, tuple_header, tuple_payload, header.lsn, fsm);
     if (!appended) {
         return std::make_error_code(std::errc::io_error);
     }
@@ -198,7 +204,6 @@ std::error_code apply_tuple_insert(std::span<std::byte> page,
         }
         std::swap(directory[appended->index], directory[meta.slot_index]);
     }
-
     if (inserted_overflow) {
         auto& header_ref = page_header(page);
         set_has_overflow(header_ref, true);
@@ -253,11 +258,19 @@ std::error_code apply_tuple_update(std::span<std::byte> page,
         return {};
     }
 
+    if (payload.size() <= tuple_header_size()) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    TupleHeader tuple_header{};
+    std::memcpy(&tuple_header, payload.data(), tuple_header_size());
+    auto tuple_payload = payload.subspan(tuple_header_size());
+
     if (!delete_tuple(page, meta.base.slot_index, header.lsn, fsm)) {
         return std::make_error_code(std::errc::io_error);
     }
 
-    auto appended = append_tuple(page, payload, header.lsn, fsm);
+    auto appended = append_tuple(page, tuple_header, tuple_payload, header.lsn, fsm);
     if (!appended) {
         return std::make_error_code(std::errc::io_error);
     }
@@ -270,7 +283,7 @@ std::error_code apply_tuple_update(std::span<std::byte> page,
         std::swap(directory[appended->index], directory[meta.base.slot_index]);
     }
 
-    if (is_overflow_tuple(payload)) {
+    if (is_overflow_tuple(tuple_payload)) {
         auto& header_ref = page_header(page);
         set_has_overflow(header_ref, true);
     } else {

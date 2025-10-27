@@ -3,6 +3,7 @@
 #include "bored/catalog/catalog_mvcc.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
+#include "bored/storage/page_operations.hpp"
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_payloads.hpp"
 
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <span>
 #include <string_view>
 #include <vector>
 #include <stdexcept>
@@ -27,6 +29,14 @@ std::vector<std::byte> make_payload(std::string_view name)
     descriptor.schema_id = kSystemSchemaId;
     descriptor.name = name;
     return serialize_catalog_table(descriptor);
+}
+
+std::span<const std::byte> tuple_payload_view(std::span<const std::byte> storage)
+{
+    if (storage.size() <= bored::storage::tuple_header_size()) {
+        return {};
+    }
+    return storage.subspan(bored::storage::tuple_header_size());
 }
 
 }  // namespace
@@ -241,8 +251,16 @@ TEST_CASE("Catalog mutator commit captures before image for deletes")
     REQUIRE(before_view);
     CHECK(before_view->meta.page_id == kCatalogTablesPageId);
     CHECK(before_view->meta.row_id == 7777U);
-    CHECK(before_view->tuple_payload.size() == before_payload.size());
-    CHECK(std::equal(before_payload.begin(), before_payload.end(), before_view->tuple_payload.begin()));
+    auto wal_payload = std::span<const std::byte>(before_view->tuple_payload.begin(), before_view->tuple_payload.end());
+    std::span<const std::byte> logical_payload = wal_payload;
+    if (wal_payload.size() == bored::storage::tuple_storage_length(before_payload.size())) {
+        auto header_payload = tuple_payload_view(wal_payload);
+        CHECK(header_payload.size() == before_payload.size());
+        logical_payload = header_payload;
+    } else {
+        CHECK(wal_payload.size() == before_payload.size());
+    }
+    CHECK(std::equal(before_payload.begin(), before_payload.end(), logical_payload.begin(), logical_payload.end()));
 
     auto delete_meta = bored::storage::decode_wal_tuple_meta(std::span<const std::byte>(records[1].payload.data(), records[1].payload.size()));
     REQUIRE(delete_meta);
@@ -283,7 +301,15 @@ TEST_CASE("Catalog mutator commit captures before image and update record")
     auto before_view = bored::storage::decode_wal_tuple_before_image(std::span<const std::byte>(records[0].payload.data(), records[0].payload.size()));
     REQUIRE(before_view);
     CHECK(before_view->meta.row_id == 8888U);
-    CHECK(before_view->tuple_payload.size() == before_payload.size());
+    auto wal_payload = std::span<const std::byte>(before_view->tuple_payload.begin(), before_view->tuple_payload.end());
+    std::span<const std::byte> logical_payload = wal_payload;
+    if (wal_payload.size() == bored::storage::tuple_storage_length(before_payload.size())) {
+        auto header_payload = tuple_payload_view(wal_payload);
+        CHECK(header_payload.size() == before_payload.size());
+        logical_payload = header_payload;
+    } else {
+        CHECK(wal_payload.size() == before_payload.size());
+    }
 
     auto update_meta = bored::storage::decode_wal_tuple_update_meta(std::span<const std::byte>(records[1].payload.data(), records[1].payload.size()));
     REQUIRE(update_meta);

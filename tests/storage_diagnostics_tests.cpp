@@ -9,6 +9,7 @@
 using namespace bored::storage;
 namespace ddl = bored::ddl;
 namespace parser = bored::parser;
+namespace txn = bored::txn;
 
 namespace {
 
@@ -101,6 +102,18 @@ parser::ParserTelemetrySnapshot make_parser(std::uint64_t seed)
     return snapshot;
 }
 
+txn::TransactionTelemetrySnapshot make_transaction(std::uint64_t seed)
+{
+    txn::TransactionTelemetrySnapshot snapshot{};
+    snapshot.active_transactions = seed + 1U;
+    snapshot.committed_transactions = seed + 2U;
+    snapshot.aborted_transactions = seed;
+    snapshot.last_snapshot_xmin = seed + 3U;
+    snapshot.last_snapshot_xmax = seed + 7U;
+    snapshot.last_snapshot_age = (seed + 7U) - (seed + 3U);
+    return snapshot;
+}
+
 }  // namespace
 
 TEST_CASE("collect_storage_diagnostics aggregates totals and details")
@@ -117,6 +130,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     registry.register_ddl("ddl_b", [] { return make_ddl(6U); });
     registry.register_parser("parser_a", [] { return make_parser(2U); });
     registry.register_parser("parser_b", [] { return make_parser(5U); });
+    registry.register_transaction("txn_a", [] { return make_transaction(1U); });
+    registry.register_transaction("txn_b", [] { return make_transaction(4U); });
 
     const StorageDiagnosticsOptions options{};
     const auto doc = collect_storage_diagnostics(registry, options);
@@ -137,6 +152,11 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.parser.total.scripts_attempted == ((2U + 1U) + (5U + 1U)));
     REQUIRE(doc.parser.total.diagnostics_warning == ((2U + 3U) + (5U + 3U)));
     REQUIRE(doc.parser.total.last_parse_duration_ns == std::max((2U + 5U) * 5U, (5U + 5U) * 5U));
+    REQUIRE(doc.transactions.details.size() == 2U);
+    REQUIRE(doc.transactions.total.active_transactions == ((1U + 1U) + (4U + 1U)));
+    REQUIRE(doc.transactions.total.committed_transactions == ((1U + 2U) + (4U + 2U)));
+    REQUIRE(doc.transactions.total.last_snapshot_xmin == std::min(1U + 3U, 4U + 3U));
+    REQUIRE(doc.transactions.total.last_snapshot_xmax == std::max(1U + 7U, 4U + 7U));
     REQUIRE(doc.collected_at.time_since_epoch().count() != 0);
 
     REQUIRE(doc.page_managers.details.front().identifier == "pm_a");
@@ -145,6 +165,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.ddl.details.back().identifier == "ddl_b");
     REQUIRE(doc.parser.details.front().identifier == "parser_a");
     REQUIRE(doc.parser.details.back().identifier == "parser_b");
+    REQUIRE(doc.transactions.details.front().identifier == "txn_a");
+    REQUIRE(doc.transactions.details.back().identifier == "txn_b");
 }
 
 TEST_CASE("collect_storage_diagnostics honors detail options")
@@ -156,6 +178,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     registry.register_catalog("cat", [] { return make_catalog(2U); });
     registry.register_ddl("ddl", [] { return make_ddl(3U); });
     registry.register_parser("parser", [] { return make_parser(4U); });
+    registry.register_transaction("txn", [] { return make_transaction(5U); });
 
     StorageDiagnosticsOptions options{};
     options.include_page_manager_details = false;
@@ -164,6 +187,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     options.include_catalog_details = false;
     options.include_ddl_details = false;
     options.include_parser_details = false;
+    options.include_transaction_details = false;
 
     const auto doc = collect_storage_diagnostics(registry, options);
 
@@ -173,6 +197,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     REQUIRE(doc.catalog.details.empty());
     REQUIRE(doc.ddl.details.empty());
     REQUIRE(doc.parser.details.empty());
+    REQUIRE(doc.transactions.details.empty());
 }
 
 TEST_CASE("storage_diagnostics_to_json serialises expected fields")
@@ -184,6 +209,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     registry.register_catalog("cat", [] { return make_catalog(4U); });
     registry.register_ddl("ddl", [] { return make_ddl(5U); });
     registry.register_parser("parser", [] { return make_parser(6U); });
+    registry.register_transaction("txn", [] { return make_transaction(7U); });
 
     const auto doc = collect_storage_diagnostics(registry);
     const auto json = storage_diagnostics_to_json(doc);
@@ -194,6 +220,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"checkpoints\"") != std::string::npos);
     REQUIRE(json.find("\"retention\"") != std::string::npos);
     REQUIRE(json.find("\"catalog\"") != std::string::npos);
+    REQUIRE(json.find("\"transactions\"") != std::string::npos);
     REQUIRE(json.find("\"parser\"") != std::string::npos);
     REQUIRE(json.find("\"ddl\"") != std::string::npos);
     REQUIRE(json.find("\"pruned_segments\":9") != std::string::npos);

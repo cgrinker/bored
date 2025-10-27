@@ -36,6 +36,20 @@ namespace bs = bored::storage;
 
 namespace {
 
+std::span<const std::byte> tuple_payload_view(std::span<const std::byte> storage)
+{
+    if (storage.size() <= bs::tuple_header_size()) {
+        return {};
+    }
+    return storage.subspan(bs::tuple_header_size());
+}
+
+std::vector<std::byte> tuple_payload_vector(std::span<const std::byte> storage)
+{
+    auto payload = tuple_payload_view(storage);
+    return std::vector<std::byte>(payload.begin(), payload.end());
+}
+
 struct BenchmarkOptions final {
     std::size_t samples = 5U;
     std::size_t fsm_page_count = 2048U;
@@ -408,7 +422,8 @@ OverflowFixture build_overflow_fixture(const BenchmarkOptions& options)
             OverflowFixture::ExpectedTuple expected{};
             expected.page_id = view->meta.page_id;
             expected.slot_index = view->meta.slot_index;
-            expected.payload.assign(view->tuple_payload.begin(), view->tuple_payload.end());
+            auto before_payload = tuple_payload_view(view->tuple_payload);
+            expected.payload.assign(before_payload.begin(), before_payload.end());
             fixture.expected.push_back(std::move(expected));
         }
     }

@@ -98,6 +98,7 @@ void TransactionManager::commit(TransactionContext& ctx)
         std::scoped_lock lock{mutex_};
         state->state = TransactionState::Committed;
         erase_state_locked(state->id);
+        ++telemetry_.committed_transactions;
     }
 
     for (auto& callback : state->commit_callbacks) {
@@ -123,6 +124,7 @@ void TransactionManager::abort(TransactionContext& ctx)
         }
         state->state = TransactionState::Aborted;
         erase_state_locked(state->id);
+        ++telemetry_.aborted_transactions;
     }
 
     for (auto& callback : state->abort_callbacks) {
@@ -151,6 +153,25 @@ Snapshot TransactionManager::current_snapshot() const
     return build_snapshot_locked(0U);
 }
 
+Snapshot TransactionManager::capture_snapshot(TransactionId current_transaction_id)
+{
+    std::scoped_lock lock{mutex_};
+    return build_snapshot_locked(current_transaction_id);
+}
+
+TransactionTelemetrySnapshot TransactionManager::telemetry_snapshot() const
+{
+    std::scoped_lock lock{mutex_};
+    TransactionTelemetrySnapshot snapshot{};
+    snapshot.active_transactions = count_active_locked();
+    snapshot.committed_transactions = telemetry_.committed_transactions;
+    snapshot.aborted_transactions = telemetry_.aborted_transactions;
+    snapshot.last_snapshot_xmin = telemetry_.last_snapshot_xmin;
+    snapshot.last_snapshot_xmax = telemetry_.last_snapshot_xmax;
+    snapshot.last_snapshot_age = telemetry_.last_snapshot_age;
+    return snapshot;
+}
+
 TransactionId TransactionManager::oldest_active_transaction() const
 {
     std::scoped_lock lock{mutex_};
@@ -165,16 +186,7 @@ TransactionId TransactionManager::next_transaction_id() const noexcept
 std::size_t TransactionManager::active_transaction_count() const
 {
     std::scoped_lock lock{mutex_};
-    std::size_t count = 0U;
-    for (auto it = active_.begin(); it != active_.end();) {
-        if (it->second.expired()) {
-            it = active_.erase(it);
-            continue;
-        }
-        ++count;
-        ++it;
-    }
-    return count;
+    return count_active_locked();
 }
 
 void TransactionManager::advance_low_water_mark(TransactionId txn_id)
@@ -220,6 +232,20 @@ void TransactionManager::recompute_oldest_locked()
     oldest_active_ = candidate;
 }
 
+std::size_t TransactionManager::count_active_locked() const
+{
+    std::size_t count = 0U;
+    for (auto it = active_.begin(); it != active_.end();) {
+        if (it->second.expired()) {
+            it = active_.erase(it);
+            continue;
+        }
+        ++count;
+        ++it;
+    }
+    return count;
+}
+
 Snapshot TransactionManager::build_snapshot_locked(TransactionId self_id) const
 {
     Snapshot snapshot{};
@@ -261,6 +287,10 @@ Snapshot TransactionManager::build_snapshot_locked(TransactionId self_id) const
 
     snapshot.xmin = xmin_candidate;
     snapshot.in_progress = std::move(in_progress);
+    const auto age = snapshot.xmax >= snapshot.xmin ? snapshot.xmax - snapshot.xmin : 0U;
+    telemetry_.last_snapshot_xmin = snapshot.xmin;
+    telemetry_.last_snapshot_xmax = snapshot.xmax;
+    telemetry_.last_snapshot_age = age;
     return snapshot;
 }
 

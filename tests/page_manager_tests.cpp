@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <cstring>
 #include <span>
 #include <vector>
 
@@ -40,6 +41,9 @@ using bored::storage::WalCompactionView;
 using bored::storage::WalIndexMaintenanceAction;
 using bored::storage::any;
 using bored::storage::WalReader;
+using bored::storage::TupleHeader;
+using bored::storage::tuple_header_size;
+using bored::storage::tuple_storage_length;
 
 namespace {
 
@@ -81,6 +85,29 @@ std::span<const std::byte> wal_payload_view(const WalRecordHeader& header, const
     return {base + sizeof(WalRecordHeader), payload_size};
 }
 
+std::span<const std::byte> tuple_payload_view(std::span<const std::byte> storage)
+{
+    if (storage.size() <= tuple_header_size()) {
+        return {};
+    }
+    return storage.subspan(tuple_header_size());
+}
+
+TupleHeader decode_tuple_header(std::span<const std::byte> storage)
+{
+    TupleHeader header{};
+    if (storage.size() >= tuple_header_size()) {
+        std::memcpy(&header, storage.data(), tuple_header_size());
+    }
+    return header;
+}
+
+std::vector<std::byte> tuple_payload_vector(std::span<const std::byte> storage)
+{
+    auto payload = tuple_payload_view(storage);
+    return std::vector<std::byte>(payload.begin(), payload.end());
+}
+
 }  // namespace
 
 TEST_CASE("PageManager insert tuple logs WAL record")
@@ -109,7 +136,7 @@ TEST_CASE("PageManager insert tuple logs WAL record")
 
     const auto& header = bored::storage::page_header(std::span<const std::byte>(page_span.data(), page_span.size()));
     REQUIRE(header.lsn == insert_result.wal.lsn);
-    REQUIRE(insert_result.slot.length == tuple.size());
+    REQUIRE(insert_result.slot.length == tuple_storage_length(tuple.size()));
 
     REQUIRE_FALSE(manager.flush_wal());
 
@@ -135,9 +162,14 @@ TEST_CASE("PageManager insert tuple logs WAL record")
     REQUIRE(meta->slot_index == insert_result.slot.index);
     REQUIRE(meta->tuple_length == insert_result.slot.length);
 
-    auto tuple_payload = bored::storage::wal_tuple_payload(payload, *meta);
-    REQUIRE(tuple_payload.size() == tuple.size());
-    REQUIRE(std::equal(tuple_payload.begin(), tuple_payload.end(), tuple.begin(), tuple.end()));
+    auto tuple_storage = bored::storage::wal_tuple_payload(payload, *meta);
+    REQUIRE(tuple_storage.size() == tuple_storage_length(tuple.size()));
+    auto header_view = decode_tuple_header(tuple_storage);
+    REQUIRE(header_view.created_transaction_id == 0U);
+    REQUIRE(header_view.deleted_transaction_id == 0U);
+    auto logical_payload = tuple_payload_view(tuple_storage);
+    REQUIRE(logical_payload.size() == tuple.size());
+    REQUIRE(std::equal(logical_payload.begin(), logical_payload.end(), tuple.begin(), tuple.end()));
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
@@ -190,8 +222,10 @@ TEST_CASE("PageManager delete tuple logs WAL record")
     REQUIRE(before_view);
     REQUIRE(before_view->meta.slot_index == insert_result.slot.index);
     REQUIRE(before_view->meta.page_id == 77U);
-    REQUIRE(before_view->tuple_payload.size() == tuple.size());
-    REQUIRE(std::equal(before_view->tuple_payload.begin(), before_view->tuple_payload.end(), tuple.begin(), tuple.end()));
+    REQUIRE(before_view->tuple_payload.size() == tuple_storage_length(tuple.size()));
+    auto before_payload = tuple_payload_view(before_view->tuple_payload);
+    REQUIRE(before_payload.size() == tuple.size());
+    REQUIRE(std::equal(before_payload.begin(), before_payload.end(), tuple.begin(), tuple.end()));
     REQUIRE(before_view->overflow_chunks.empty());
 
     auto second_aligned = align_up_to_block(second_header->total_length);
@@ -247,7 +281,7 @@ TEST_CASE("PageManager update tuple logs WAL record")
     auto update_ec = manager.update_tuple(page_span, insert_result.slot.index, updated, 6000U, update_result);
     REQUIRE_FALSE(update_ec);
     REQUIRE(update_result.slot.index == insert_result.slot.index);
-    REQUIRE(update_result.slot.length == updated.size());
+    REQUIRE(update_result.slot.length == tuple_storage_length(updated.size()));
     REQUIRE(update_result.old_length == original.size());
 
     auto tuple_view = bored::storage::read_tuple(std::span<const std::byte>(page_span.data(), page_span.size()), update_result.slot.index);
@@ -272,9 +306,11 @@ TEST_CASE("PageManager update tuple logs WAL record")
     REQUIRE(before_view);
     REQUIRE(before_view->meta.slot_index == insert_result.slot.index);
     REQUIRE(before_view->meta.page_id == 501U);
-    REQUIRE(before_view->meta.tuple_length == original.size());
-    REQUIRE(before_view->tuple_payload.size() == original.size());
-    REQUIRE(std::equal(before_view->tuple_payload.begin(), before_view->tuple_payload.end(), original.begin(), original.end()));
+    REQUIRE(before_view->meta.tuple_length == tuple_storage_length(original.size()));
+    REQUIRE(before_view->tuple_payload.size() == tuple_storage_length(original.size()));
+    auto before_payload = tuple_payload_view(before_view->tuple_payload);
+    REQUIRE(before_payload.size() == original.size());
+    REQUIRE(std::equal(before_payload.begin(), before_payload.end(), original.begin(), original.end()));
     REQUIRE(before_view->overflow_chunks.empty());
 
     auto second_aligned = align_up_to_block(second_header->total_length);
@@ -291,12 +327,14 @@ TEST_CASE("PageManager update tuple logs WAL record")
     REQUIRE(meta);
     REQUIRE(meta->base.page_id == 501U);
     REQUIRE(meta->base.slot_index == insert_result.slot.index);
-    REQUIRE(meta->base.tuple_length == updated.size());
+    REQUIRE(meta->base.tuple_length == tuple_storage_length(updated.size()));
     REQUIRE(meta->old_length == original.size());
 
     auto payload_bytes = bored::storage::wal_tuple_update_payload(payload, *meta);
-    REQUIRE(payload_bytes.size() == updated.size());
-    REQUIRE(std::equal(payload_bytes.begin(), payload_bytes.end(), updated.begin(), updated.end()));
+    REQUIRE(payload_bytes.size() == tuple_storage_length(updated.size()));
+    auto update_payload = tuple_payload_view(payload_bytes);
+    REQUIRE(update_payload.size() == updated.size());
+    REQUIRE(std::equal(update_payload.begin(), update_payload.end(), updated.begin(), updated.end()));
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
@@ -496,12 +534,15 @@ TEST_CASE("PageManager insert overflow tuple logs before-image chunks")
     REQUIRE(before_snapshot.meta.page_id == 3131U);
     REQUIRE(before_snapshot.meta.slot_index == insert_result.slot.index);
     const auto header_size = bored::storage::overflow_tuple_header_size();
-    CHECK(before_snapshot.meta.tuple_length == header_size + insert_result.inline_length);
-    REQUIRE(before_snapshot.tuple_payload.size() == insert_result.inline_length + header_size);
+    const auto expected_stub_storage = tuple_storage_length(header_size + insert_result.inline_length);
+    CHECK(before_snapshot.meta.tuple_length == expected_stub_storage);
+    REQUIRE(before_snapshot.tuple_payload.size() == expected_stub_storage);
+    auto stub_payload = tuple_payload_view(before_snapshot.tuple_payload);
+    REQUIRE(stub_payload.size() == header_size + insert_result.inline_length);
     REQUIRE(before_snapshot.overflow_chunks.size() == chunk_records);
 
     if (insert_result.inline_length > 0U) {
-        auto inline_view = before_snapshot.tuple_payload.subspan(header_size);
+        auto inline_view = stub_payload.subspan(header_size);
         auto expected_inline = std::span<const std::byte>(big_payload.data(), insert_result.inline_length);
         REQUIRE(std::equal(inline_view.begin(), inline_view.end(), expected_inline.begin(), expected_inline.end()));
     }

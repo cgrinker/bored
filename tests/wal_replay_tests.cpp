@@ -76,6 +76,29 @@ std::filesystem::path make_temp_dir(const std::string& prefix)
     return dir;
 }
 
+std::span<const std::byte> tuple_payload_view(std::span<const std::byte> storage)
+{
+    if (storage.size() <= bored::storage::tuple_header_size()) {
+        return {};
+    }
+    return storage.subspan(bored::storage::tuple_header_size());
+}
+
+std::vector<std::byte> tuple_payload_vector(std::span<const std::byte> storage)
+{
+    auto payload = tuple_payload_view(storage);
+    return std::vector<std::byte>(payload.begin(), payload.end());
+}
+
+bored::storage::TupleHeader decode_tuple_header(std::span<const std::byte> storage)
+{
+    bored::storage::TupleHeader header{};
+    if (storage.size() >= bored::storage::tuple_header_size()) {
+        std::memcpy(&header, storage.data(), bored::storage::tuple_header_size());
+    }
+    return header;
+}
+
 bored::storage::WalCommitHeader make_commit_header(const std::shared_ptr<WalWriter>& wal_writer,
                                                    std::uint64_t transaction_id,
                                                    std::uint64_t next_transaction_id = 0U,
@@ -757,7 +780,7 @@ TEST_CASE("Wal crash drill restores overflow before image")
     REQUIRE(before_view->meta.page_id == page_id);
     REQUIRE_FALSE(before_view->overflow_chunks.empty());
 
-    std::vector<std::byte> expected_tuple_payload(before_view->tuple_payload.begin(), before_view->tuple_payload.end());
+    auto expected_tuple_payload = tuple_payload_vector(before_view->tuple_payload);
     std::vector<bored::storage::WalOverflowChunkMeta> expected_chunk_metas;
     expected_chunk_metas.reserve(before_view->overflow_chunks.size());
     std::vector<std::vector<std::byte>> expected_chunk_payloads;
@@ -918,7 +941,8 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
                 auto before_view = bored::storage::decode_wal_tuple_before_image(payload);
                 REQUIRE(before_view);
                 span.slot_index = before_view->meta.slot_index;
-                span.tuple_payload.assign(before_view->tuple_payload.begin(), before_view->tuple_payload.end());
+                auto before_payload = tuple_payload_view(before_view->tuple_payload);
+                span.tuple_payload.assign(before_payload.begin(), before_payload.end());
                 for (const auto& chunk_view : before_view->overflow_chunks) {
                     span.chunk_metas.push_back(chunk_view.meta);
                     span.chunk_payloads.emplace_back(chunk_view.payload.begin(), chunk_view.payload.end());

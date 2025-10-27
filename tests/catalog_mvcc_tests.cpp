@@ -8,12 +8,14 @@
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_recovery.hpp"
-#include "bored/txn/transaction_types.hpp"
+#include "bored/txn/persistent_transaction_id_allocator.hpp"
+#include "bored/txn/transaction_manager.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -88,6 +90,46 @@ TEST_CASE("Catalog tuple visibility honors MVCC snapshot")
     CHECK_FALSE(transaction.is_visible(self_delete));
     CHECK(transaction.is_visible(frozen));
     CHECK_FALSE(transaction.is_visible(invalid));
+}
+
+TEST_CASE("Catalog transaction captures snapshot from transaction manager")
+{
+    CatalogCache::instance().reset();
+
+    bored::txn::PersistentTransactionIdAllocator allocator{100U};
+    bored::txn::TransactionManager manager{allocator};
+
+    auto first = manager.begin();
+    auto second = manager.begin();
+
+    CatalogTransactionConfig config{};
+    config.id_allocator = &allocator;
+    config.snapshot_manager = &manager;
+    CatalogTransaction transaction{config};
+
+    CHECK(transaction.transaction_id() == 102U);
+
+    const auto snapshot = transaction.snapshot();
+    CHECK(snapshot.xmin == first.id());
+    CHECK(snapshot.xmax == manager.next_transaction_id());
+    REQUIRE(snapshot.in_progress.size() == 2U);
+    CHECK(snapshot.in_progress.front() == first.id());
+    CHECK(snapshot.in_progress.back() == second.id());
+
+    auto committed_tuple = tuple_descriptor(first.id() - 2U, 0U);
+    CHECK(transaction.is_visible(committed_tuple));
+
+    auto concurrent_tuple = tuple_descriptor(first.id(), 0U);
+    CHECK_FALSE(transaction.is_visible(concurrent_tuple));
+
+    auto self_tuple = tuple_descriptor(transaction.transaction_id(), 0U);
+    CHECK(transaction.is_visible(self_tuple));
+
+    auto future_tuple = tuple_descriptor(manager.next_transaction_id(), 0U);
+    CHECK_FALSE(transaction.is_visible(future_tuple));
+
+    manager.commit(first);
+    manager.commit(second);
 }
 
 TEST_CASE("Catalog accessor caches relation scans and filters visibility")
@@ -273,15 +315,26 @@ TEST_CASE("Wal replayer preserves catalog tuple mvcc metadata")
     CatalogTableDescriptor descriptor{tuple_descriptor(42U, 0U), RelationId{1234U}, SchemaId{56U}, CatalogTableType::Catalog, 789U, "test_table"};
     auto tuple_payload = serialize_catalog_table(descriptor);
 
+    bored::storage::TupleHeader tuple_header{};
+    std::vector<std::byte> tuple_storage(bored::storage::tuple_storage_length(tuple_payload.size()));
+    std::memcpy(tuple_storage.data(), &tuple_header, bored::storage::tuple_header_size());
+    if (!tuple_payload.empty()) {
+        std::memcpy(tuple_storage.data() + bored::storage::tuple_header_size(),
+                    tuple_payload.data(),
+                    tuple_payload.size());
+    }
+
     WalTupleMeta meta{};
     meta.page_id = 4242U;
     meta.slot_index = 0U;
-    meta.tuple_length = static_cast<std::uint16_t>(tuple_payload.size());
+    meta.tuple_length = static_cast<std::uint16_t>(tuple_storage.size());
     meta.row_id = descriptor.relation_id.value;
 
-    const auto wal_payload_size = wal_tuple_insert_payload_size(static_cast<std::uint16_t>(tuple_payload.size()));
+    const auto wal_payload_size = wal_tuple_insert_payload_size(meta.tuple_length);
     std::vector<std::byte> wal_payload(wal_payload_size);
-    REQUIRE(encode_wal_tuple_insert(std::span<std::byte>(wal_payload.data(), wal_payload.size()), meta, std::span<const std::byte>(tuple_payload.data(), tuple_payload.size())));
+    REQUIRE(encode_wal_tuple_insert(std::span<std::byte>(wal_payload.data(), wal_payload.size()),
+                                    meta,
+                                    std::span<const std::byte>(tuple_storage.data(), tuple_storage.size())));
 
     WalRecoveryRecord insert_record{};
     insert_record.header.type = static_cast<std::uint16_t>(WalRecordType::CatalogInsert);

@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <span>
 #include <vector>
 #include <string_view>
@@ -19,6 +20,9 @@ using bored::storage::SlotPointer;
 using bored::storage::WalRecordHeader;
 using bored::storage::WalRecordType;
 using bored::storage::WalSegmentHeader;
+using bored::storage::TupleHeader;
+using bored::storage::tuple_header_size;
+using bored::storage::tuple_storage_length;
 
 constexpr std::array<std::byte, 5> kTestPayload{std::byte{'a'}, std::byte{'l'}, std::byte{'p'}, std::byte{'h'}, std::byte{'a'}};
 
@@ -38,6 +42,25 @@ std::span<const std::byte> to_payload(std::string_view text)
 {
     auto chars = std::span<const char>{text.data(), text.size()};
     return std::as_bytes(chars);
+}
+
+std::vector<std::byte> build_tuple_storage(std::span<const std::byte> payload,
+                                           const TupleHeader& header = TupleHeader{})
+{
+    std::vector<std::byte> storage(tuple_storage_length(payload.size()));
+    std::memcpy(storage.data(), &header, tuple_header_size());
+    if (!payload.empty()) {
+        std::memcpy(storage.data() + tuple_header_size(), payload.data(), payload.size());
+    }
+    return storage;
+}
+
+std::span<const std::byte> payload_from_storage(std::span<const std::byte> storage)
+{
+    if (storage.size() <= tuple_header_size()) {
+        return {};
+    }
+    return storage.subspan(tuple_header_size());
 }
 
 }  // namespace
@@ -230,7 +253,8 @@ TEST_CASE("WAL tuple insert payload round-trips")
     bored::storage::WalTupleMeta meta{};
     meta.page_id = 77U;
     meta.slot_index = 5U;
-    meta.tuple_length = static_cast<std::uint16_t>(kTestPayload.size());
+    const auto tuple_storage = build_tuple_storage(std::span<const std::byte>(kTestPayload));
+    meta.tuple_length = static_cast<std::uint16_t>(tuple_storage.size());
     meta.row_id = 0x1234'5678'9ABC'DEF0ULL;
 
     std::array<std::byte, 128> buffer{};
@@ -238,8 +262,7 @@ TEST_CASE("WAL tuple insert payload round-trips")
     const auto required = bored::storage::wal_tuple_insert_payload_size(meta.tuple_length);
     auto target = span.subspan(0, required);
 
-    auto payload_span = std::span<const std::byte>(kTestPayload);
-    REQUIRE(bored::storage::encode_wal_tuple_insert(target, meta, payload_span));
+    REQUIRE(bored::storage::encode_wal_tuple_insert(target, meta, std::span<const std::byte>(tuple_storage.data(), tuple_storage.size())));
 
     auto decoded = bored::storage::decode_wal_tuple_meta(target);
     REQUIRE(decoded);
@@ -248,7 +271,9 @@ TEST_CASE("WAL tuple insert payload round-trips")
     REQUIRE(decoded->tuple_length == meta.tuple_length);
     REQUIRE(decoded->row_id == meta.row_id);
 
-    auto round_trip_payload = bored::storage::wal_tuple_payload(target, *decoded);
+    auto round_trip_storage = bored::storage::wal_tuple_payload(target, *decoded);
+    REQUIRE(round_trip_storage.size() == tuple_storage.size());
+    auto round_trip_payload = payload_from_storage(round_trip_storage);
     REQUIRE(round_trip_payload.size() == kTestPayload.size());
     REQUIRE(std::equal(round_trip_payload.begin(), round_trip_payload.end(), kTestPayload.begin(), kTestPayload.end()));
 }
@@ -258,7 +283,8 @@ TEST_CASE("WAL tuple update payload records previous length")
     bored::storage::WalTupleMeta base{};
     base.page_id = 11U;
     base.slot_index = 2U;
-    base.tuple_length = static_cast<std::uint16_t>(kTestPayload.size());
+    const auto tuple_storage = build_tuple_storage(std::span<const std::byte>(kTestPayload));
+    base.tuple_length = static_cast<std::uint16_t>(tuple_storage.size());
     base.row_id = 88U;
 
     bored::storage::WalTupleUpdateMeta meta{};
@@ -270,8 +296,9 @@ TEST_CASE("WAL tuple update payload records previous length")
     const auto required = bored::storage::wal_tuple_update_payload_size(base.tuple_length);
     auto target = span.subspan(0, required);
 
-    auto payload_span = std::span<const std::byte>(kTestPayload);
-    REQUIRE(bored::storage::encode_wal_tuple_update(target, meta, payload_span));
+    REQUIRE(bored::storage::encode_wal_tuple_update(target,
+                                                    meta,
+                                                    std::span<const std::byte>(tuple_storage.data(), tuple_storage.size())));
 
     auto decoded_meta = bored::storage::decode_wal_tuple_update_meta(target);
     REQUIRE(decoded_meta);
@@ -281,8 +308,10 @@ TEST_CASE("WAL tuple update payload records previous length")
     REQUIRE(decoded_meta->old_length == meta.old_length);
 
     auto payload = bored::storage::wal_tuple_update_payload(target, *decoded_meta);
-    REQUIRE(payload.size() == kTestPayload.size());
-    REQUIRE(std::equal(payload.begin(), payload.end(), kTestPayload.begin(), kTestPayload.end()));
+    REQUIRE(payload.size() == tuple_storage.size());
+    auto logical_payload = payload_from_storage(payload);
+    REQUIRE(logical_payload.size() == kTestPayload.size());
+    REQUIRE(std::equal(logical_payload.begin(), logical_payload.end(), kTestPayload.begin(), kTestPayload.end()));
 }
 
 TEST_CASE("WAL tuple before-image payload captures overflow chunks")
@@ -290,7 +319,8 @@ TEST_CASE("WAL tuple before-image payload captures overflow chunks")
     bored::storage::WalTupleMeta meta{};
     meta.page_id = 44U;
     meta.slot_index = 7U;
-    meta.tuple_length = static_cast<std::uint16_t>(kTestPayload.size());
+    const auto tuple_storage = build_tuple_storage(std::span<const std::byte>(kTestPayload));
+    meta.tuple_length = static_cast<std::uint16_t>(tuple_storage.size());
     meta.row_id = 0x0BAD'F00D'CAFE'BEEFull;
 
     std::vector<bored::storage::WalOverflowChunkMeta> chunk_metas;
@@ -326,7 +356,7 @@ TEST_CASE("WAL tuple before-image payload captures overflow chunks")
     std::vector<std::byte> buffer(required);
     auto target = std::span<std::byte>(buffer.data(), buffer.size());
 
-    auto tuple_payload = std::span<const std::byte>(kTestPayload);
+    auto tuple_payload = std::span<const std::byte>(tuple_storage.data(), tuple_storage.size());
     REQUIRE(bored::storage::encode_wal_tuple_before_image(target,
                                                           meta,
                                                           tuple_payload,
@@ -339,8 +369,10 @@ TEST_CASE("WAL tuple before-image payload captures overflow chunks")
     CHECK(decoded->meta.slot_index == meta.slot_index);
     CHECK(decoded->meta.tuple_length == meta.tuple_length);
     CHECK(decoded->meta.row_id == meta.row_id);
-    REQUIRE(decoded->tuple_payload.size() == kTestPayload.size());
-    REQUIRE(std::equal(decoded->tuple_payload.begin(), decoded->tuple_payload.end(), kTestPayload.begin(), kTestPayload.end()));
+    REQUIRE(decoded->tuple_payload.size() == tuple_storage.size());
+    auto logical_payload = payload_from_storage(decoded->tuple_payload);
+    REQUIRE(logical_payload.size() == kTestPayload.size());
+    REQUIRE(std::equal(logical_payload.begin(), logical_payload.end(), kTestPayload.begin(), kTestPayload.end()));
     REQUIRE(decoded->overflow_chunks.size() == chunk_metas.size());
     for (std::size_t index = 0; index < chunk_metas.size(); ++index) {
         const auto& expected_meta = chunk_metas[index];

@@ -77,7 +77,8 @@ public:
     [[nodiscard]] std::error_code insert_tuple(std::span<std::byte> page,
                                                std::span<const std::byte> payload,
                                                std::uint64_t row_id,
-                                               TupleInsertResult& out_result) const;
+                                               TupleInsertResult& out_result,
+                                               TupleHeader tuple_header = {}) const;
 
     [[nodiscard]] std::error_code delete_tuple(std::span<std::byte> page,
                                                std::uint16_t slot_index,

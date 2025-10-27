@@ -239,7 +239,8 @@ std::error_code PageManager::build_overflow_truncate_payload(const WalTupleMeta&
 std::error_code PageManager::insert_tuple(std::span<std::byte> page,
                                           std::span<const std::byte> payload,
                                           std::uint64_t row_id,
-                                          TupleInsertResult& out_result) const
+                                          TupleInsertResult& out_result,
+                                          TupleHeader tuple_header) const
 {
     OperationScope telemetry_scope{this, OperationKind::Insert};
 
@@ -250,6 +251,9 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     if (payload.size() > std::numeric_limits<std::uint32_t>::max()) {
         return std::make_error_code(std::errc::value_too_large);
     }
+
+    const auto overflow_flag_bits = static_cast<std::uint16_t>(TupleFlag::HasOverflow);
+    tuple_header.flags &= static_cast<std::uint16_t>(~overflow_flag_bits);
 
     const auto page_const = as_const_span(page);
     const auto& header = page_header(page_const);
@@ -272,9 +276,16 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
         meta.tuple_length = plan->tuple_length;
         meta.row_id = row_id;
 
+        std::vector<std::byte> tuple_storage(meta.tuple_length);
+        std::memcpy(tuple_storage.data(), &tuple_header, tuple_header_size());
+        if (!payload.empty()) {
+            std::memcpy(tuple_storage.data() + tuple_header_size(), payload.data(), payload.size());
+        }
+
         std::vector<std::byte> wal_buffer(wal_tuple_insert_payload_size(meta.tuple_length));
         auto wal_buffer_span = std::span<std::byte>(wal_buffer.data(), wal_buffer.size());
-        if (!encode_wal_tuple_insert(wal_buffer_span, meta, payload)) {
+        auto tuple_storage_span = std::span<const std::byte>(tuple_storage.data(), tuple_storage.size());
+        if (!encode_wal_tuple_insert(wal_buffer_span, meta, tuple_storage_span)) {
             return std::make_error_code(std::errc::invalid_argument);
         }
 
@@ -289,7 +300,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
             return ec;
         }
 
-        auto slot = append_tuple(page, payload, wal_result.lsn, fsm_);
+        auto slot = append_tuple(page, tuple_header, payload, wal_result.lsn, fsm_);
         if (!slot) {
             return std::make_error_code(std::errc::io_error);
         }
@@ -367,6 +378,8 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     stub_header.inline_length = static_cast<std::uint32_t>(inline_length);
     stub_header.chunk_count = static_cast<std::uint16_t>(chunk_count);
 
+    tuple_header.flags |= overflow_flag_bits;
+
     const auto stub_size = overflow_tuple_header_size() + inline_length;
     std::vector<std::byte> stub_bytes(stub_size);
     std::memcpy(stub_bytes.data(), &stub_header, sizeof(stub_header));
@@ -378,14 +391,21 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     WalTupleMeta meta{};
     meta.page_id = header.page_id;
     meta.slot_index = stub_plan->slot_index;
-    meta.tuple_length = static_cast<std::uint16_t>(stub_bytes.size());
+    meta.tuple_length = stub_plan->tuple_length;
     meta.row_id = row_id;
+
+    std::vector<std::byte> tuple_storage(meta.tuple_length);
+    std::memcpy(tuple_storage.data(), &tuple_header, tuple_header_size());
+    if (!stub_payload_span.empty()) {
+        std::memcpy(tuple_storage.data() + tuple_header_size(), stub_payload_span.data(), stub_payload_span.size());
+    }
+    auto tuple_storage_span = std::span<const std::byte>(tuple_storage.data(), tuple_storage.size());
 
     std::vector<std::byte> wal_buffer(wal_tuple_insert_payload_size(meta.tuple_length));
     auto wal_buffer_span = std::span<std::byte>(wal_buffer.data(), wal_buffer.size());
     if (!encode_wal_tuple_insert(wal_buffer_span,
                                  meta,
-                                 stub_payload_span)) {
+                                 tuple_storage_span)) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 
@@ -478,7 +498,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     auto before_span = std::span<std::byte>(before_buffer.data(), before_buffer.size());
     if (!encode_wal_tuple_before_image(before_span,
                                        meta,
-                                       stub_payload_span,
+                                       tuple_storage_span,
                                        chunk_meta_span,
                                        chunk_payload_span,
                                        previous_page_lsn,
@@ -498,7 +518,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
         return before_ec;
     }
 
-    auto slot = append_tuple(page, stub_payload_span, wal_result.lsn, fsm_);
+    auto slot = append_tuple(page, tuple_header, stub_payload_span, wal_result.lsn, fsm_);
     if (!slot) {
         return std::make_error_code(std::errc::io_error);
     }
@@ -537,15 +557,17 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
         return latch_ec;
     }
 
-    auto tuple_view = read_tuple(page_const, slot_index);
-    if (tuple_view.empty()) {
+    auto tuple_storage = read_tuple_storage(page_const, slot_index);
+    if (tuple_storage.size() <= tuple_header_size()) {
         return std::make_error_code(std::errc::invalid_argument);
     }
+
+    auto tuple_payload = tuple_storage.subspan(tuple_header_size());
 
     WalTupleMeta before_meta{};
     before_meta.page_id = header.page_id;
     before_meta.slot_index = slot_index;
-    before_meta.tuple_length = static_cast<std::uint16_t>(tuple_view.size());
+    before_meta.tuple_length = static_cast<std::uint16_t>(tuple_storage.size());
     before_meta.row_id = row_id;
 
     std::optional<OverflowTupleHeader> overflow_header;
@@ -553,7 +575,7 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
     std::vector<std::vector<std::byte>> truncate_chunk_payloads;
     WalOverflowTruncateMeta truncate_meta{};
 
-    if (auto header_opt = parse_overflow_tuple(tuple_view)) {
+    if (auto header_opt = parse_overflow_tuple(tuple_payload)) {
         overflow_header = header_opt;
         if (header_opt->chunk_count > 0U) {
             if (auto ec = build_overflow_truncate_payload(before_meta,
@@ -589,7 +611,7 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
     auto before_span = std::span<std::byte>(before_buffer.data(), before_buffer.size());
     if (!encode_wal_tuple_before_image(before_span,
                                        before_meta,
-                                       tuple_view,
+                                       tuple_storage,
                                        chunk_meta_span,
                                        chunk_payload_span,
                                        delete_previous_lsn,
@@ -690,21 +712,39 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
         return latch_ec;
     }
 
-    auto current_tuple = read_tuple(page_const, slot_index);
-    if (current_tuple.empty()) {
+    auto current_storage = read_tuple_storage(page_const, slot_index);
+    if (current_storage.size() <= tuple_header_size()) {
         return std::make_error_code(std::errc::invalid_argument);
     }
+
+    auto current_payload = current_storage.subspan(tuple_header_size());
+
+    auto current_header = read_tuple_header(page_const, slot_index);
+    if (!current_header) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+    auto tuple_header = *current_header;
+
+    const auto overflow_flag_bits = static_cast<std::uint16_t>(TupleFlag::HasOverflow);
+    tuple_header.flags &= static_cast<std::uint16_t>(~overflow_flag_bits);
 
     if (new_payload.size() > std::numeric_limits<std::uint16_t>::max()) {
         return std::make_error_code(std::errc::value_too_large);
     }
 
-    const auto old_length = static_cast<std::uint16_t>(current_tuple.size());
-    const auto new_length = static_cast<std::uint16_t>(new_payload.size());
+    const auto old_storage_size = current_storage.size();
+    const auto new_storage_size = tuple_storage_length(new_payload.size());
+    if (new_storage_size > std::numeric_limits<std::uint16_t>::max()) {
+        return std::make_error_code(std::errc::value_too_large);
+    }
 
-    if (new_length > old_length) {
+    const auto old_payload_length = static_cast<std::uint16_t>(current_payload.size());
+    const auto old_storage_length = static_cast<std::uint16_t>(old_storage_size);
+    const auto new_storage_length = static_cast<std::uint16_t>(new_storage_size);
+
+    if (new_storage_size > old_storage_size) {
         const auto free_bytes = compute_free_bytes(header);
-        const auto extra_required = static_cast<std::size_t>(new_length) - static_cast<std::size_t>(old_length);
+        const auto extra_required = new_storage_size - old_storage_size;
         if (free_bytes < extra_required) {
             return std::make_error_code(std::errc::no_buffer_space);
         }
@@ -713,14 +753,14 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     WalTupleMeta before_meta{};
     before_meta.page_id = header.page_id;
     before_meta.slot_index = slot_index;
-    before_meta.tuple_length = old_length;
+    before_meta.tuple_length = old_storage_length;
     before_meta.row_id = row_id;
 
     std::vector<WalOverflowChunkMeta> truncate_chunk_metas;
     std::vector<std::vector<std::byte>> truncate_chunk_payloads;
     WalOverflowTruncateMeta truncate_meta{};
 
-    if (auto overflow_header = parse_overflow_tuple(current_tuple)) {
+    if (auto overflow_header = parse_overflow_tuple(current_payload)) {
         if (overflow_header->chunk_count > 0U) {
             if (auto ec = build_overflow_truncate_payload(before_meta,
                                                           *overflow_header,
@@ -755,7 +795,7 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     auto before_span = std::span<std::byte>(before_buffer.data(), before_buffer.size());
     if (!encode_wal_tuple_before_image(before_span,
                                        before_meta,
-                                       current_tuple,
+                                       current_storage,
                                        chunk_meta_span,
                                        chunk_payload_span,
                                        update_previous_lsn,
@@ -798,16 +838,27 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
         }
     }
 
+    if (is_overflow_tuple(new_payload)) {
+        tuple_header.flags |= overflow_flag_bits;
+    }
+
     WalTupleUpdateMeta meta{};
     meta.base.page_id = header.page_id;
     meta.base.slot_index = slot_index;
-    meta.base.tuple_length = new_length;
+    meta.base.tuple_length = new_storage_length;
     meta.base.row_id = row_id;
-    meta.old_length = old_length;
+    meta.old_length = old_payload_length;
+
+    std::vector<std::byte> tuple_storage(meta.base.tuple_length);
+    std::memcpy(tuple_storage.data(), &tuple_header, tuple_header_size());
+    if (!new_payload.empty()) {
+        std::memcpy(tuple_storage.data() + tuple_header_size(), new_payload.data(), new_payload.size());
+    }
+    auto tuple_storage_span = std::span<const std::byte>(tuple_storage.data(), tuple_storage.size());
 
     std::vector<std::byte> wal_buffer(wal_tuple_update_payload_size(meta.base.tuple_length));
     auto wal_buffer_span = std::span<std::byte>(wal_buffer.data(), wal_buffer.size());
-    if (!encode_wal_tuple_update(wal_buffer_span, meta, new_payload)) {
+    if (!encode_wal_tuple_update(wal_buffer_span, meta, tuple_storage_span)) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 
@@ -826,7 +877,7 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
         return std::make_error_code(std::errc::io_error);
     }
 
-    auto appended = append_tuple(page, new_payload, wal_result.lsn, fsm_);
+    auto appended = append_tuple(page, tuple_header, new_payload, wal_result.lsn, fsm_);
     if (!appended) {
         return std::make_error_code(std::errc::io_error);
     }
@@ -846,7 +897,7 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
 
     out_result.slot = new_slot;
     out_result.wal = wal_result;
-    out_result.old_length = old_length;
+    out_result.old_length = old_payload_length;
     telemetry_scope.set_success();
     return {};
 }

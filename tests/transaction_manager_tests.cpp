@@ -69,3 +69,61 @@ TEST_CASE("TransactionManager low water mark advances once active set drains", "
     CHECK(snapshot.xmax == manager.next_transaction_id());
     CHECK(snapshot.in_progress.empty());
 }
+
+TEST_CASE("TransactionManager surfaces snapshot manager interface", "[txn]")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{100U};
+    bored::txn::TransactionManager manager{allocator};
+
+    auto first = manager.begin();
+    auto second = manager.begin();
+
+    bored::txn::SnapshotManager* snapshot_manager = &manager;
+    auto snapshot = snapshot_manager->capture_snapshot(102U);
+
+    CHECK(snapshot.xmax == manager.next_transaction_id());
+    CHECK(snapshot.xmin == first.id());
+    REQUIRE(snapshot.in_progress.size() == 2U);
+    CHECK(snapshot.in_progress.front() == first.id());
+    CHECK(snapshot.in_progress.back() == second.id());
+
+    manager.commit(first);
+
+    auto refreshed = snapshot_manager->capture_snapshot(102U);
+    REQUIRE(refreshed.in_progress.size() == 1U);
+    CHECK(refreshed.in_progress.front() == second.id());
+
+    manager.commit(second);
+}
+
+TEST_CASE("TransactionManager telemetry tracks lifecycle", "[txn]")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{12U};
+    bored::txn::TransactionManager manager{allocator};
+
+    auto telemetry = manager.telemetry_snapshot();
+    CHECK(telemetry.active_transactions == 0U);
+    CHECK(telemetry.committed_transactions == 0U);
+    CHECK(telemetry.aborted_transactions == 0U);
+
+    auto first = manager.begin();
+    auto second = manager.begin();
+
+    auto active = manager.telemetry_snapshot();
+    CHECK(active.active_transactions == 2U);
+    CHECK(active.committed_transactions == 0U);
+    CHECK(active.aborted_transactions == 0U);
+    CHECK(active.last_snapshot_xmin == first.id());
+    CHECK(active.last_snapshot_xmax == manager.next_transaction_id());
+    CHECK(active.last_snapshot_age == active.last_snapshot_xmax - active.last_snapshot_xmin);
+
+    manager.commit(first);
+    manager.abort(second);
+
+    (void)manager.current_snapshot();
+    auto after = manager.telemetry_snapshot();
+    CHECK(after.active_transactions == 0U);
+    CHECK(after.committed_transactions == 1U);
+    CHECK(after.aborted_transactions == 1U);
+    CHECK(after.last_snapshot_xmax >= after.last_snapshot_xmin);
+}

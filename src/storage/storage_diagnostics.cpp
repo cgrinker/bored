@@ -236,6 +236,19 @@ void append_parser_snapshot(std::string& out, const bored::parser::ParserTelemet
     out.push_back('}');
 }
 
+void append_transaction_snapshot(std::string& out, const bored::txn::TransactionTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "active_transactions", snapshot.active_transactions, first);
+    append_field(out, "committed_transactions", snapshot.committed_transactions, first);
+    append_field(out, "aborted_transactions", snapshot.aborted_transactions, first);
+    append_field(out, "last_snapshot_xmin", snapshot.last_snapshot_xmin, first);
+    append_field(out, "last_snapshot_xmax", snapshot.last_snapshot_xmax, first);
+    append_field(out, "last_snapshot_age", snapshot.last_snapshot_age, first);
+    out.push_back('}');
+}
+
 void append_page_manager_section(std::string& out, const StorageDiagnosticsPageManagerSection& section)
 {
     out.push_back('{');
@@ -374,6 +387,29 @@ void append_parser_section(std::string& out, const StorageDiagnosticsParserSecti
     out.push_back('}');
 }
 
+void append_transaction_section(std::string& out, const StorageDiagnosticsTransactionSection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_transaction_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_transaction_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 }  // namespace
 
 StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryRegistry& registry,
@@ -427,6 +463,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+    document.transactions.total = registry.aggregate_transactions();
+    if (options.include_transaction_details) {
+        registry.visit_transactions([&](const std::string& identifier, const bored::txn::TransactionTelemetrySnapshot& snapshot) {
+            document.transactions.details.push_back(StorageDiagnosticsTransactionEntry{identifier, snapshot});
+        });
+        std::sort(document.transactions.details.begin(), document.transactions.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+
     document.ddl.total = registry.aggregate_ddl();
     if (options.include_ddl_details) {
         registry.visit_ddl([&](const std::string& identifier, const ddl::DdlTelemetrySnapshot& snapshot) {
@@ -455,6 +500,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_retention_section(out, document.retention);
     out.append(",\"catalog\":");
     append_catalog_section(out, document.catalog);
+    out.append(",\"transactions\":");
+    append_transaction_section(out, document.transactions);
     out.append(",\"parser\":");
     append_parser_section(out, document.parser);
     out.append(",\"ddl\":");
