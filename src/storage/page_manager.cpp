@@ -815,6 +815,8 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
         return before_ec;
     }
 
+    tuple_header.undo_next_lsn = before_result.lsn;
+
     if (!truncate_chunk_metas.empty()) {
         std::vector<std::byte> truncate_buffer(wal_overflow_truncate_payload_size(chunk_meta_span));
         auto truncate_span = std::span<std::byte>(truncate_buffer.data(), truncate_buffer.size());

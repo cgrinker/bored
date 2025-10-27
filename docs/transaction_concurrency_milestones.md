@@ -23,11 +23,11 @@
 ## Milestone 2: MVCC Tuple Versioning & Buffer Integration (1.5 sprints)
 - [x] Extend page and tuple headers with creation/deletion transaction identifiers plus `undo` linkage for version chains (tuple headers now persisted alongside payloads and mirrored into WAL records).
 - [x] Update `PageManager` mutation paths to emit MVCC-aware WAL records and maintain in-page version chains (tuple header wiring landed; undo chain population remains TODO).
-- [ ] Teach `WalReplayer` and `WalUndoWalker` to respect MVCC metadata when rehydrating and undoing tuples.
+- [x] Teach `WalReplayer` and `WalUndoWalker` to respect MVCC metadata when rehydrating and undoing tuples.
 - [ ] Introduce vacuum-style background task scaffolding to prune committed obsolete versions once safe.
 - [ ] Expand unit tests to cover concurrent insert/update/delete visibility across transaction snapshots.
 
-**Next Task:** Teach `WalReplayer`/`WalUndoWalker` to replay and undo tuples using the new MVCC tuple header fields.
+**Next Task:** Introduce vacuum scaffolding to trim committed MVCC versions once recovery and undo metadata are stable.
 
 ## Milestone 3: Locking, Latching, and Conflict Detection (1 sprint)
 - [ ] Implement row/page-intent lock hierarchy with deadlock detection or timeout policy.

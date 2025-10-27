@@ -183,6 +183,12 @@ TEST_CASE("WalReplayer replays committed tuple changes")
     CAPTURE(meta->base.tuple_length);
     }
 
+    REQUIRE(plan.redo.size() >= 2U);
+    const auto update_record_lsn = plan.redo[1].header.lsn;
+    const auto before_image_lsn = plan.redo[1].header.prev_lsn;
+    REQUIRE(update_record_lsn != 0U);
+    REQUIRE(before_image_lsn != 0U);
+
     FreeSpaceMap restored_fsm;
     REQUIRE_FALSE(FreeSpaceMapPersistence::load_snapshot(fsm_snapshot_path, restored_fsm));
 
@@ -219,6 +225,16 @@ TEST_CASE("WalReplayer replays committed tuple changes")
 
     CHECK(restored_fsm.current_free_bytes(page_id) == bored::storage::compute_free_bytes(bored::storage::page_header(expected_page)));
     CHECK(restored_fsm.current_fragment_count(page_id) == bored::storage::page_header(expected_page).fragment_count);
+
+    auto expected_tuple_storage = bored::storage::read_tuple_storage(expected_page, 0U);
+    REQUIRE_FALSE(expected_tuple_storage.empty());
+    auto expected_tuple_header = decode_tuple_header(expected_tuple_storage);
+    CHECK(expected_tuple_header.undo_next_lsn == before_image_lsn);
+
+    auto replayed_tuple_storage = bored::storage::read_tuple_storage(std::span<const std::byte>(replayed_page.data(), replayed_page.size()), 0U);
+    REQUIRE_FALSE(replayed_tuple_storage.empty());
+    auto replayed_tuple_header = decode_tuple_header(replayed_tuple_storage);
+    CHECK(replayed_tuple_header.undo_next_lsn == before_image_lsn);
 
     std::filesystem::remove(fsm_snapshot_path);
     (void)std::filesystem::remove_all(wal_dir);

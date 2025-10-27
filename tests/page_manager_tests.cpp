@@ -336,6 +336,13 @@ TEST_CASE("PageManager update tuple logs WAL record")
     REQUIRE(update_payload.size() == updated.size());
     REQUIRE(std::equal(update_payload.begin(), update_payload.end(), updated.begin(), updated.end()));
 
+    auto update_header = decode_tuple_header(payload_bytes);
+    CHECK(update_header.undo_next_lsn == second_header->lsn);
+
+    auto tuple_storage_view = bored::storage::read_tuple_storage(std::span<const std::byte>(page_span.data(), page_span.size()), update_result.slot.index);
+    auto header_view = decode_tuple_header(tuple_storage_view);
+    CHECK(header_view.undo_next_lsn == second_header->lsn);
+
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
     (void)std::filesystem::remove_all(wal_dir);
