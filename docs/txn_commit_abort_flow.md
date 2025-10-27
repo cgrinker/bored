@@ -64,5 +64,5 @@ Idle -> Active -> Preparing -> FlushingWal -> Durable -> Publishing -> Committed
 ## Next Steps
 
 1. Add crash/abort integration tests that inject failures between `FlushingWal` and `Publishing` to validate staged rollback and undo sequencing.
-2. Refresh operator documentation (`docs/storage.md`, transaction operator guide) with commit/abort telemetry once horizon propagation lands.
-3. Extend retention and checkpoint telemetry to surface the observed durable horizon alongside existing latency counters.
+2. Refresh operator documentation (`docs/storage.md`, transaction operator guide) to highlight the durability horizon telemetry and its diagnostics surfaces.
+3. Expose the durability horizon snapshot through CLI/HTTP tooling so operators can alert on stalled commit windows.

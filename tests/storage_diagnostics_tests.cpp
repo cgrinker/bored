@@ -46,6 +46,15 @@ WalRetentionTelemetrySnapshot make_retention(std::uint64_t seed)
     return snapshot;
 }
 
+DurabilityTelemetrySnapshot make_durability(std::uint64_t seed)
+{
+    DurabilityTelemetrySnapshot snapshot{};
+    snapshot.last_commit_lsn = (seed + 1U) * 100U;
+    snapshot.oldest_active_commit_lsn = (seed + 2U) * 80U;
+    snapshot.last_commit_segment_id = seed + 3U;
+    return snapshot;
+}
+
 VacuumTelemetrySnapshot make_vacuum(std::uint64_t seed)
 {
     VacuumTelemetrySnapshot snapshot{};
@@ -139,6 +148,7 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     registry.register_checkpoint_scheduler("ckpt_a", [] { return make_checkpoint(2U); });
     registry.register_checkpoint_scheduler("ckpt_b", [] { return make_checkpoint(4U); });
     registry.register_wal_retention("ret_a", [] { return make_retention(3U); });
+    registry.register_durability_horizon("dur_a", [] { return make_durability(2U); });
     registry.register_vacuum("vac_a", [] { return make_vacuum(2U); });
     registry.register_catalog("cat_a", [] { return make_catalog(1U); });
     registry.register_catalog("cat_b", [] { return make_catalog(4U); });
@@ -158,6 +168,9 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.checkpoints.total.emitted_checkpoints == ((2U + 2U) + (4U + 2U)));
     REQUIRE(doc.retention.details.size() == 1U);
     REQUIRE(doc.retention.total.pruned_segments == (3U + 2U));
+    REQUIRE(doc.durability.details.size() == 1U);
+    REQUIRE(doc.durability.total.last_commit_lsn == (2U + 1U) * 100U);
+    REQUIRE(doc.durability.total.oldest_active_commit_lsn == (2U + 2U) * 80U);
     REQUIRE(doc.vacuum.details.size() == 1U);
     REQUIRE(doc.vacuum.total.scheduled_pages == (2U + 1U));
     REQUIRE(doc.catalog.details.size() == 2U);
@@ -185,6 +198,7 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.parser.details.back().identifier == "parser_b");
     REQUIRE(doc.transactions.details.front().identifier == "txn_a");
     REQUIRE(doc.transactions.details.back().identifier == "txn_b");
+    REQUIRE(doc.durability.details.front().identifier == "dur_a");
 }
 
 TEST_CASE("collect_storage_diagnostics honors detail options")
@@ -193,6 +207,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     registry.register_page_manager("pm", [] { return make_page_manager(1U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(1U); });
     registry.register_wal_retention("ret", [] { return make_retention(1U); });
+    registry.register_durability_horizon("dur", [] { return make_durability(3U); });
     registry.register_vacuum("vac", [] { return make_vacuum(2U); });
     registry.register_catalog("cat", [] { return make_catalog(2U); });
     registry.register_ddl("ddl", [] { return make_ddl(3U); });
@@ -203,6 +218,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     options.include_page_manager_details = false;
     options.include_checkpoint_details = false;
     options.include_retention_details = false;
+    options.include_durability_details = false;
     options.include_vacuum_details = false;
     options.include_catalog_details = false;
     options.include_ddl_details = false;
@@ -214,6 +230,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     REQUIRE(doc.page_managers.details.empty());
     REQUIRE(doc.checkpoints.details.empty());
     REQUIRE(doc.retention.details.empty());
+    REQUIRE(doc.durability.details.empty());
     REQUIRE(doc.vacuum.details.empty());
     REQUIRE(doc.catalog.details.empty());
     REQUIRE(doc.ddl.details.empty());
@@ -227,6 +244,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     registry.register_page_manager("pm", [] { return make_page_manager(3U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(5U); });
     registry.register_wal_retention("ret", [] { return make_retention(7U); });
+    registry.register_durability_horizon("dur", [] { return make_durability(5U); });
     registry.register_vacuum("vac", [] { return make_vacuum(3U); });
     registry.register_catalog("cat", [] { return make_catalog(4U); });
     registry.register_ddl("ddl", [] { return make_ddl(5U); });
@@ -241,6 +259,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"pm\"") != std::string::npos);
     REQUIRE(json.find("\"checkpoints\"") != std::string::npos);
     REQUIRE(json.find("\"retention\"") != std::string::npos);
+    REQUIRE(json.find("\"durability\"") != std::string::npos);
     REQUIRE(json.find("\"catalog\"") != std::string::npos);
     REQUIRE(json.find("\"vacuum\"") != std::string::npos);
     REQUIRE(json.find("\"transactions\"") != std::string::npos);

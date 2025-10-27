@@ -7,20 +7,49 @@
 namespace bored::txn {
 
 WalCommitPipeline::WalCommitPipeline(std::shared_ptr<storage::WalWriter> wal_writer)
-    : WalCommitPipeline(std::move(wal_writer), Hooks{})
+    : WalCommitPipeline(std::move(wal_writer), Hooks{}, nullptr, {})
 {
 }
 
-WalCommitPipeline::WalCommitPipeline(std::shared_ptr<storage::WalWriter> wal_writer, Hooks hooks)
+WalCommitPipeline::WalCommitPipeline(std::shared_ptr<storage::WalWriter> wal_writer,
+                                     Hooks hooks,
+                                     storage::StorageTelemetryRegistry* telemetry_registry,
+                                     std::string telemetry_identifier)
     : wal_writer_{std::move(wal_writer)}
     , hooks_{std::move(hooks)}
+    , telemetry_registry_{telemetry_registry}
+    , telemetry_identifier_{std::move(telemetry_identifier)}
 {
+    if (telemetry_registry_ && !telemetry_identifier_.empty()) {
+        telemetry_registry_->register_durability_horizon(telemetry_identifier_, [this] {
+            return this->durability_telemetry_snapshot();
+        });
+    }
+}
+
+WalCommitPipeline::~WalCommitPipeline()
+{
+    if (telemetry_registry_ && !telemetry_identifier_.empty()) {
+        telemetry_registry_->unregister_durability_horizon(telemetry_identifier_);
+    }
 }
 
 void WalCommitPipeline::set_hooks(Hooks hooks)
 {
     std::lock_guard guard{mutex_};
     hooks_ = std::move(hooks);
+}
+
+storage::DurabilityTelemetrySnapshot WalCommitPipeline::durability_telemetry_snapshot() const
+{
+    storage::DurabilityTelemetrySnapshot snapshot{};
+    auto horizon = wal_writer_ ? wal_writer_->durability_horizon() : nullptr;
+    if (horizon) {
+        snapshot.last_commit_lsn = horizon->last_commit_lsn();
+        snapshot.oldest_active_commit_lsn = horizon->oldest_active_commit_lsn();
+        snapshot.last_commit_segment_id = horizon->last_commit_segment_id();
+    }
+    return snapshot;
 }
 
 std::error_code WalCommitPipeline::prepare_commit(const CommitRequest& request, CommitTicket& out_ticket)

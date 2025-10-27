@@ -1,6 +1,7 @@
 #include "bored/txn/wal_commit_pipeline.hpp"
 
 #include "bored/storage/async_io.hpp"
+#include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_durability_horizon.hpp"
@@ -25,6 +26,7 @@ using bored::storage::WalCommitHeader;
 using bored::storage::WalDurabilityHorizon;
 using bored::storage::WalRecordHeader;
 using bored::storage::WalRecordType;
+using bored::storage::StorageTelemetryRegistry;
 using bored::storage::WalWriter;
 using bored::storage::WalWriterConfig;
 
@@ -181,6 +183,44 @@ TEST_CASE("WalCommitPipeline default hook advances durability horizon", "[txn][w
     CHECK(horizon->last_commit_lsn() == ticket.commit_sequence);
     CHECK(horizon->oldest_active_commit_lsn() == request.snapshot.read_lsn);
     CHECK(horizon->last_commit_segment_id() == 0U);
+
+    REQUIRE_FALSE(writer->close());
+}
+
+TEST_CASE("WalCommitPipeline publishes durability telemetry", "[txn][wal]")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_commit_pipeline_telemetry_");
+
+    auto horizon = std::make_shared<WalDurabilityHorizon>();
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.flush_on_commit = false;
+    config.durability_horizon = horizon;
+
+    auto writer = std::make_shared<WalWriter>(io, config);
+    StorageTelemetryRegistry registry;
+
+    bored::txn::WalCommitPipeline pipeline{writer, {}, &registry, "wal_commit"};
+
+    bored::txn::CommitRequest request{};
+    request.transaction_id = 401U;
+    request.next_transaction_id = 402U;
+    request.oldest_active_transaction_id = 250U;
+    request.snapshot.read_lsn = 2048U;
+
+    bored::txn::CommitTicket ticket{};
+    REQUIRE_FALSE(pipeline.prepare_commit(request, ticket));
+    REQUIRE_FALSE(pipeline.flush_commit(ticket));
+    pipeline.confirm_commit(ticket);
+
+    const auto snapshot = registry.aggregate_durability_horizons();
+    CHECK(snapshot.last_commit_lsn == ticket.commit_sequence);
+    CHECK(snapshot.oldest_active_commit_lsn == request.snapshot.read_lsn);
+    CHECK(snapshot.last_commit_segment_id == 0U);
 
     REQUIRE_FALSE(writer->close());
 }

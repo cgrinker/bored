@@ -60,6 +60,7 @@ private:
     bool running_ = false;
     bool stop_requested_ = false;
     bool force_run_requested_ = false;
+    bool force_run_in_progress_ = false;
     std::optional<std::chrono::steady_clock::time_point> last_run_time_{};
 };
 

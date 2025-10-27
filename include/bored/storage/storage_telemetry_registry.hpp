@@ -74,6 +74,12 @@ struct WalRetentionTelemetrySnapshot final {
     std::uint64_t last_duration_ns = 0U;
 };
 
+struct DurabilityTelemetrySnapshot final {
+    std::uint64_t last_commit_lsn = 0U;
+    std::uint64_t oldest_active_commit_lsn = 0U;
+    std::uint64_t last_commit_segment_id = 0U;
+};
+
 struct VacuumTelemetrySnapshot final {
     std::uint64_t scheduled_pages = 0U;
     std::uint64_t dropped_pages = 0U;
@@ -113,6 +119,9 @@ public:
     using WalRetentionSampler = std::function<WalRetentionTelemetrySnapshot()>;
     using WalRetentionVisitor = std::function<void(const std::string&, const WalRetentionTelemetrySnapshot&)>;
 
+    using DurabilitySampler = std::function<DurabilityTelemetrySnapshot()>;
+    using DurabilityVisitor = std::function<void(const std::string&, const DurabilityTelemetrySnapshot&)>;
+
     using VacuumSampler = std::function<VacuumTelemetrySnapshot()>;
     using VacuumVisitor = std::function<void(const std::string&, const VacuumTelemetrySnapshot&)>;
 
@@ -142,6 +151,11 @@ public:
     void unregister_wal_retention(const std::string& identifier);
     WalRetentionTelemetrySnapshot aggregate_wal_retention() const;
     void visit_wal_retention(const WalRetentionVisitor& visitor) const;
+
+    void register_durability_horizon(std::string identifier, DurabilitySampler sampler);
+    void unregister_durability_horizon(const std::string& identifier);
+    DurabilityTelemetrySnapshot aggregate_durability_horizons() const;
+    void visit_durability_horizons(const DurabilityVisitor& visitor) const;
 
     void register_vacuum(std::string identifier, VacuumSampler sampler);
     void unregister_vacuum(const std::string& identifier);
@@ -173,6 +187,7 @@ private:
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
     std::unordered_map<std::string, CheckpointSampler> checkpoint_samplers_{};
     std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
+    std::unordered_map<std::string, DurabilitySampler> durability_samplers_{};
     std::unordered_map<std::string, VacuumSampler> vacuum_samplers_{};
     std::unordered_map<std::string, CatalogSampler> catalog_samplers_{};
     std::unordered_map<std::string, DdlSampler> ddl_samplers_{};

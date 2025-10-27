@@ -78,6 +78,14 @@ WalRetentionTelemetrySnapshot& accumulate(WalRetentionTelemetrySnapshot& target,
     return target;
 }
 
+DurabilityTelemetrySnapshot& accumulate(DurabilityTelemetrySnapshot& target, const DurabilityTelemetrySnapshot& source)
+{
+    target.last_commit_lsn = std::max(target.last_commit_lsn, source.last_commit_lsn);
+    target.oldest_active_commit_lsn = std::max(target.oldest_active_commit_lsn, source.oldest_active_commit_lsn);
+    target.last_commit_segment_id = std::max(target.last_commit_segment_id, source.last_commit_segment_id);
+    return target;
+}
+
 VacuumTelemetrySnapshot& accumulate(VacuumTelemetrySnapshot& target, const VacuumTelemetrySnapshot& source)
 {
     target.scheduled_pages += source.scheduled_pages;
@@ -312,6 +320,57 @@ void StorageTelemetryRegistry::visit_wal_retention(const WalRetentionVisitor& vi
         std::lock_guard guard(mutex_);
         entries.reserve(wal_retention_samplers_.size());
         for (const auto& [identifier, sampler] : wal_retention_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_durability_horizon(std::string identifier, DurabilitySampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    durability_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_durability_horizon(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    durability_samplers_.erase(identifier);
+}
+
+DurabilityTelemetrySnapshot StorageTelemetryRegistry::aggregate_durability_horizons() const
+{
+    std::vector<DurabilitySampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(durability_samplers_.size());
+        for (const auto& [_, sampler] : durability_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<DurabilityTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_durability_horizons(const DurabilityVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, DurabilitySampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(durability_samplers_.size());
+        for (const auto& [identifier, sampler] : durability_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }

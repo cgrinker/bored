@@ -159,6 +159,16 @@ void append_retention_snapshot(std::string& out, const WalRetentionTelemetrySnap
     out.push_back('}');
 }
 
+void append_durability_snapshot(std::string& out, const DurabilityTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "last_commit_lsn", snapshot.last_commit_lsn, first);
+    append_field(out, "oldest_active_commit_lsn", snapshot.oldest_active_commit_lsn, first);
+    append_field(out, "last_commit_segment_id", snapshot.last_commit_segment_id, first);
+    out.push_back('}');
+}
+
 void append_vacuum_snapshot(std::string& out, const VacuumTelemetrySnapshot& snapshot)
 {
     out.push_back('{');
@@ -337,6 +347,29 @@ void append_retention_section(std::string& out, const StorageDiagnosticsRetentio
     out.push_back('}');
 }
 
+void append_durability_section(std::string& out, const StorageDiagnosticsDurabilitySection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_durability_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_durability_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 void append_vacuum_section(std::string& out, const StorageDiagnosticsVacuumSection& section)
 {
     out.push_back('{');
@@ -487,6 +520,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+    document.durability.total = registry.aggregate_durability_horizons();
+    if (options.include_durability_details) {
+        registry.visit_durability_horizons([&](const std::string& identifier, const DurabilityTelemetrySnapshot& snapshot) {
+            document.durability.details.push_back(StorageDiagnosticsDurabilityEntry{identifier, snapshot});
+        });
+        std::sort(document.durability.details.begin(), document.durability.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+
     document.vacuum.total = registry.aggregate_vacuums();
     if (options.include_vacuum_details) {
         registry.visit_vacuums([&](const std::string& identifier, const VacuumTelemetrySnapshot& snapshot) {
@@ -549,6 +591,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_checkpoint_section(out, document.checkpoints);
     out.append(",\"retention\":");
     append_retention_section(out, document.retention);
+    out.append(",\"durability\":");
+    append_durability_section(out, document.durability);
     out.append(",\"vacuum\":");
     append_vacuum_section(out, document.vacuum);
     out.append(",\"catalog\":");

@@ -1,5 +1,6 @@
 #include "bored/storage/vacuum_background_loop.hpp"
 
+#include <chrono>
 #include <utility>
 
 namespace bored::storage {
@@ -37,6 +38,7 @@ void VacuumBackgroundLoop::start()
 
     stop_requested_ = false;
     force_run_requested_ = config_.run_immediately;
+    force_run_in_progress_ = false;
     running_ = true;
     thread_ = std::thread([this]() { run_loop(); });
 }
@@ -60,6 +62,7 @@ void VacuumBackgroundLoop::stop()
     running_ = false;
     stop_requested_ = false;
     force_run_requested_ = false;
+    force_run_in_progress_ = false;
 }
 
 void VacuumBackgroundLoop::request_force_run()
@@ -67,6 +70,9 @@ void VacuumBackgroundLoop::request_force_run()
     std::lock_guard lock(mutex_);
     if (!running_) {
         force_run_requested_ = true;
+        return;
+    }
+    if (force_run_requested_ || force_run_in_progress_) {
         return;
     }
     force_run_requested_ = true;
@@ -131,6 +137,7 @@ void VacuumBackgroundLoop::run_loop()
         if (force_run_requested_) {
             force_run = true;
             force_run_requested_ = false;
+            force_run_in_progress_ = true;
         } else if (interval.count() == 0) {
             cv_.wait(lock, [this]() { return stop_requested_ || force_run_requested_; });
             continue;
@@ -150,6 +157,7 @@ void VacuumBackgroundLoop::run_loop()
                 if (force_run_requested_) {
                     force_run = true;
                     force_run_requested_ = false;
+                    force_run_in_progress_ = true;
                 } else {
                     continue;
                 }
@@ -164,9 +172,11 @@ void VacuumBackgroundLoop::run_loop()
         }
         lock.lock();
         last_run_time_ = now;
+        force_run_in_progress_ = false;
     }
 
     running_ = false;
+    force_run_in_progress_ = false;
 }
 
 }  // namespace bored::storage
