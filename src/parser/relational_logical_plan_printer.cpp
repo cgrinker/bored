@@ -26,6 +26,24 @@ std::string scalar_type_name(ScalarType type)
     }
 }
 
+std::string join_type_name(JoinType type)
+{
+    switch (type) {
+    case JoinType::Inner:
+        return "Inner";
+    case JoinType::LeftOuter:
+        return "LeftOuter";
+    case JoinType::RightOuter:
+        return "RightOuter";
+    case JoinType::FullOuter:
+        return "FullOuter";
+    case JoinType::Cross:
+        return "Cross";
+    default:
+        return "Unknown";
+    }
+}
+
 std::string indent(std::size_t depth)
 {
     return std::string(depth * 2U, ' ');
@@ -158,6 +176,21 @@ void describe_plan(const LogicalOperator& node, std::size_t depth, std::ostrings
         stream << '\n';
         if (filter.input != nullptr) {
             describe_plan(*filter.input, depth + 1U, stream);
+        }
+        break;
+    }
+    case LogicalOperatorKind::Join: {
+        const auto& join = static_cast<const LogicalJoin&>(node);
+        stream << "Join type=" << join_type_name(join.join_type);
+        if (join.predicate != nullptr) {
+            stream << " predicate=" << describe_expression(*join.predicate);
+        }
+        stream << '\n';
+        if (join.left != nullptr) {
+            describe_plan(*join.left, depth + 1U, stream);
+        }
+        if (join.right != nullptr) {
+            describe_plan(*join.right, depth + 1U, stream);
         }
         break;
     }

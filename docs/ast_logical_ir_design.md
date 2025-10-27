@@ -75,12 +75,12 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 - Diagnostics surfaces expose AST and logical plan dumps behind trace flags or debug options.
 - Developer workflow docs updated to describe compilation flags and debugging techniques for the new layers.
 
-**Tasks:**
-1. Wire new test binaries into CTest and ensure they run under existing sanitizer builds once available.
-2. Add CLI or logging hooks to dump bound ASTs and logical plans for troubleshooting.
-3. Update documentation (`docs/parser_operator_guide.md`, `docs/relational_layer_design.md`) with references to the AST/IR pipeline and debug workflows.
-4. Capture performance baselines for binding and lowering stages using synthetic workloads in `benchmarks/` for regression tracking.
-5. Establish coding conventions for future AST/IR extensions (naming, ownership, testing patterns).
+**Completed Work:**
+- Parser and logical IR test targets run under CTest alongside the existing suites, giving CI parity with the rest of the codebase.
+- `dump_select_plan` plus plan-sink wiring expose traceable plan output for logging/CLI tooling, and the operator documentation now references these debugging flows.
+
+**Follow-Ups:**
+- Performance baselines for binder/lowering stages and the coding convention checklist are now tracked in the shared backlog.
 
 ### Milestone 5: Join-Aware Logical Planning
 **Goal:** Introduce multi-relation query support with join-aware binding, lowering, and diagnostics so optimizer work can proceed on realistic SELECT workloads.
@@ -91,13 +91,13 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 - Plan dumps, normalization traces, and diagnostics surface join structure and predicate classification for debugging complex queries.
 
 **Tasks:**
-1. [ ] Extend bound AST structures and binder scopes to represent join relations, qualifying column references across joined tables and detecting ambiguous bindings.
-2. [ ] Define logical join operator variants (inner, left/right outer, cross) with schema propagation helpers and update visitors accordingly.
-3. [ ] Implement AST-to-IR lowering for joined FROM clauses, including join predicate extraction and residual filter separation.
-4. [ ] Enhance normalization passes and `dump_select_plan` output to classify join predicates, residual filters, and provide readable join ordering traces.
-5. [ ] Add Catch2 coverage for multi-join queries spanning binding, lowering, normalization, and textual dumps to lock in regression protection.
+1. [x] Extend bound AST structures and binder scopes to represent join relations, qualifying column references across joined tables and detecting ambiguous bindings.
+2. [x] Define logical join operator variants (inner, left/right outer, cross) with schema propagation helpers and update visitors accordingly.
+3. [x] Implement AST-to-IR lowering for joined FROM clauses, including join predicate extraction and residual filter separation.
+4. [x] Enhance normalization passes and `dump_select_plan` output to classify join predicates, residual filters, and provide readable join ordering traces.
+5. [x] Add Catch2 coverage for multi-join queries spanning binding, lowering, normalization, and textual dumps to lock in regression protection.
 
-_Current Status:_ Parser now emits explicit join metadata and the binder binds join predicates; lowering still gates on single-table plans until join operators land.
+_Current Status:_ Join-aware parsing, binding, lowering, and normalization are complete; plan dumps now render join operators and surface equi-join predicates for diagnostics.
 
 ## Upcoming Tasks
 Tracked in `docs/project_backlog.md`.

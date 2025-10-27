@@ -72,6 +72,20 @@ relational::TableMetadata make_inventory_metadata()
     return metadata;
 }
 
+relational::TableMetadata make_shipments_metadata()
+{
+    relational::TableMetadata metadata{};
+    metadata.database_id = catalog::DatabaseId{1U};
+    metadata.schema_id = catalog::SchemaId{11U};
+    metadata.relation_id = catalog::RelationId{200U};
+    metadata.schema_name = "sales";
+    metadata.table_name = "shipments";
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{1U}, catalog::CatalogColumnType::Int64, "id"});
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{2U}, catalog::CatalogColumnType::UInt32, "quantity"});
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{3U}, catalog::CatalogColumnType::Utf8, "status"});
+    return metadata;
+}
+
 relational::LogicalOperatorPtr build_plan(std::string_view sql)
 {
     StubCatalog catalog_adapter;
@@ -201,4 +215,38 @@ TEST_CASE("plan dump utility produces plan text", "[parser][logical_plan_printer
                                                            });
     REQUIRE(dumped_again.success());
     CHECK(overload_sink_invoked);
+}
+
+TEST_CASE("plan printer renders join pipeline", "[parser][logical_plan_printer]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+    catalog_adapter.add_table(make_shipments_metadata());
+
+    const std::string sql =
+        "SELECT inv.id, shp.status FROM sales.inventory AS inv INNER JOIN sales.shipments AS shp ON inv.id = shp.id;";
+
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    relational::BinderConfig binder_config{};
+    binder_config.catalog = &catalog_adapter;
+    binder_config.default_schema = std::string{"sales"};
+
+    auto binding = relational::bind_select(binder_config, *parse_result.statement);
+    REQUIRE(binding.success());
+
+    auto lowering = relational::lower_select(*parse_result.statement);
+    REQUIRE(lowering.success());
+    REQUIRE(lowering.plan != nullptr);
+
+    const auto text = relational::describe_plan(*lowering.plan);
+    const std::string expected =
+        "Project columns=[inv.id:INT64?, shp.status:UTF8?]\n"
+        "  Join type=Inner predicate=(inv.id = shp.id)\n"
+        "    Scan table=sales.inventory alias=inv\n"
+        "    Scan table=sales.shipments alias=shp\n";
+
+    CHECK(text == expected);
 }

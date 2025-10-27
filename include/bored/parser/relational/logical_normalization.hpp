@@ -17,7 +17,9 @@ struct ProjectionInfo final {
 };
 
 struct JoinCriteria final {
-    const LogicalOperator* node = nullptr;
+    const LogicalJoin* node = nullptr;
+    JoinType join_type = JoinType::Inner;
+    const Expression* predicate = nullptr;
     std::vector<const Expression*> equi_conditions{};
 };
 

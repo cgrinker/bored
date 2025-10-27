@@ -31,6 +31,14 @@ std::vector<LogicalColumn> propagate_schema(const LogicalOperatorPtr& input)
     return input->output_schema;
 }
 
+std::vector<LogicalColumn> merge_schemas(const LogicalOperatorPtr& left, const LogicalOperatorPtr& right)
+{
+    auto schema = propagate_schema(left);
+    const auto right_schema = propagate_schema(right);
+    schema.insert(schema.end(), right_schema.begin(), right_schema.end());
+    return schema;
+}
+
 class LoweringContext final {
 public:
     LoweringContext(const SelectStatement& statement, const LoweringConfig& config)
@@ -145,29 +153,131 @@ private:
             return nullptr;
         }
 
-        if (query.from_tables.size() != 1U) {
-            ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
-            diagnostic.message = "SELECT lowering currently supports only a single table";
-            diagnostic.remediation_hints = {"Rewrite the query without joins until join lowering is implemented."};
-            result.diagnostics.push_back(std::move(diagnostic));
-            return nullptr;
+        std::vector<LogicalOperatorPtr> table_nodes(query.from_tables.size());
+        for (std::size_t index = 0; index < query.from_tables.size(); ++index) {
+            auto* table = query.from_tables[index];
+            if (table == nullptr) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "FROM clause contains an invalid table reference";
+                diagnostic.remediation_hints = {"Ensure each table reference in the FROM clause is well-formed."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                return nullptr;
+            }
+            if (!table->binding.has_value()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Table binding missing for SELECT lowering";
+                diagnostic.remediation_hints = {"Ensure the binder has resolved table references before lowering."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                return nullptr;
+            }
+
+            auto scan = std::make_unique<LogicalScan>();
+            scan->table = *table->binding;
+            table_nodes[index] = std::move(scan);
         }
 
-        auto* table = query.from_tables.front();
-        if (table == nullptr || !table->binding.has_value()) {
+        const auto make_reference_error = [&](std::string message) -> LogicalOperatorPtr {
             ParserDiagnostic diagnostic{};
             diagnostic.severity = ParserSeverity::Error;
-            diagnostic.message = "Table binding missing for SELECT lowering";
-            diagnostic.remediation_hints = {"Ensure the binder has resolved table references before lowering."};
+            diagnostic.message = std::move(message);
+            diagnostic.remediation_hints = {"Verify JOIN clauses reference tables that appear earlier in the FROM clause."};
             result.diagnostics.push_back(std::move(diagnostic));
             return nullptr;
+        };
+
+        auto take_table = [&](std::size_t index) -> LogicalOperatorPtr {
+            if (index >= table_nodes.size()) {
+                std::ostringstream stream;
+                stream << "JOIN references table index " << index << " which is out of range";
+                return make_reference_error(stream.str());
+            }
+            auto& entry = table_nodes[index];
+            if (entry == nullptr) {
+                std::ostringstream stream;
+                stream << "JOIN references table index " << index << " that is already consumed";
+                return make_reference_error(stream.str());
+            }
+            return std::move(entry);
+        };
+
+        std::vector<LogicalOperatorPtr> join_nodes(query.joins.size());
+
+        auto take_join = [&](std::size_t index) -> LogicalOperatorPtr {
+            if (index >= join_nodes.size()) {
+                std::ostringstream stream;
+                stream << "JOIN references join index " << index << " which is out of range";
+                return make_reference_error(stream.str());
+            }
+            auto& entry = join_nodes[index];
+            if (entry == nullptr) {
+                std::ostringstream stream;
+                stream << "JOIN references join index " << index << " that is not yet available";
+                return make_reference_error(stream.str());
+            }
+            return std::move(entry);
+        };
+
+        for (std::size_t join_index = 0; join_index < query.joins.size(); ++join_index) {
+            const auto& clause = query.joins[join_index];
+
+            LogicalOperatorPtr left_input;
+            if (clause.left_kind == JoinClause::InputKind::Join) {
+                left_input = take_join(clause.left_index);
+            } else {
+                left_input = take_table(clause.left_index);
+            }
+            if (left_input == nullptr) {
+                return nullptr;
+            }
+
+            auto right_input = take_table(clause.right_index);
+            if (right_input == nullptr) {
+                return nullptr;
+            }
+
+            auto join = std::make_unique<LogicalJoin>();
+            join->join_type = clause.type;
+            join->predicate = clause.predicate;
+            join->left = std::move(left_input);
+            join->right = std::move(right_input);
+            join->output_schema = merge_schemas(join->left, join->right);
+
+            join_nodes[join_index] = std::move(join);
         }
 
-        auto scan = std::make_unique<LogicalScan>();
-        scan->table = *table->binding;
-        // Without catalog metadata we conservatively leave the scan schema empty.
-        return scan;
+        LogicalOperatorPtr current;
+        if (!join_nodes.empty()) {
+            current = std::move(join_nodes.back());
+            if (current == nullptr) {
+                return make_reference_error("JOIN tree missing final join result");
+            }
+        }
+
+        for (auto& table_node : table_nodes) {
+            if (table_node == nullptr) {
+                continue;
+            }
+            if (current == nullptr) {
+                current = std::move(table_node);
+                continue;
+            }
+
+            auto join = std::make_unique<LogicalJoin>();
+            join->join_type = JoinType::Cross;
+            join->predicate = nullptr;
+            join->left = std::move(current);
+            join->right = std::move(table_node);
+            join->output_schema = merge_schemas(join->left, join->right);
+            current = std::move(join);
+        }
+
+        if (current == nullptr) {
+            return make_reference_error("SELECT lowering requires at least one resolved table");
+        }
+
+        return current;
     }
 
     std::unique_ptr<LogicalProject> lower_projection(const QuerySpecification& query,

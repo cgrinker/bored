@@ -25,6 +25,11 @@ public:
         kinds.push_back(relational::LogicalOperatorKind::Filter);
     }
 
+    void visit(const relational::LogicalJoin&) override
+    {
+        kinds.push_back(relational::LogicalOperatorKind::Join);
+    }
+
     void visit(const relational::LogicalAggregate&) override
     {
         kinds.push_back(relational::LogicalOperatorKind::Aggregate);
@@ -73,6 +78,9 @@ TEST_CASE("logical operator visitor dispatches by kind", "[parser][logical_plan]
     auto sort = std::make_unique<relational::LogicalSort>();
     sort->kind = relational::LogicalOperatorKind::Sort;
 
+    auto join = std::make_unique<relational::LogicalJoin>();
+    join->kind = relational::LogicalOperatorKind::Join;
+
     auto scan = std::make_unique<relational::LogicalScan>();
     scan->kind = relational::LogicalOperatorKind::Scan;
 
@@ -80,15 +88,17 @@ TEST_CASE("logical operator visitor dispatches by kind", "[parser][logical_plan]
     scan->accept(visitor);
     project->accept(visitor);
     filter->accept(visitor);
+    join->accept(visitor);
     aggregate->accept(visitor);
     sort->accept(visitor);
     limit.accept(visitor);
 
-    REQUIRE(visitor.kinds.size() == 6U);
+    REQUIRE(visitor.kinds.size() == 7U);
     CHECK(visitor.kinds[0] == relational::LogicalOperatorKind::Scan);
     CHECK(visitor.kinds[1] == relational::LogicalOperatorKind::Project);
     CHECK(visitor.kinds[2] == relational::LogicalOperatorKind::Filter);
-    CHECK(visitor.kinds[3] == relational::LogicalOperatorKind::Aggregate);
-    CHECK(visitor.kinds[4] == relational::LogicalOperatorKind::Sort);
-    CHECK(visitor.kinds[5] == relational::LogicalOperatorKind::Limit);
+    CHECK(visitor.kinds[3] == relational::LogicalOperatorKind::Join);
+    CHECK(visitor.kinds[4] == relational::LogicalOperatorKind::Aggregate);
+    CHECK(visitor.kinds[5] == relational::LogicalOperatorKind::Sort);
+    CHECK(visitor.kinds[6] == relational::LogicalOperatorKind::Limit);
 }

@@ -20,6 +20,7 @@ enum class LogicalOperatorKind : std::uint8_t {
     Scan = 0,
     Project,
     Filter,
+    Join,
     Aggregate,
     Sort,
     Limit
@@ -29,6 +30,7 @@ struct LogicalOperator;
 struct LogicalScan;
 struct LogicalProject;
 struct LogicalFilter;
+struct LogicalJoin;
 struct LogicalAggregate;
 struct LogicalSort;
 struct LogicalLimit;
@@ -39,6 +41,7 @@ public:
     virtual void visit(const LogicalScan& op) = 0;
     virtual void visit(const LogicalProject& op) = 0;
     virtual void visit(const LogicalFilter& op) = 0;
+    virtual void visit(const LogicalJoin& op) = 0;
     virtual void visit(const LogicalAggregate& op) = 0;
     virtual void visit(const LogicalSort& op) = 0;
     virtual void visit(const LogicalLimit& op) = 0;
@@ -86,6 +89,15 @@ struct LogicalFilter final : LogicalOperator {
     LogicalOperatorPtr input{};
 };
 
+struct LogicalJoin final : LogicalOperator {
+    LogicalJoin() noexcept : LogicalOperator(LogicalOperatorKind::Join) {}
+
+    JoinType join_type = JoinType::Inner;
+    Expression* predicate = nullptr;
+    LogicalOperatorPtr left{};
+    LogicalOperatorPtr right{};
+};
+
 struct LogicalAggregate final : LogicalOperator {
     struct Aggregate final {
         Expression* expression = nullptr;
@@ -130,6 +142,9 @@ inline void LogicalOperator::accept(LogicalOperatorVisitor& visitor) const
         break;
     case LogicalOperatorKind::Filter:
         visitor.visit(static_cast<const LogicalFilter&>(*this));
+        break;
+    case LogicalOperatorKind::Join:
+        visitor.visit(static_cast<const LogicalJoin&>(*this));
         break;
     case LogicalOperatorKind::Aggregate:
         visitor.visit(static_cast<const LogicalAggregate&>(*this));

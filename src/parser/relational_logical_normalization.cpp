@@ -15,6 +15,20 @@ void collect_predicates(const Expression* expression, std::vector<const Expressi
     output.push_back(expression);
 }
 
+void collect_join_conditions(const Expression* expression, std::vector<const Expression*>& output)
+{
+    if (expression == nullptr) {
+        return;
+    }
+
+    if (expression->kind == NodeKind::BinaryExpression) {
+        const auto& binary = static_cast<const BinaryExpression&>(*expression);
+        if (binary.op == BinaryOperator::Equal) {
+            output.push_back(expression);
+        }
+    }
+}
+
 void normalize_node(const LogicalOperator& node, NormalizationResult& result)
 {
     switch (node.kind) {
@@ -39,6 +53,22 @@ void normalize_node(const LogicalOperator& node, NormalizationResult& result)
         result.projections.push_back(std::move(info));
         if (project.input != nullptr) {
             normalize_node(*project.input, result);
+        }
+        break;
+    }
+    case LogicalOperatorKind::Join: {
+        const auto& join = static_cast<const LogicalJoin&>(node);
+        JoinCriteria info{};
+        info.node = &join;
+        info.join_type = join.join_type;
+        info.predicate = join.predicate;
+        collect_join_conditions(join.predicate, info.equi_conditions);
+        result.joins.push_back(std::move(info));
+        if (join.left != nullptr) {
+            normalize_node(*join.left, result);
+        }
+        if (join.right != nullptr) {
+            normalize_node(*join.right, result);
         }
         break;
     }

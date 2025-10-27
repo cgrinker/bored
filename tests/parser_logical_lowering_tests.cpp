@@ -69,6 +69,20 @@ relational::TableMetadata make_inventory_metadata()
     return metadata;
 }
 
+relational::TableMetadata make_shipments_metadata()
+{
+    relational::TableMetadata metadata{};
+    metadata.database_id = catalog::DatabaseId{1U};
+    metadata.schema_id = catalog::SchemaId{11U};
+    metadata.relation_id = catalog::RelationId{200U};
+    metadata.schema_name = "sales";
+    metadata.table_name = "shipments";
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{1U}, catalog::CatalogColumnType::Int64, "id"});
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{2U}, catalog::CatalogColumnType::UInt32, "quantity"});
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{3U}, catalog::CatalogColumnType::Utf8, "status"});
+    return metadata;
+}
+
 relational::LoweringResult lower_sql(std::string_view sql, StubCatalog& catalog_adapter)
 {
     auto parse_result = bored::parser::parse_select(std::string(sql));
@@ -144,4 +158,38 @@ TEST_CASE("lowering reports unsupported scenarios", "[parser][logical_lowering]"
     REQUIRE_FALSE(lowering.success());
     REQUIRE(lowering.diagnostics.size() == 1U);
     CHECK(lowering.diagnostics.front().message == "GROUP BY lowering is not implemented");
+}
+
+TEST_CASE("lowering builds join pipeline", "[parser][logical_lowering]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+    catalog_adapter.add_table(make_shipments_metadata());
+
+    const std::string sql =
+        "SELECT inv.id, shp.status FROM sales.inventory AS inv INNER JOIN sales.shipments AS shp ON inv.id = shp.id;";
+
+    auto lowering = lower_sql(sql, catalog_adapter);
+    REQUIRE(lowering.success());
+    REQUIRE(lowering.plan != nullptr);
+
+    auto* project = dynamic_cast<relational::LogicalProject*>(lowering.plan.get());
+    REQUIRE(project != nullptr);
+    REQUIRE(project->input != nullptr);
+
+    auto* join = dynamic_cast<relational::LogicalJoin*>(project->input.get());
+    REQUIRE(join != nullptr);
+    CHECK(join->join_type == relational::JoinType::Inner);
+    REQUIRE(join->predicate != nullptr);
+    CHECK(join->predicate->kind == relational::NodeKind::BinaryExpression);
+
+    auto* left_scan = dynamic_cast<relational::LogicalScan*>(join->left.get());
+    REQUIRE(left_scan != nullptr);
+    REQUIRE(left_scan->table.table_alias.has_value());
+    CHECK(*left_scan->table.table_alias == "inv");
+
+    auto* right_scan = dynamic_cast<relational::LogicalScan*>(join->right.get());
+    REQUIRE(right_scan != nullptr);
+    REQUIRE(right_scan->table.table_alias.has_value());
+    CHECK(*right_scan->table.table_alias == "shp");
 }
