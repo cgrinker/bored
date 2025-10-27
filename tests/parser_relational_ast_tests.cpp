@@ -80,6 +80,7 @@ TEST_CASE("describe renders select statement", "[parser][relational_ast]")
     auto& table_ref = arena.make<relational::TableReference>();
     table_ref.name.parts.push_back(bored::parser::Identifier{.value = "inventory"});
     query.from = &table_ref;
+    query.from_tables.push_back(&table_ref);
 
     auto& predicate = arena.make<relational::BinaryExpression>();
     predicate.op = relational::BinaryOperator::Equal;

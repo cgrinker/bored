@@ -42,7 +42,8 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 	Binder now annotates identifiers, literals, and predicates with `ScalarType` metadata and surfaces incompatibility diagnostics (see new Catch2 coverage in `parser_binding_tests.cpp`).
 4. ✅ Record coercion or cast requirements on AST nodes for mismatched operand types.  \
 	Binder now analyses comparison operands, emits `required_coercion` targets on expressions, and tests cover numeric promotions plus string vs integer mismatches.
-5. Extend Catch2 suites with binder-focused tests covering ambiguity, shadowing, and unresolved identifiers.
+5. ✅ Extend Catch2 suites with binder-focused tests covering ambiguity, shadowing, and unresolved identifiers.  \
+	Added multi-table FROM parsing plus new binder tests that assert ambiguous column diagnostics, duplicate alias handling, and unresolved qualifier errors.
 
 ### Milestone 3: Logical Plan Construction & Normalization
 **Goal:** Lower bound ASTs into a logical relational algebra IR and perform initial normalization passes.

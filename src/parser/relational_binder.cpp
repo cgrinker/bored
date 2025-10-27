@@ -321,10 +321,15 @@ public:
 private:
     void bind_from_clause(QuerySpecification& query, Scope& scope, BindingResult& result) const
     {
-        if (query.from == nullptr) {
+        if (query.from_tables.empty()) {
             return;
         }
-        bind_table_reference(*query.from, scope, result);
+        for (auto* table : query.from_tables) {
+            if (table == nullptr) {
+                continue;
+            }
+            bind_table_reference(*table, scope, result);
+        }
     }
 
     void bind_table_reference(TableReference& table, Scope& scope, BindingResult& result) const

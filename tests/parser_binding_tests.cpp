@@ -72,6 +72,20 @@ relational::TableMetadata make_inventory_metadata()
     return metadata;
 }
 
+relational::TableMetadata make_shipments_metadata()
+{
+    relational::TableMetadata metadata{};
+    metadata.database_id = catalog::DatabaseId{1U};
+    metadata.schema_id = catalog::SchemaId{11U};
+    metadata.relation_id = catalog::RelationId{200U};
+    metadata.schema_name = "sales";
+    metadata.table_name = "shipments";
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{1U}, catalog::CatalogColumnType::Int64, "id"});
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{2U}, catalog::CatalogColumnType::UInt32, "quantity"});
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{3U}, catalog::CatalogColumnType::Utf8, "status"});
+    return metadata;
+}
+
 }  // namespace
 
 TEST_CASE("binder resolves qualified columns", "[parser][binder]")
@@ -296,4 +310,69 @@ TEST_CASE("binder records decimal promotions", "[parser][binder]")
 
     auto& right_literal = static_cast<relational::LiteralExpression&>(*predicate.right);
     CHECK_FALSE(right_literal.required_coercion.has_value());
+}
+
+TEST_CASE("binder reports ambiguous unqualified column references", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+    catalog_adapter.add_table(make_shipments_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT id FROM sales.inventory AS inv, sales.shipments AS sh;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE(binding_result.diagnostics.size() == 1U);
+    CHECK(binding_result.diagnostics.front().message == "Column reference 'id' is ambiguous");
+}
+
+TEST_CASE("binder reports ambiguous qualified column references", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.id FROM sales.inventory AS inv, sales.inventory AS inv;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE(binding_result.diagnostics.size() == 1U);
+    CHECK(binding_result.diagnostics.front().message == "Column reference 'inv.id' is ambiguous");
+}
+
+TEST_CASE("binder reports unknown qualified identifiers", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+    catalog_adapter.add_table(make_shipments_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.id FROM sales.inventory AS inv, sales.shipments AS sh WHERE missing.id = 1;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE(binding_result.diagnostics.size() == 1U);
+    CHECK(binding_result.diagnostics.front().message == "Column 'id' not found on table 'missing'");
 }

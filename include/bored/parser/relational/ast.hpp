@@ -224,6 +224,7 @@ struct QuerySpecification : Node {
     bool distinct = false;
     std::vector<SelectItem*> select_items{};
     TableReference* from = nullptr;
+    std::vector<TableReference*> from_tables{};
     Expression* where = nullptr;
     std::vector<OrderByItem*> order_by{};
     LimitClause* limit = nullptr;

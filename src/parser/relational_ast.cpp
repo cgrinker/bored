@@ -169,10 +169,21 @@ std::string describe(const SelectStatement& statement)
         stream << " <empty-select-list>";
     }
 
-    if (query.from) {
-        stream << " FROM " << format_qualified_name(query.from->name);
-        if (query.from->alias) {
-            stream << " AS " << query.from->alias->value;
+    if (!query.from_tables.empty()) {
+        stream << " FROM ";
+        bool first_table = true;
+        for (const auto* table : query.from_tables) {
+            if (!table) {
+                continue;
+            }
+            if (!first_table) {
+                stream << ", ";
+            }
+            stream << format_qualified_name(table->name);
+            if (table->alias) {
+                stream << " AS " << table->alias->value;
+            }
+            first_table = false;
         }
     }
 

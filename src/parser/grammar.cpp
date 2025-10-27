@@ -1360,7 +1360,12 @@ struct select_table_reference_rule
                             pegtl::seq<kw_as, required_space, select_table_alias_identifier_rule>>> {
 };
 
-struct from_clause_rule : pegtl::seq<kw_from, required_space, select_table_reference_rule> {
+struct select_table_reference_list_rule
+    : pegtl::seq<select_table_reference_rule,
+                 pegtl::star<optional_space, comma, optional_space, select_table_reference_rule>> {
+};
+
+struct from_clause_rule : pegtl::seq<kw_from, required_space, select_table_reference_list_rule> {
 };
 
 struct where_clause_rule : pegtl::seq<kw_where, required_space, where_expression_rule> {
@@ -1662,7 +1667,10 @@ struct select_action<select_table_identifier_rule> {
 
         auto& table = state.arena->make<relational::TableReference>();
         table.name = make_qualified_name(in.string());
-        state.query->from = &table;
+        if (state.query->from == nullptr) {
+            state.query->from = &table;
+        }
+        state.query->from_tables.push_back(&table);
         state.current_table = &table;
     }
 };
