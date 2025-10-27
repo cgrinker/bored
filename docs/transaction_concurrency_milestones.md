@@ -27,9 +27,9 @@
 - [x] Introduce vacuum-style background task scaffolding to prune committed obsolete versions once safe (scheduler, worker, and background loop now integrated with telemetry and retry semantics).
 	- [x] Add a `VacuumScheduler` with safe-horizon dispatch, deduplicated queues, and telemetry hooks.
 	- [x] Run `VacuumWorker` inside a background loop with force-run pokes and telemetry surfacing for operators.
-- [ ] Expand unit tests to cover concurrent insert/update/delete visibility across transaction snapshots.
+- [x] Expand unit tests to cover concurrent insert/update/delete visibility across transaction snapshots (catalog accessor suite now exercises pending/committed version chains).
 
-**Next Task:** Expand unit tests to cover concurrent insert/update/delete visibility across transaction snapshots.
+**Next Task:** Implement row/page-intent lock hierarchy with deadlock detection or timeout policy.
 
 ## Milestone 3: Locking, Latching, and Conflict Detection (1 sprint)
 - [ ] Implement row/page-intent lock hierarchy with deadlock detection or timeout policy.

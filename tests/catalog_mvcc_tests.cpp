@@ -306,6 +306,74 @@ TEST_CASE("Catalog accessor snapshot differences affect visibility")
     CHECK_FALSE(analytics_hidden);
 }
 
+TEST_CASE("Catalog accessor reconciles concurrent version visibility across snapshots")
+{
+    CatalogCache::instance().reset();
+
+    RelationStorage storage;
+
+    const std::uint64_t update_txn_id = 60U;
+    const SchemaId test_schema{600U};
+
+    CatalogTableDescriptor committed_base{
+        tuple_descriptor(8U, 0U), RelationId{200U}, test_schema, CatalogTableType::Heap, 900U, "committed"};
+    CatalogTableDescriptor updated_old{
+        tuple_descriptor(12U, update_txn_id), RelationId{201U}, test_schema, CatalogTableType::Heap, 901U, "orders_old"};
+    CatalogTableDescriptor updated_new{
+        tuple_descriptor(update_txn_id, 0U), RelationId{201U}, test_schema, CatalogTableType::Heap, 901U, "orders_new"};
+    CatalogTableDescriptor pending_delete{
+        tuple_descriptor(14U, update_txn_id), RelationId{202U}, test_schema, CatalogTableType::Heap, 902U, "to_delete"};
+    CatalogTableDescriptor pending_insert{
+        tuple_descriptor(update_txn_id, 0U), RelationId{203U}, test_schema, CatalogTableType::Heap, 903U, "new_table"};
+
+    storage.add(kCatalogTablesRelationId, serialize_catalog_table(committed_base));
+    storage.add(kCatalogTablesRelationId, serialize_catalog_table(updated_old));
+    storage.add(kCatalogTablesRelationId, serialize_catalog_table(updated_new));
+    storage.add(kCatalogTablesRelationId, serialize_catalog_table(pending_delete));
+    storage.add(kCatalogTablesRelationId, serialize_catalog_table(pending_insert));
+
+    bored::txn::Snapshot snapshot_during{};
+    snapshot_during.xmin = 10U;
+    snapshot_during.xmax = 80U;
+    snapshot_during.in_progress = {update_txn_id};
+    bored::txn::TransactionIdAllocatorStub allocator_during{120U};
+    bored::txn::SnapshotManagerStub manager_during{snapshot_during};
+    CatalogTransaction tx_during({&allocator_during, &manager_during});
+
+    bored::txn::Snapshot snapshot_after{};
+    snapshot_after.xmin = 10U;
+    snapshot_after.xmax = 120U;
+    bored::txn::TransactionIdAllocatorStub allocator_after{130U};
+    bored::txn::SnapshotManagerStub manager_after{snapshot_after};
+    CatalogTransaction tx_after({&allocator_after, &manager_after});
+
+    CatalogAccessor accessor_during({&tx_during, storage.make_scanner()});
+    CatalogAccessor accessor_after({&tx_after, storage.make_scanner()});
+
+    const auto collect_names = [](const std::vector<CatalogTableDescriptor>& tables) {
+        std::vector<std::string> names;
+        names.reserve(tables.size());
+        for (const auto& table : tables) {
+            names.emplace_back(table.name.begin(), table.name.end());
+        }
+        return names;
+    };
+
+    auto names_during = collect_names(accessor_during.tables(test_schema));
+    CHECK(std::find(names_during.begin(), names_during.end(), "committed") != names_during.end());
+    CHECK(std::find(names_during.begin(), names_during.end(), "orders_old") != names_during.end());
+    CHECK(std::find(names_during.begin(), names_during.end(), "to_delete") != names_during.end());
+    CHECK(std::find(names_during.begin(), names_during.end(), "orders_new") == names_during.end());
+    CHECK(std::find(names_during.begin(), names_during.end(), "new_table") == names_during.end());
+
+    auto names_after = collect_names(accessor_after.tables(test_schema));
+    CHECK(std::find(names_after.begin(), names_after.end(), "committed") != names_after.end());
+    CHECK(std::find(names_after.begin(), names_after.end(), "orders_new") != names_after.end());
+    CHECK(std::find(names_after.begin(), names_after.end(), "new_table") != names_after.end());
+    CHECK(std::find(names_after.begin(), names_after.end(), "orders_old") == names_after.end());
+    CHECK(std::find(names_after.begin(), names_after.end(), "to_delete") == names_after.end());
+}
+
 TEST_CASE("Wal replayer preserves catalog tuple mvcc metadata")
 {
     CatalogCache::instance().reset();
