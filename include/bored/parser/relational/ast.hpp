@@ -111,6 +111,11 @@ struct TypeAnnotation final {
     bool nullable = true;
 };
 
+struct CoercionRequirement final {
+    ScalarType target_type = ScalarType::Unknown;
+    bool nullable = true;
+};
+
 struct QualifiedName final {
     std::vector<Identifier> parts{};
 
@@ -176,6 +181,7 @@ struct Expression : Node {
     void accept(ExpressionVisitor& visitor) const;
 
     std::optional<TypeAnnotation> inferred_type{};
+    std::optional<CoercionRequirement> required_coercion{};
 };
 
 struct SelectItem : Node {

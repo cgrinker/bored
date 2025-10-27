@@ -231,6 +231,12 @@ TEST_CASE("binder annotates expression types", "[parser][binder]")
     REQUIRE(predicate.inferred_type.has_value());
     CHECK(predicate.inferred_type->type == relational::ScalarType::Boolean);
     CHECK(predicate.inferred_type->nullable);
+
+    auto& predicate_left = static_cast<relational::IdentifierExpression&>(*predicate.left);
+    REQUIRE(predicate_left.required_coercion.has_value());
+    CHECK(predicate_left.required_coercion->target_type == relational::ScalarType::Int64);
+    auto& predicate_right = static_cast<relational::LiteralExpression&>(*predicate.right);
+    CHECK_FALSE(predicate_right.required_coercion.has_value());
 }
 
 TEST_CASE("binder reports type mismatches", "[parser][binder]")
@@ -252,4 +258,42 @@ TEST_CASE("binder reports type mismatches", "[parser][binder]")
     REQUIRE_FALSE(binding_result.success());
     REQUIRE(binding_result.diagnostics.size() == 1U);
     CHECK(binding_result.diagnostics.front().message == "Type mismatch: cannot compare UTF8 to INT64");
+
+    auto* query = parse_result.statement->query;
+    REQUIRE(query != nullptr);
+    REQUIRE(query->where != nullptr);
+    auto& predicate = static_cast<relational::BinaryExpression&>(*query->where);
+    auto& left_identifier = static_cast<relational::IdentifierExpression&>(*predicate.left);
+    CHECK_FALSE(left_identifier.required_coercion.has_value());
+}
+
+TEST_CASE("binder records decimal promotions", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.quantity FROM sales.inventory AS inv WHERE inv.quantity = 10.5;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE(binding_result.success());
+
+    auto* query = parse_result.statement->query;
+    REQUIRE(query != nullptr);
+    REQUIRE(query->where != nullptr);
+
+    auto& predicate = static_cast<relational::BinaryExpression&>(*query->where);
+    auto& left_identifier = static_cast<relational::IdentifierExpression&>(*predicate.left);
+    REQUIRE(left_identifier.required_coercion.has_value());
+    CHECK(left_identifier.required_coercion->target_type == relational::ScalarType::Decimal);
+
+    auto& right_literal = static_cast<relational::LiteralExpression&>(*predicate.right);
+    CHECK_FALSE(right_literal.required_coercion.has_value());
 }

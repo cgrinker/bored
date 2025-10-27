@@ -40,7 +40,8 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 	Added a SELECT binder that resolves tables, columns, and qualified stars with Catch2 coverage; function binding remains out of scope for this sprint.
 3. ✅ Add type inference rules for scalar expressions and ensure literals carry resolved types and collations.  \
 	Binder now annotates identifiers, literals, and predicates with `ScalarType` metadata and surfaces incompatibility diagnostics (see new Catch2 coverage in `parser_binding_tests.cpp`).
-4. Record coercion or cast requirements on AST nodes for mismatched operand types.
+4. ✅ Record coercion or cast requirements on AST nodes for mismatched operand types.  \
+	Binder now analyses comparison operands, emits `required_coercion` targets on expressions, and tests cover numeric promotions plus string vs integer mismatches.
 5. Extend Catch2 suites with binder-focused tests covering ambiguity, shadowing, and unresolved identifiers.
 
 ### Milestone 3: Logical Plan Construction & Normalization

@@ -81,21 +81,40 @@ bool is_numeric(ScalarType type)
     return type == ScalarType::Int64 || type == ScalarType::UInt32 || type == ScalarType::Decimal;
 }
 
-bool are_comparable(ScalarType lhs, ScalarType rhs)
+struct ComparisonAnalysis final {
+    bool comparable = false;
+    std::optional<ScalarType> common_type{};
+};
+
+ComparisonAnalysis analyse_comparison(ScalarType lhs, ScalarType rhs)
 {
+    ComparisonAnalysis analysis{};
+
     if (lhs == ScalarType::Unknown || rhs == ScalarType::Unknown) {
-        return true;
+        analysis.comparable = true;
+        return analysis;
     }
 
     if (lhs == rhs) {
-        return true;
+        analysis.comparable = true;
+        analysis.common_type = lhs;
+        return analysis;
     }
 
     if (is_numeric(lhs) && is_numeric(rhs)) {
-        return true;
+        analysis.comparable = true;
+        if (lhs == ScalarType::Decimal || rhs == ScalarType::Decimal) {
+            analysis.common_type = ScalarType::Decimal;
+        } else if (lhs == ScalarType::Int64 || rhs == ScalarType::Int64) {
+            analysis.common_type = ScalarType::Int64;
+        } else {
+            analysis.common_type = ScalarType::UInt32;
+        }
+        return analysis;
     }
 
-    return false;
+    analysis.comparable = false;
+    return analysis;
 }
 
 struct ColumnMatch final {
@@ -543,20 +562,37 @@ private:
     void infer_binary_expression(BinaryExpression& expression, BindingResult& result) const
     {
         auto left_type = ScalarType::Unknown;
+        bool left_nullable = true;
         auto right_type = ScalarType::Unknown;
+        bool right_nullable = true;
         if (expression.left != nullptr && expression.left->inferred_type.has_value()) {
             left_type = expression.left->inferred_type->type;
+            left_nullable = expression.left->inferred_type->nullable;
         }
         if (expression.right != nullptr && expression.right->inferred_type.has_value()) {
             right_type = expression.right->inferred_type->type;
+            right_nullable = expression.right->inferred_type->nullable;
         }
 
-        if (!are_comparable(left_type, right_type)) {
+        const auto analysis = analyse_comparison(left_type, right_type);
+        if (!analysis.comparable) {
             ParserDiagnostic diagnostic{};
             diagnostic.severity = ParserSeverity::Error;
             diagnostic.message = "Type mismatch: cannot compare " + scalar_type_name(left_type) + " to " + scalar_type_name(right_type);
             diagnostic.remediation_hints = {"Cast one side to a compatible type or adjust the query predicate."};
             result.diagnostics.push_back(std::move(diagnostic));
+        }
+
+        if (analysis.common_type.has_value()) {
+            const auto target_type = *analysis.common_type;
+            if (expression.left != nullptr && expression.left->inferred_type.has_value() &&
+                expression.left->inferred_type->type != target_type) {
+                set_expression_coercion(*expression.left, target_type, left_nullable);
+            }
+            if (expression.right != nullptr && expression.right->inferred_type.has_value() &&
+                expression.right->inferred_type->type != target_type) {
+                set_expression_coercion(*expression.right, target_type, right_nullable);
+            }
         }
 
         set_expression_type(expression, ScalarType::Boolean, true);
@@ -568,6 +604,14 @@ private:
         annotation.type = type;
         annotation.nullable = nullable;
         expression.inferred_type = annotation;
+    }
+
+    void set_expression_coercion(Expression& expression, ScalarType type, bool nullable) const
+    {
+        CoercionRequirement requirement{};
+        requirement.target_type = type;
+        requirement.nullable = nullable;
+        expression.required_coercion = requirement;
     }
 
     BinderConfig config_;
