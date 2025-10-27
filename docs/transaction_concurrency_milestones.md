@@ -25,6 +25,7 @@
 - [x] Update `PageManager` mutation paths to emit MVCC-aware WAL records and maintain in-page version chains (tuple header wiring landed; undo chain population remains TODO).
 - [x] Teach `WalReplayer` and `WalUndoWalker` to respect MVCC metadata when rehydrating and undoing tuples.
 - [ ] Introduce vacuum-style background task scaffolding to prune committed obsolete versions once safe.
+	- [x] Add a `VacuumScheduler` with safe-horizon dispatch, deduplicated queues, and telemetry hooks.
 - [ ] Expand unit tests to cover concurrent insert/update/delete visibility across transaction snapshots.
 
 **Next Task:** Introduce vacuum scaffolding to trim committed MVCC versions once recovery and undo metadata are stable.

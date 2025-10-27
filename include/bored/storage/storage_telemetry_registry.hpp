@@ -74,6 +74,21 @@ struct WalRetentionTelemetrySnapshot final {
     std::uint64_t last_duration_ns = 0U;
 };
 
+struct VacuumTelemetrySnapshot final {
+    std::uint64_t scheduled_pages = 0U;
+    std::uint64_t dropped_pages = 0U;
+    std::uint64_t runs = 0U;
+    std::uint64_t forced_runs = 0U;
+    std::uint64_t skipped_runs = 0U;
+    std::uint64_t batches_dispatched = 0U;
+    std::uint64_t dispatch_failures = 0U;
+    std::uint64_t pages_dispatched = 0U;
+    std::uint64_t pending_pages = 0U;
+    std::uint64_t total_dispatch_duration_ns = 0U;
+    std::uint64_t last_dispatch_duration_ns = 0U;
+    std::uint64_t last_safe_horizon = 0U;
+};
+
 struct CatalogTelemetrySnapshot final {
     std::uint64_t cache_hits = 0U;
     std::uint64_t cache_misses = 0U;
@@ -97,6 +112,9 @@ public:
 
     using WalRetentionSampler = std::function<WalRetentionTelemetrySnapshot()>;
     using WalRetentionVisitor = std::function<void(const std::string&, const WalRetentionTelemetrySnapshot&)>;
+
+    using VacuumSampler = std::function<VacuumTelemetrySnapshot()>;
+    using VacuumVisitor = std::function<void(const std::string&, const VacuumTelemetrySnapshot&)>;
 
     using CatalogSampler = std::function<CatalogTelemetrySnapshot()>;
     using CatalogVisitor = std::function<void(const std::string&, const CatalogTelemetrySnapshot&)>;
@@ -125,6 +143,11 @@ public:
     WalRetentionTelemetrySnapshot aggregate_wal_retention() const;
     void visit_wal_retention(const WalRetentionVisitor& visitor) const;
 
+    void register_vacuum(std::string identifier, VacuumSampler sampler);
+    void unregister_vacuum(const std::string& identifier);
+    VacuumTelemetrySnapshot aggregate_vacuums() const;
+    void visit_vacuums(const VacuumVisitor& visitor) const;
+
     void register_catalog(std::string identifier, CatalogSampler sampler);
     void unregister_catalog(const std::string& identifier);
     CatalogTelemetrySnapshot aggregate_catalog() const;
@@ -150,6 +173,7 @@ private:
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
     std::unordered_map<std::string, CheckpointSampler> checkpoint_samplers_{};
     std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
+    std::unordered_map<std::string, VacuumSampler> vacuum_samplers_{};
     std::unordered_map<std::string, CatalogSampler> catalog_samplers_{};
     std::unordered_map<std::string, DdlSampler> ddl_samplers_{};
     std::unordered_map<std::string, ParserSampler> parser_samplers_{};

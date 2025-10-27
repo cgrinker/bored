@@ -159,6 +159,25 @@ void append_retention_snapshot(std::string& out, const WalRetentionTelemetrySnap
     out.push_back('}');
 }
 
+void append_vacuum_snapshot(std::string& out, const VacuumTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "scheduled_pages", snapshot.scheduled_pages, first);
+    append_field(out, "dropped_pages", snapshot.dropped_pages, first);
+    append_field(out, "runs", snapshot.runs, first);
+    append_field(out, "forced_runs", snapshot.forced_runs, first);
+    append_field(out, "skipped_runs", snapshot.skipped_runs, first);
+    append_field(out, "batches_dispatched", snapshot.batches_dispatched, first);
+    append_field(out, "dispatch_failures", snapshot.dispatch_failures, first);
+    append_field(out, "pages_dispatched", snapshot.pages_dispatched, first);
+    append_field(out, "pending_pages", snapshot.pending_pages, first);
+    append_field(out, "total_dispatch_duration_ns", snapshot.total_dispatch_duration_ns, first);
+    append_field(out, "last_dispatch_duration_ns", snapshot.last_dispatch_duration_ns, first);
+    append_field(out, "last_safe_horizon", snapshot.last_safe_horizon, first);
+    out.push_back('}');
+}
+
 void append_catalog_snapshot(std::string& out, const CatalogTelemetrySnapshot& snapshot)
 {
     out.push_back('{');
@@ -318,6 +337,29 @@ void append_retention_section(std::string& out, const StorageDiagnosticsRetentio
     out.push_back('}');
 }
 
+void append_vacuum_section(std::string& out, const StorageDiagnosticsVacuumSection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_vacuum_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_vacuum_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 void append_catalog_section(std::string& out, const StorageDiagnosticsCatalogSection& section)
 {
     out.push_back('{');
@@ -445,6 +487,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+    document.vacuum.total = registry.aggregate_vacuums();
+    if (options.include_vacuum_details) {
+        registry.visit_vacuums([&](const std::string& identifier, const VacuumTelemetrySnapshot& snapshot) {
+            document.vacuum.details.push_back(StorageDiagnosticsVacuumEntry{identifier, snapshot});
+        });
+        std::sort(document.vacuum.details.begin(), document.vacuum.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+
     document.catalog.total = registry.aggregate_catalog();
     if (options.include_catalog_details) {
         registry.visit_catalog([&](const std::string& identifier, const CatalogTelemetrySnapshot& snapshot) {
@@ -498,6 +549,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_checkpoint_section(out, document.checkpoints);
     out.append(",\"retention\":");
     append_retention_section(out, document.retention);
+    out.append(",\"vacuum\":");
+    append_vacuum_section(out, document.vacuum);
     out.append(",\"catalog\":");
     append_catalog_section(out, document.catalog);
     out.append(",\"transactions\":");

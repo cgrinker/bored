@@ -78,6 +78,23 @@ WalRetentionTelemetrySnapshot& accumulate(WalRetentionTelemetrySnapshot& target,
     return target;
 }
 
+VacuumTelemetrySnapshot& accumulate(VacuumTelemetrySnapshot& target, const VacuumTelemetrySnapshot& source)
+{
+    target.scheduled_pages += source.scheduled_pages;
+    target.dropped_pages += source.dropped_pages;
+    target.runs += source.runs;
+    target.forced_runs += source.forced_runs;
+    target.skipped_runs += source.skipped_runs;
+    target.batches_dispatched += source.batches_dispatched;
+    target.dispatch_failures += source.dispatch_failures;
+    target.pages_dispatched += source.pages_dispatched;
+    target.pending_pages += source.pending_pages;
+    target.total_dispatch_duration_ns += source.total_dispatch_duration_ns;
+    target.last_dispatch_duration_ns = std::max(target.last_dispatch_duration_ns, source.last_dispatch_duration_ns);
+    target.last_safe_horizon = std::max(target.last_safe_horizon, source.last_safe_horizon);
+    return target;
+}
+
 CatalogTelemetrySnapshot& accumulate(CatalogTelemetrySnapshot& target, const CatalogTelemetrySnapshot& source)
 {
     target.cache_hits += source.cache_hits;
@@ -295,6 +312,57 @@ void StorageTelemetryRegistry::visit_wal_retention(const WalRetentionVisitor& vi
         std::lock_guard guard(mutex_);
         entries.reserve(wal_retention_samplers_.size());
         for (const auto& [identifier, sampler] : wal_retention_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_vacuum(std::string identifier, VacuumSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    vacuum_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_vacuum(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    vacuum_samplers_.erase(identifier);
+}
+
+VacuumTelemetrySnapshot StorageTelemetryRegistry::aggregate_vacuums() const
+{
+    std::vector<VacuumSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(vacuum_samplers_.size());
+        for (const auto& [_, sampler] : vacuum_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<VacuumTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_vacuums(const VacuumVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, VacuumSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(vacuum_samplers_.size());
+        for (const auto& [identifier, sampler] : vacuum_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }

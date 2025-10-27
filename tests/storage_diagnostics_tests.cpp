@@ -46,6 +46,21 @@ WalRetentionTelemetrySnapshot make_retention(std::uint64_t seed)
     return snapshot;
 }
 
+VacuumTelemetrySnapshot make_vacuum(std::uint64_t seed)
+{
+    VacuumTelemetrySnapshot snapshot{};
+    snapshot.scheduled_pages = seed + 1U;
+    snapshot.dropped_pages = seed;
+    snapshot.runs = seed + 2U;
+    snapshot.batches_dispatched = seed + 3U;
+    snapshot.pages_dispatched = seed + 4U;
+    snapshot.pending_pages = seed + 5U;
+    snapshot.total_dispatch_duration_ns = (seed + 6U) * 11U;
+    snapshot.last_dispatch_duration_ns = (seed + 7U) * 13U;
+    snapshot.last_safe_horizon = (seed + 8U) * 100U;
+    return snapshot;
+}
+
 CatalogTelemetrySnapshot make_catalog(std::uint64_t seed)
 {
     CatalogTelemetrySnapshot snapshot{};
@@ -124,6 +139,7 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     registry.register_checkpoint_scheduler("ckpt_a", [] { return make_checkpoint(2U); });
     registry.register_checkpoint_scheduler("ckpt_b", [] { return make_checkpoint(4U); });
     registry.register_wal_retention("ret_a", [] { return make_retention(3U); });
+    registry.register_vacuum("vac_a", [] { return make_vacuum(2U); });
     registry.register_catalog("cat_a", [] { return make_catalog(1U); });
     registry.register_catalog("cat_b", [] { return make_catalog(4U); });
     registry.register_ddl("ddl_a", [] { return make_ddl(2U); });
@@ -142,6 +158,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.checkpoints.total.emitted_checkpoints == ((2U + 2U) + (4U + 2U)));
     REQUIRE(doc.retention.details.size() == 1U);
     REQUIRE(doc.retention.total.pruned_segments == (3U + 2U));
+    REQUIRE(doc.vacuum.details.size() == 1U);
+    REQUIRE(doc.vacuum.total.scheduled_pages == (2U + 1U));
     REQUIRE(doc.catalog.details.size() == 2U);
     REQUIRE(doc.catalog.total.cache_hits == ((1U + 1U) * 10U + (4U + 1U) * 10U));
     REQUIRE(doc.ddl.details.size() == 2U);
@@ -175,6 +193,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     registry.register_page_manager("pm", [] { return make_page_manager(1U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(1U); });
     registry.register_wal_retention("ret", [] { return make_retention(1U); });
+    registry.register_vacuum("vac", [] { return make_vacuum(2U); });
     registry.register_catalog("cat", [] { return make_catalog(2U); });
     registry.register_ddl("ddl", [] { return make_ddl(3U); });
     registry.register_parser("parser", [] { return make_parser(4U); });
@@ -184,6 +203,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     options.include_page_manager_details = false;
     options.include_checkpoint_details = false;
     options.include_retention_details = false;
+    options.include_vacuum_details = false;
     options.include_catalog_details = false;
     options.include_ddl_details = false;
     options.include_parser_details = false;
@@ -194,6 +214,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     REQUIRE(doc.page_managers.details.empty());
     REQUIRE(doc.checkpoints.details.empty());
     REQUIRE(doc.retention.details.empty());
+    REQUIRE(doc.vacuum.details.empty());
     REQUIRE(doc.catalog.details.empty());
     REQUIRE(doc.ddl.details.empty());
     REQUIRE(doc.parser.details.empty());
@@ -206,6 +227,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     registry.register_page_manager("pm", [] { return make_page_manager(3U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(5U); });
     registry.register_wal_retention("ret", [] { return make_retention(7U); });
+    registry.register_vacuum("vac", [] { return make_vacuum(3U); });
     registry.register_catalog("cat", [] { return make_catalog(4U); });
     registry.register_ddl("ddl", [] { return make_ddl(5U); });
     registry.register_parser("parser", [] { return make_parser(6U); });
@@ -220,6 +242,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"checkpoints\"") != std::string::npos);
     REQUIRE(json.find("\"retention\"") != std::string::npos);
     REQUIRE(json.find("\"catalog\"") != std::string::npos);
+    REQUIRE(json.find("\"vacuum\"") != std::string::npos);
     REQUIRE(json.find("\"transactions\"") != std::string::npos);
     REQUIRE(json.find("\"parser\"") != std::string::npos);
     REQUIRE(json.find("\"ddl\"") != std::string::npos);

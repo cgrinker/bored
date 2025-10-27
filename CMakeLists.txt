@@ -44,6 +44,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/wal_telemetry_registry.cpp
     src/storage/storage_telemetry_registry.cpp
     src/storage/storage_diagnostics.cpp
+    src/storage/vacuum_scheduler.cpp
     src/txn/transaction_manager.cpp
     src/txn/persistent_transaction_id_allocator.cpp
 )
@@ -136,6 +137,7 @@ if(BORED_ENABLE_TESTS)
         tests/lock_manager_tests.cpp
         tests/storage_telemetry_tests.cpp
         tests/storage_diagnostics_tests.cpp
+        tests/vacuum_scheduler_tests.cpp
     tests/transaction_manager_tests.cpp
     )
 
