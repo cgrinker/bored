@@ -1,7 +1,11 @@
 #include "bored/txn/transaction_manager.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 
 namespace bored::txn {
 
@@ -32,6 +36,11 @@ const TransactionOptions& TransactionContext::options() const noexcept
     return state_ ? state_->options : kDefaultOptions;
 }
 
+std::error_code TransactionContext::last_error() const noexcept
+{
+    return state_ ? state_->last_error : std::error_code{};
+}
+
 void TransactionContext::on_commit(std::function<void()> callback)
 {
     if (!state_) {
@@ -55,9 +64,20 @@ TransactionContext::operator bool() const noexcept
     return static_cast<bool>(state_);
 }
 
-TransactionManager::TransactionManager(TransactionIdAllocator& id_allocator)
+TransactionManager::TransactionManager(TransactionIdAllocator& id_allocator, CommitPipeline* pipeline)
     : id_allocator_{&id_allocator}
 {
+    commit_pipeline_.store(pipeline, std::memory_order_relaxed);
+}
+
+void TransactionManager::set_commit_pipeline(CommitPipeline* pipeline)
+{
+    commit_pipeline_.store(pipeline, std::memory_order_release);
+}
+
+CommitPipeline* TransactionManager::commit_pipeline() const noexcept
+{
+    return commit_pipeline_.load(std::memory_order_acquire);
 }
 
 TransactionContext TransactionManager::begin(const TransactionOptions& options)
@@ -84,21 +104,77 @@ void TransactionManager::commit(TransactionContext& ctx)
         throw std::logic_error{"TransactionManager::commit requires active context"};
     }
 
+    CommitPipeline* pipeline = commit_pipeline_.load(std::memory_order_acquire);
+    CommitRequest request{};
+    if (pipeline) {
+        request.transaction_id = state->id;
+        request.snapshot = state->snapshot;
+    }
+
     {
         std::scoped_lock lock{mutex_};
         if (state->state != TransactionState::Active && state->state != TransactionState::Preparing) {
             throw std::logic_error{"TransactionManager::commit requires active transaction"};
         }
         state->state = TransactionState::Preparing;
+        if (pipeline) {
+            request.next_transaction_id = id_allocator_ != nullptr ? id_allocator_->peek_next() : 0U;
+            request.oldest_active_transaction_id = oldest_active_ != 0U ? oldest_active_ : external_low_water_mark_;
+        }
     }
 
-    // WAL flush and durability hooks will slot between Preparing and Committed states.
+    CommitTicket ticket{};
+    bool prepared_commit = false;
+
+    if (pipeline) {
+        auto ec = pipeline->prepare_commit(request, ticket);
+        if (ec) {
+            state->last_error = ec;
+            state->commit_ticket.reset();
+            fail_commit(ctx, "prepare", ec);
+        }
+
+        prepared_commit = true;
+        state->commit_ticket = ticket;
+
+        {
+            std::scoped_lock lock{mutex_};
+            state->state = TransactionState::FlushingWal;
+        }
+
+        ec = pipeline->flush_commit(ticket);
+        if (ec) {
+            pipeline->rollback_commit(ticket);
+            state->last_error = ec;
+            state->commit_ticket.reset();
+            fail_commit(ctx, "flush", ec);
+        }
+
+        {
+            std::scoped_lock lock{mutex_};
+            state->state = TransactionState::Durable;
+        }
+    } else {
+        std::scoped_lock lock{mutex_};
+        state->state = TransactionState::Durable;
+    }
+
+    {
+        std::scoped_lock lock{mutex_};
+        state->state = TransactionState::Publishing;
+        erase_state_locked(state->id);
+        ++telemetry_.committed_transactions;
+        state->commit_ticket.reset();
+    }
+
+    if (pipeline && prepared_commit) {
+        pipeline->confirm_commit(ticket);
+    }
 
     {
         std::scoped_lock lock{mutex_};
         state->state = TransactionState::Committed;
-        erase_state_locked(state->id);
-        ++telemetry_.committed_transactions;
+        state->last_error = {};
     }
 
     for (auto& callback : state->commit_callbacks) {
@@ -117,23 +193,31 @@ void TransactionManager::abort(TransactionContext& ctx)
         throw std::logic_error{"TransactionManager::abort requires active context"};
     }
 
+    CommitPipeline* pipeline = commit_pipeline();
+    std::optional<CommitTicket> ticket{};
+
     {
         std::scoped_lock lock{mutex_};
-        if (state->state != TransactionState::Active && state->state != TransactionState::Preparing) {
+        switch (state->state) {
+        case TransactionState::Active:
+        case TransactionState::Preparing:
+            break;
+        case TransactionState::FlushingWal:
+            if (state->commit_ticket.has_value()) {
+                ticket = state->commit_ticket;
+            }
+            break;
+        default:
             throw std::logic_error{"TransactionManager::abort requires active transaction"};
         }
-        state->state = TransactionState::Aborted;
-        erase_state_locked(state->id);
-        ++telemetry_.aborted_transactions;
     }
 
-    for (auto& callback : state->abort_callbacks) {
-        if (callback) {
-            callback();
-        }
+    if (ticket && pipeline) {
+        pipeline->rollback_commit(*ticket);
     }
-    state->commit_callbacks.clear();
-    state->abort_callbacks.clear();
+
+    state->last_error = std::make_error_code(std::errc::operation_canceled);
+    complete_abort(ctx);
 }
 
 void TransactionManager::refresh_snapshot(TransactionContext& ctx)
@@ -194,6 +278,50 @@ void TransactionManager::advance_low_water_mark(TransactionId txn_id)
     std::scoped_lock lock{mutex_};
     external_low_water_mark_ = std::max(external_low_water_mark_, txn_id);
     recompute_oldest_locked();
+}
+
+void TransactionManager::complete_abort(TransactionContext& ctx)
+{
+    auto state = ctx.state_;
+    if (!state) {
+        return;
+    }
+
+    {
+        std::scoped_lock lock{mutex_};
+        state->state = TransactionState::AbortCleanup;
+        erase_state_locked(state->id);
+        ++telemetry_.aborted_transactions;
+        state->commit_ticket.reset();
+    }
+
+    for (auto& callback : state->abort_callbacks) {
+        if (callback) {
+            callback();
+        }
+    }
+
+    state->commit_callbacks.clear();
+    state->abort_callbacks.clear();
+
+    {
+        std::scoped_lock lock{mutex_};
+        state->state = TransactionState::Aborted;
+    }
+}
+
+[[noreturn]] void TransactionManager::fail_commit(TransactionContext& ctx, const char* stage, std::error_code ec)
+{
+    if (!ec) {
+        ec = std::make_error_code(std::errc::io_error);
+    }
+
+    complete_abort(ctx);
+
+    std::string message{"TransactionManager::commit "};
+    message += stage;
+    message += " failed";
+    throw std::system_error{ec, message};
 }
 
 void TransactionManager::record_state_locked(const StatePtr& state)

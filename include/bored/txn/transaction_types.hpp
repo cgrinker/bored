@@ -19,6 +19,10 @@ enum class TransactionState {
     Idle,
     Active,
     Preparing,
+    FlushingWal,
+    Durable,
+    Publishing,
+    AbortCleanup,
     Committed,
     Aborted
 };

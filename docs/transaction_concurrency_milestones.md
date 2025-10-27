@@ -29,17 +29,17 @@
 	- [x] Run `VacuumWorker` inside a background loop with force-run pokes and telemetry surfacing for operators.
 - [x] Expand unit tests to cover concurrent insert/update/delete visibility across transaction snapshots (catalog accessor suite now exercises pending/committed version chains).
 
-**Next Task:** Implement row/page-intent lock hierarchy with deadlock detection or timeout policy.
+**Next Task:** Back the commit pipeline with `WalWriter` so commit tickets flush to durability and retention/checkpoint hooks advance.
 
 ## Milestone 3: Locking, Latching, and Conflict Detection (1 sprint)
-- [ ] Implement row/page-intent lock hierarchy with deadlock detection or timeout policy.
-- [ ] Integrate lock acquisition with `TransactionContext` so planner/executor operators request latches consistently.
-- [ ] Ensure `WalRetentionManager` and checkpoint flows consult lock/txn state before pruning WAL segments.
-- [ ] Emit diagnostics for lock waits, deadlocks, and blocked writers (feeding `StorageTelemetryRegistry`).
-- [ ] Provide stress tests simulating conflicting writers/readers to validate lock ordering and fairness.
+- [x] Implement row/page-intent lock hierarchy with deadlock detection or timeout policy (initial timeout policy shipped; deadlock detector hooks retained for follow-up tuning).
+- [x] Integrate lock acquisition with `TransactionContext` so planner/executor operators request latches consistently (planner uses contextual guards to sequence row/table intent).
+- [x] Ensure `WalRetentionManager` and checkpoint flows consult lock/txn state before pruning WAL segments (lock snapshots consulted prior to retention decisions).
+- [x] Emit diagnostics for lock waits, deadlocks, and blocked writers (feeding `StorageTelemetryRegistry`).
+- [x] Provide stress tests simulating conflicting writers/readers to validate lock ordering and fairness.
 
 ## Milestone 4: Commit, Abort, and Recovery Validation (1 sprint)
-- [ ] Implement commit protocol that flushes WAL, advances durability ACK, and publishes snapshot visibility atomically.
+- [ ] Implement commit protocol that flushes WAL, advances durability ACK, and publishes snapshot visibility atomically (commit pipeline scaffolding landed; WAL writer integration pending).
 - [ ] Add abort path that walks undo chains, restores tuples, and releases locks deterministically.
 - [ ] Extend `WalRecoveryDriver` to rebuild in-flight transactions, reapply commits, and rollback incomplete operations.
 - [ ] Capture integration tests that crash/restart during commit/abort windows and verify MVCC invariants.

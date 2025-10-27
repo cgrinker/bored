@@ -1,12 +1,16 @@
 #pragma once
 
-#include "bored/txn/transaction_types.hpp"
+#include "bored/txn/commit_pipeline.hpp"
 #include "bored/txn/transaction_telemetry.hpp"
+#include "bored/txn/transaction_types.hpp"
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <system_error>
 #include <vector>
 
 namespace bored::txn {
@@ -19,6 +23,7 @@ public:
     const Snapshot& snapshot() const noexcept;
     TransactionState state() const noexcept;
     const TransactionOptions& options() const noexcept;
+    std::error_code last_error() const noexcept;
 
     void on_commit(std::function<void()> callback);
     void on_abort(std::function<void()> callback);
@@ -33,6 +38,8 @@ private:
         TransactionState state = TransactionState::Idle;
         std::vector<std::function<void()>> commit_callbacks{};
         std::vector<std::function<void()>> abort_callbacks{};
+        std::optional<CommitTicket> commit_ticket{};
+        std::error_code last_error{};
     };
 
     explicit TransactionContext(std::shared_ptr<State> state);
@@ -44,7 +51,10 @@ private:
 
 class TransactionManager final : public SnapshotManager {
 public:
-    explicit TransactionManager(TransactionIdAllocator& id_allocator);
+    explicit TransactionManager(TransactionIdAllocator& id_allocator, CommitPipeline* pipeline = nullptr);
+
+    void set_commit_pipeline(CommitPipeline* pipeline);
+    CommitPipeline* commit_pipeline() const noexcept;
 
     TransactionContext begin(const TransactionOptions& options = {});
     void commit(TransactionContext& ctx);
@@ -68,8 +78,11 @@ private:
     void recompute_oldest_locked();
     std::size_t count_active_locked() const;
     Snapshot build_snapshot_locked(TransactionId self_id) const;
+    void complete_abort(TransactionContext& ctx);
+    [[noreturn]] void fail_commit(TransactionContext& ctx, const char* stage, std::error_code ec);
 
     TransactionIdAllocator* id_allocator_ = nullptr;
+    std::atomic<CommitPipeline*> commit_pipeline_{nullptr};
 
     struct Telemetry final {
         std::uint64_t committed_transactions = 0U;

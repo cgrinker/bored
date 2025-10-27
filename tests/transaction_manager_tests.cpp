@@ -1,6 +1,92 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <string>
+#include <system_error>
+#include <vector>
+
 #include "bored/txn/transaction_manager.hpp"
+
+namespace {
+
+class RecordingCommitPipeline final : public bored::txn::CommitPipeline {
+public:
+    std::vector<std::string> events;
+    bored::txn::CommitTicket confirmed_ticket{};
+
+    std::error_code prepare_commit(const bored::txn::CommitRequest& request, bored::txn::CommitTicket& out_ticket) override
+    {
+        events.emplace_back("prepare");
+        out_ticket.transaction_id = request.transaction_id;
+        out_ticket.commit_sequence = 101U;
+        return {};
+    }
+
+    std::error_code flush_commit(const bored::txn::CommitTicket& ticket) override
+    {
+        events.emplace_back("flush");
+        last_ticket_ = ticket;
+        return {};
+    }
+
+    void confirm_commit(const bored::txn::CommitTicket& ticket) override
+    {
+        events.emplace_back("confirm");
+        confirmed_ticket = ticket;
+    }
+
+    void rollback_commit(const bored::txn::CommitTicket& ticket) noexcept override
+    {
+        events.emplace_back("rollback");
+        rolled_back_ticket_ = ticket;
+    }
+
+    const bored::txn::CommitTicket& last_ticket() const noexcept { return last_ticket_; }
+    const bored::txn::CommitTicket& rolled_back_ticket() const noexcept { return rolled_back_ticket_; }
+
+private:
+    bored::txn::CommitTicket last_ticket_{};
+    bored::txn::CommitTicket rolled_back_ticket_{};
+};
+
+class FailingFlushPipeline final : public bored::txn::CommitPipeline {
+public:
+    std::error_code prepare_commit(const bored::txn::CommitRequest& request, bored::txn::CommitTicket& out_ticket) override
+    {
+        ++prepare_calls;
+        out_ticket.transaction_id = request.transaction_id;
+        out_ticket.commit_sequence = 202U;
+        prepared_ticket_ = out_ticket;
+        return {};
+    }
+
+    std::error_code flush_commit(const bored::txn::CommitTicket&) override
+    {
+        ++flush_calls;
+        return std::make_error_code(std::errc::io_error);
+    }
+
+    void confirm_commit(const bored::txn::CommitTicket&) override { ++confirm_calls; }
+
+    void rollback_commit(const bored::txn::CommitTicket& ticket) noexcept override
+    {
+        ++rollback_calls;
+        rolled_back_ticket_ = ticket;
+    }
+
+    int prepare_calls = 0;
+    int flush_calls = 0;
+    int confirm_calls = 0;
+    int rollback_calls = 0;
+
+    const bored::txn::CommitTicket& prepared_ticket() const noexcept { return prepared_ticket_; }
+    const bored::txn::CommitTicket& rolled_back_ticket() const noexcept { return rolled_back_ticket_; }
+
+private:
+    bored::txn::CommitTicket prepared_ticket_{};
+    bored::txn::CommitTicket rolled_back_ticket_{};
+};
+
+}  // namespace
 
 TEST_CASE("TransactionManager assigns monotonically increasing transaction ids", "[txn]")
 {
@@ -30,10 +116,12 @@ TEST_CASE("TransactionManager assigns monotonically increasing transaction ids",
 
     manager.commit(first);
     CHECK(first.state() == bored::txn::TransactionState::Committed);
+    CHECK_FALSE(first.last_error());
     CHECK(manager.oldest_active_transaction() == 42U);
 
     manager.commit(second);
     CHECK(second.state() == bored::txn::TransactionState::Committed);
+    CHECK_FALSE(second.last_error());
     CHECK(manager.oldest_active_transaction() == 0U);
 }
 
@@ -50,6 +138,7 @@ TEST_CASE("TransactionManager abort triggers callbacks and clears active set", "
 
     CHECK(abort_called);
     CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+    CHECK(ctx.last_error() == std::make_error_code(std::errc::operation_canceled));
     CHECK(manager.oldest_active_transaction() == 0U);
 }
 
@@ -126,4 +215,49 @@ TEST_CASE("TransactionManager telemetry tracks lifecycle", "[txn]")
     CHECK(after.committed_transactions == 1U);
     CHECK(after.aborted_transactions == 1U);
     CHECK(after.last_snapshot_xmax >= after.last_snapshot_xmin);
+}
+
+TEST_CASE("TransactionManager commit drives commit pipeline", "[txn]")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{10U};
+    RecordingCommitPipeline pipeline{};
+    bored::txn::TransactionManager manager{allocator, &pipeline};
+
+    auto ctx = manager.begin();
+    manager.commit(ctx);
+
+    CHECK(ctx.state() == bored::txn::TransactionState::Committed);
+    CHECK_FALSE(ctx.last_error());
+
+    const std::vector<std::string> expected{"prepare", "flush", "confirm"};
+    CHECK(pipeline.events == expected);
+    CHECK(pipeline.confirmed_ticket.transaction_id == ctx.id());
+    CHECK(pipeline.confirmed_ticket.commit_sequence == 101U);
+
+    auto telemetry = manager.telemetry_snapshot();
+    CHECK(telemetry.committed_transactions == 1U);
+    CHECK(telemetry.aborted_transactions == 0U);
+}
+
+TEST_CASE("TransactionManager commit failure rolls back pipeline", "[txn]")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{20U};
+    FailingFlushPipeline pipeline{};
+    bored::txn::TransactionManager manager{allocator, &pipeline};
+
+    auto ctx = manager.begin();
+    REQUIRE_THROWS_AS(manager.commit(ctx), std::system_error);
+
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+    CHECK(ctx.last_error() == std::make_error_code(std::errc::io_error));
+
+    const std::vector<std::string> expected{"prepare", "flush", "rollback"};
+    CHECK(pipeline.events == expected);
+    CHECK(pipeline.rollback_calls == 1);
+    CHECK(pipeline.confirm_calls == 0);
+    CHECK(pipeline.rolled_back_ticket().transaction_id == ctx.id());
+
+    auto telemetry = manager.telemetry_snapshot();
+    CHECK(telemetry.committed_transactions == 0U);
+    CHECK(telemetry.aborted_transactions == 1U);
 }
