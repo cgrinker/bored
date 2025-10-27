@@ -189,3 +189,67 @@ TEST_CASE("binder reports unknown star qualifier", "[parser][binder]")
     REQUIRE(binding_result.diagnostics.size() == 1U);
     CHECK(binding_result.diagnostics.front().message == "Table alias 'unknown_alias' not found for star expression");
 }
+
+TEST_CASE("binder annotates expression types", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.quantity, 5 FROM sales.inventory AS inv WHERE inv.quantity = 10;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE(binding_result.success());
+
+    auto* query = parse_result.statement->query;
+    REQUIRE(query != nullptr);
+    REQUIRE(query->select_items.size() == 2U);
+
+    auto* quantity_item = query->select_items.front();
+    REQUIRE(quantity_item != nullptr);
+    auto& quantity_expr = static_cast<relational::IdentifierExpression&>(*quantity_item->expression);
+    REQUIRE(quantity_expr.inferred_type.has_value());
+    CHECK(quantity_expr.inferred_type->type == relational::ScalarType::UInt32);
+    CHECK(quantity_expr.inferred_type->nullable);
+
+    auto* literal_item = query->select_items.back();
+    REQUIRE(literal_item != nullptr);
+    auto& literal_expr = static_cast<relational::LiteralExpression&>(*literal_item->expression);
+    REQUIRE(literal_expr.inferred_type.has_value());
+    CHECK(literal_expr.inferred_type->type == relational::ScalarType::Int64);
+    CHECK_FALSE(literal_expr.inferred_type->nullable);
+
+    REQUIRE(query->where != nullptr);
+    auto& predicate = static_cast<relational::BinaryExpression&>(*query->where);
+    REQUIRE(predicate.inferred_type.has_value());
+    CHECK(predicate.inferred_type->type == relational::ScalarType::Boolean);
+    CHECK(predicate.inferred_type->nullable);
+}
+
+TEST_CASE("binder reports type mismatches", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.name FROM sales.inventory AS inv WHERE inv.name = 10;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE(binding_result.diagnostics.size() == 1U);
+    CHECK(binding_result.diagnostics.front().message == "Type mismatch: cannot compare UTF8 to INT64");
+}

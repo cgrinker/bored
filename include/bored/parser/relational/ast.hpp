@@ -97,6 +97,20 @@ enum class BinaryOperator : std::uint8_t {
     GreaterOrEqual
 };
 
+enum class ScalarType : std::uint8_t {
+    Unknown = 0,
+    Boolean,
+    Int64,
+    UInt32,
+    Decimal,
+    Utf8
+};
+
+struct TypeAnnotation final {
+    ScalarType type = ScalarType::Unknown;
+    bool nullable = true;
+};
+
 struct QualifiedName final {
     std::vector<Identifier> parts{};
 
@@ -160,6 +174,8 @@ struct Expression : Node {
     ~Expression() override = default;
 
     void accept(ExpressionVisitor& visitor) const;
+
+    std::optional<TypeAnnotation> inferred_type{};
 };
 
 struct SelectItem : Node {

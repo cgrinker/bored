@@ -23,6 +23,81 @@ std::string normalise_identifier(std::string_view text)
     return result;
 }
 
+std::string scalar_type_name(ScalarType type)
+{
+    switch (type) {
+    case ScalarType::Boolean:
+        return "BOOLEAN";
+    case ScalarType::Int64:
+        return "INT64";
+    case ScalarType::UInt32:
+        return "UINT32";
+    case ScalarType::Decimal:
+        return "DECIMAL";
+    case ScalarType::Utf8:
+        return "UTF8";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+ScalarType to_scalar_type(catalog::CatalogColumnType column_type)
+{
+    switch (column_type) {
+    case catalog::CatalogColumnType::Int64:
+        return ScalarType::Int64;
+    case catalog::CatalogColumnType::UInt32:
+        return ScalarType::UInt32;
+    case catalog::CatalogColumnType::Utf8:
+        return ScalarType::Utf8;
+    default:
+        return ScalarType::Unknown;
+    }
+}
+
+ScalarType literal_scalar_type(const LiteralExpression& literal)
+{
+    switch (literal.tag) {
+    case LiteralTag::Boolean:
+        return ScalarType::Boolean;
+    case LiteralTag::Integer:
+        return ScalarType::Int64;
+    case LiteralTag::Decimal:
+        return ScalarType::Decimal;
+    case LiteralTag::String:
+        return ScalarType::Utf8;
+    default:
+        return ScalarType::Unknown;
+    }
+}
+
+bool is_nullable_literal(const LiteralExpression& literal)
+{
+    return literal.tag == LiteralTag::Null;
+}
+
+bool is_numeric(ScalarType type)
+{
+    return type == ScalarType::Int64 || type == ScalarType::UInt32 || type == ScalarType::Decimal;
+}
+
+bool are_comparable(ScalarType lhs, ScalarType rhs)
+{
+    if (lhs == ScalarType::Unknown || rhs == ScalarType::Unknown) {
+        return true;
+    }
+
+    if (lhs == rhs) {
+        return true;
+    }
+
+    if (is_numeric(lhs) && is_numeric(rhs)) {
+        return true;
+    }
+
+    return false;
+}
+
 struct ColumnMatch final {
     const ColumnBinding* binding = nullptr;
     const TableBinding* table_binding = nullptr;
@@ -324,6 +399,9 @@ private:
         case NodeKind::IdentifierExpression:
             bind_identifier(static_cast<IdentifierExpression&>(expression), scope, result);
             break;
+        case NodeKind::LiteralExpression:
+            bind_literal(static_cast<LiteralExpression&>(expression));
+            break;
         case NodeKind::BinaryExpression: {
             auto& binary = static_cast<BinaryExpression&>(expression);
             if (binary.left != nullptr) {
@@ -332,6 +410,7 @@ private:
             if (binary.right != nullptr) {
                 bind_expression(*binary.right, scope, result);
             }
+            infer_binary_expression(binary, result);
             break;
         }
         case NodeKind::StarExpression:
@@ -378,6 +457,8 @@ private:
             }
 
             expression.binding = *matches.front().binding;
+            const auto scalar_type = to_scalar_type(matches.front().binding->column_type);
+            set_expression_type(expression, scalar_type, true);
             return;
         }
 
@@ -403,6 +484,8 @@ private:
             }
 
             expression.binding = *matches.front().binding;
+            const auto scalar_type = to_scalar_type(matches.front().binding->column_type);
+            set_expression_type(expression, scalar_type, true);
             return;
         }
 
@@ -411,6 +494,13 @@ private:
         diagnostic.message = "Column references with more than one qualifier are not supported";
         diagnostic.remediation_hints = {"Use optional table aliases when qualifying columns."};
         result.diagnostics.push_back(std::move(diagnostic));
+    }
+
+    void bind_literal(LiteralExpression& expression) const
+    {
+        const auto type = literal_scalar_type(expression);
+        const bool nullable = is_nullable_literal(expression);
+        set_expression_type(expression, type, nullable);
     }
 
     void bind_star(StarExpression& expression, Scope& scope, BindingResult& result) const
@@ -448,6 +538,36 @@ private:
         }
 
         expression.binding = *tables.front();
+    }
+
+    void infer_binary_expression(BinaryExpression& expression, BindingResult& result) const
+    {
+        auto left_type = ScalarType::Unknown;
+        auto right_type = ScalarType::Unknown;
+        if (expression.left != nullptr && expression.left->inferred_type.has_value()) {
+            left_type = expression.left->inferred_type->type;
+        }
+        if (expression.right != nullptr && expression.right->inferred_type.has_value()) {
+            right_type = expression.right->inferred_type->type;
+        }
+
+        if (!are_comparable(left_type, right_type)) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "Type mismatch: cannot compare " + scalar_type_name(left_type) + " to " + scalar_type_name(right_type);
+            diagnostic.remediation_hints = {"Cast one side to a compatible type or adjust the query predicate."};
+            result.diagnostics.push_back(std::move(diagnostic));
+        }
+
+        set_expression_type(expression, ScalarType::Boolean, true);
+    }
+
+    void set_expression_type(Expression& expression, ScalarType type, bool nullable) const
+    {
+        TypeAnnotation annotation{};
+        annotation.type = type;
+        annotation.nullable = nullable;
+        expression.inferred_type = annotation;
     }
 
     BinderConfig config_;
