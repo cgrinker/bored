@@ -1,5 +1,6 @@
 # CMake build artifacts
 build/
+build-macos
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake

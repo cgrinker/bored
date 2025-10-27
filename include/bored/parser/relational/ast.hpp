@@ -1,6 +1,8 @@
 #pragma once
 
 #include "bored/parser/ast.hpp"
+#include "bored/catalog/catalog_ids.hpp"
+#include "bored/catalog/catalog_relations.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -123,6 +125,27 @@ struct StarExpression;
 struct OrderByItem;
 struct LimitClause;
 
+struct TableBinding final {
+    catalog::DatabaseId database_id{};
+    catalog::SchemaId schema_id{};
+    catalog::RelationId relation_id{};
+    std::string schema_name{};
+    std::string table_name{};
+    std::optional<std::string> table_alias{};
+};
+
+struct ColumnBinding final {
+    catalog::DatabaseId database_id{};
+    catalog::SchemaId schema_id{};
+    catalog::RelationId relation_id{};
+    catalog::ColumnId column_id{};
+    catalog::CatalogColumnType column_type = catalog::CatalogColumnType::Unknown;
+    std::string schema_name{};
+    std::string table_name{};
+    std::optional<std::string> table_alias{};
+    std::string column_name{};
+};
+
 class ExpressionVisitor {
 public:
     virtual ~ExpressionVisitor() = default;
@@ -151,6 +174,7 @@ struct TableReference : Node {
 
     QualifiedName name{};
     std::optional<Identifier> alias{};
+    std::optional<TableBinding> binding{};
 };
 
 struct OrderByItem : Node {
@@ -193,6 +217,7 @@ struct IdentifierExpression : Expression {
     IdentifierExpression() noexcept : Expression(NodeKind::IdentifierExpression) {}
 
     QualifiedName name{};
+    std::optional<ColumnBinding> binding{};
 };
 
 struct LiteralExpression : Expression {
@@ -215,6 +240,7 @@ struct StarExpression : Expression {
     StarExpression() noexcept : Expression(NodeKind::StarExpression) {}
 
     QualifiedName qualifier{};
+    std::optional<TableBinding> binding{};
 };
 
 [[nodiscard]] std::string format_qualified_name(const QualifiedName& name);
