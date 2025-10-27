@@ -3,9 +3,11 @@
 #include "bored/catalog/catalog_mvcc.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
+#include "bored/catalog/catalog_transaction.hpp"
 #include "bored/storage/page_operations.hpp"
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_payloads.hpp"
+#include "bored/txn/transaction_manager.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -397,6 +399,31 @@ TEST_CASE("Catalog mutator abort discards staged batch")
 
     auto abort_ec = transaction.abort();
     REQUIRE_FALSE(abort_ec);
+    CHECK(transaction.is_aborted());
+    CHECK(mutator.empty());
+    CHECK_FALSE(mutator.has_published_batch());
+}
+
+TEST_CASE("Catalog mutator clears staged mutations when TransactionManager aborts", "[txn]")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{955U};
+    bored::txn::TransactionManager txn_manager{allocator};
+
+    auto ctx = txn_manager.begin();
+
+    CatalogTransactionConfig config{};
+    config.transaction_context = &ctx;
+    config.transaction_manager = &txn_manager;
+    CatalogTransaction transaction{config};
+
+    CatalogMutator mutator({&transaction});
+
+    auto descriptor = CatalogTupleBuilder::for_insert(transaction);
+    mutator.stage_insert(kCatalogTablesRelationId, 42'000U, descriptor, make_payload("stage"));
+    CHECK(mutator.staged_mutations().size() == 1U);
+
+    txn_manager.abort(ctx);
+
     CHECK(transaction.is_aborted());
     CHECK(mutator.empty());
     CHECK_FALSE(mutator.has_published_batch());

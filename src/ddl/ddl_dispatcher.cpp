@@ -3,9 +3,11 @@
 #include "bored/catalog/catalog_accessor.hpp"
 #include "bored/catalog/catalog_mutator.hpp"
 #include "bored/catalog/catalog_transaction.hpp"
+#include "bored/txn/transaction_manager.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <system_error>
@@ -53,15 +55,19 @@ DdlCommandDispatcher::~DdlCommandDispatcher()
     }
 }
 
-DdlCommandDispatcher::TransactionScope::TransactionScope(catalog::CatalogTransaction& transaction)
+DdlCommandDispatcher::TransactionScope::TransactionScope(catalog::CatalogTransaction& transaction,
+                                                         txn::TransactionManager* manager,
+                                                         txn::TransactionContext* context)
     : transaction_{transaction}
+    , manager_{manager}
+    , context_{context}
 {
 }
 
 DdlCommandDispatcher::TransactionScope::~TransactionScope()
 {
     if (!completed_ && transaction_.is_active()) {
-        (void)transaction_.abort();
+        (void)abort();
     }
 }
 
@@ -71,7 +77,13 @@ std::error_code DdlCommandDispatcher::TransactionScope::commit()
         return {};
     }
     if (auto ec = transaction_.commit()) {
+        if (manager_ && context_) {
+            manager_->abort(*context_);
+        }
         return ec;
+    }
+    if (manager_ && context_) {
+        manager_->commit(*context_);
     }
     completed_ = true;
     return {};
@@ -81,6 +93,13 @@ std::error_code DdlCommandDispatcher::TransactionScope::abort()
 {
     if (completed_) {
         return {};
+    }
+    if (manager_ && context_) {
+        try {
+            manager_->abort(*context_);
+        } catch (...) {
+            // ignore abort failures to preserve original error reporting contract
+        }
     }
     completed_ = true;
     return transaction_.abort();
@@ -130,17 +149,57 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
                                      {"Provide DdlCommandDispatcher::Config.transaction_factory to create catalog transactions."});
     }
 
-    auto transaction = config_.transaction_factory();
+    std::optional<txn::TransactionContext> txn_context{};
+    txn::TransactionContext* txn_context_ptr = nullptr;
+    bool context_managed = false;
+    if (config_.transaction_manager != nullptr) {
+        txn_context.emplace(config_.transaction_manager->begin());
+        txn_context_ptr = &*txn_context;
+    }
+
+    const auto abort_context_if_needed = [&]() {
+        if (!context_managed && config_.transaction_manager != nullptr && txn_context_ptr != nullptr) {
+            try {
+                config_.transaction_manager->abort(*txn_context_ptr);
+            } catch (...) {
+                // ignore abort failures; dispatcher already reports the triggering error
+            }
+            context_managed = true;
+        }
+    };
+
+    struct ContextAbortGuard final {
+        txn::TransactionManager* manager = nullptr;
+        txn::TransactionContext* context = nullptr;
+        bool* managed = nullptr;
+
+        ~ContextAbortGuard()
+        {
+            if (manager != nullptr && context != nullptr && managed != nullptr && !*managed) {
+                try {
+                    manager->abort(*context);
+                } catch (...) {
+                    // ignore guard abort failures to preserve existing error reporting behaviour
+                }
+            }
+        }
+    } context_guard{config_.transaction_manager, txn_context_ptr, &context_managed};
+
+    auto transaction = config_.transaction_factory(txn_context_ptr);
     if (!transaction) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
+        abort_context_if_needed();
         record_duration();
         return make_internal_failure("DDL dispatcher failed to acquire transaction",
                                      {"Ensure the transaction_factory returns an active CatalogTransaction instance."});
     }
 
+    transaction->bind_transaction_context(config_.transaction_manager, txn_context_ptr);
+
     auto handler = find_handler(command);
     if (handler == nullptr) {
         telemetry_.record_failure(verb, make_error_code(DdlErrc::HandlerMissing));
+        abort_context_if_needed();
         record_duration();
         return make_failure(make_error_code(DdlErrc::HandlerMissing),
                             "no handler registered for DDL verb",
@@ -196,7 +255,8 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
     context.create_index_storage = config_.create_index_storage_hook;
     context.drop_index_cleanup = config_.drop_index_cleanup_hook;
 
-    TransactionScope scope{*transaction};
+    TransactionScope scope{*transaction, config_.transaction_manager, txn_context_ptr};
+    context_managed = true;
 
     DdlCommandResponse response{};
     try {

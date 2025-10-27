@@ -13,6 +13,7 @@
 #include "bored/ddl/ddl_dispatcher.hpp"
 #include "bored/ddl/ddl_errors.hpp"
 #include "bored/ddl/ddl_validation.hpp"
+#include "bored/txn/transaction_manager.hpp"
 #include "bored/txn/transaction_types.hpp"
 #include "bored/storage/wal_payloads.hpp"
 
@@ -380,9 +381,11 @@ private:
     DdlCommandDispatcher::Config make_dispatcher_config()
     {
         DdlCommandDispatcher::Config config{};
-        config.transaction_factory = [this]() {
+        config.transaction_factory = [this](txn::TransactionContext* ctx) {
             catalog::CatalogTransactionConfig cfg{&txn_allocator_, &snapshot_manager_};
-            return std::make_unique<catalog::CatalogTransaction>(cfg);
+            auto transaction = std::make_unique<catalog::CatalogTransaction>(cfg);
+            transaction->bind_transaction_context(&txn_manager_, ctx);
+            return transaction;
         };
 
         config.mutator_factory = [this](catalog::CatalogTransaction& tx) {
@@ -411,6 +414,7 @@ private:
 
         config.identifier_allocator = &allocator;
         config.commit_lsn_provider = [] { return 0ULL; };
+        config.transaction_manager = &txn_manager_;
         config.telemetry_registry = &telemetry_registry_;
         config.telemetry_identifier = "ddl.handlers";
         config.drop_table_cleanup_hook = drop_table_cleanup_hook_;
@@ -428,6 +432,7 @@ private:
     InMemoryCatalogStorage storage_{};
     txn::TransactionIdAllocatorStub txn_allocator_{5'000U};
     txn::SnapshotManagerStub snapshot_manager_{make_snapshot()};
+    txn::TransactionManager txn_manager_{txn_allocator_};
     DdlTelemetryRegistry telemetry_registry_{};
     DropTableCleanupHook drop_table_cleanup_hook_{};
     catalog::CatalogCheckpointRegistry* checkpoint_registry_ = nullptr;
@@ -826,7 +831,6 @@ TEST_CASE("Drop table invokes cleanup hook prior to deletion")
         ++cleanup_invocations;
         CHECK(request.name == "metrics");
         CHECK(table.relation_id == expected_table);
-        CHECK(&mutator != nullptr);
         observed_columns.clear();
         for (const auto& column : columns) {
             observed_columns.emplace_back(column.name);

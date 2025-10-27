@@ -2,6 +2,7 @@
 #include "bored/catalog/catalog_accessor.hpp"
 #include "bored/catalog/catalog_mutator.hpp"
 #include "bored/catalog/catalog_transaction.hpp"
+#include "bored/txn/transaction_manager.hpp"
 #include "bored/txn/transaction_types.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -47,8 +48,11 @@ struct StubAllocator final : catalog::CatalogIdentifierAllocator {
 
 struct DispatcherHarness final {
     DispatcherHarness()
-        : transaction_factory{[this] {
+        : transaction_factory{[this](txn::TransactionContext* ctx) {
               catalog::CatalogTransactionConfig cfg{&txn_allocator, &snapshot_manager};
+              if (ctx != nullptr) {
+                  cfg.transaction_context = ctx;
+              }
               return std::make_unique<catalog::CatalogTransaction>(cfg);
           }}
         , mutator_factory{[](catalog::CatalogTransaction& tx) {
@@ -69,7 +73,7 @@ struct DispatcherHarness final {
     txn::SnapshotManagerStub snapshot_manager{};
     StubAllocator allocator{};
 
-    std::function<std::unique_ptr<catalog::CatalogTransaction>()> transaction_factory;
+    std::function<std::unique_ptr<catalog::CatalogTransaction>(txn::TransactionContext*)> transaction_factory;
     std::function<std::unique_ptr<catalog::CatalogMutator>(catalog::CatalogTransaction&)> mutator_factory;
     std::function<std::unique_ptr<catalog::CatalogAccessor>(catalog::CatalogTransaction&)> accessor_factory;
 };
@@ -163,6 +167,129 @@ TEST_CASE("DdlCommandDispatcher aborts transaction on handler failure")
     CHECK(snapshot.verbs[index].successes == 0U);
     CHECK(snapshot.verbs[index].failures == 1U);
     CHECK(snapshot.failures.validation_failures == 1U);
+}
+
+TEST_CASE("DdlCommandDispatcher commits TransactionManager context on success")
+{
+    DispatcherHarness harness;
+    txn::TransactionIdAllocatorStub allocator{1'500U};
+    txn::TransactionManager txn_manager{allocator};
+
+    bool commit_hook_called = false;
+
+    DdlCommandDispatcher dispatcher({
+        .transaction_factory = [&](txn::TransactionContext* ctx) {
+            REQUIRE(ctx != nullptr);
+            catalog::CatalogTransactionConfig cfg{};
+            cfg.transaction_context = ctx;
+            cfg.transaction_manager = &txn_manager;
+            auto transaction = std::make_unique<catalog::CatalogTransaction>(cfg);
+            transaction->register_commit_hook([&]() -> std::error_code {
+                commit_hook_called = true;
+                return {};
+            });
+            return transaction;
+        },
+        .mutator_factory = harness.mutator_factory,
+        .accessor_factory = harness.accessor_factory,
+        .identifier_allocator = &harness.allocator,
+        .transaction_manager = &txn_manager
+    });
+
+    dispatcher.register_handler<CreateSchemaRequest>([](DdlCommandContext&, const CreateSchemaRequest&) {
+        return make_success();
+    });
+
+    const auto response = dispatcher.dispatch(make_create_schema());
+
+    CHECK(response.success);
+    CHECK(commit_hook_called);
+    const auto telemetry = txn_manager.telemetry_snapshot();
+    CHECK(telemetry.committed_transactions == 1U);
+    CHECK(telemetry.aborted_transactions == 0U);
+    CHECK(txn_manager.active_transaction_count() == 0U);
+}
+
+TEST_CASE("DdlCommandDispatcher binds TransactionManager context when factory omits it")
+{
+    DispatcherHarness harness;
+    txn::TransactionIdAllocatorStub allocator{1'550U};
+    txn::TransactionManager txn_manager{allocator};
+
+    txn::TransactionContext* observed_context = nullptr;
+    bool commit_hook_called = false;
+    bool context_bound_in_commit = false;
+
+    DdlCommandDispatcher dispatcher({
+        .transaction_factory = [&](txn::TransactionContext* ctx) {
+            REQUIRE(ctx != nullptr);
+            observed_context = ctx;
+            catalog::CatalogTransactionConfig cfg{&harness.txn_allocator, &harness.snapshot_manager};
+            auto transaction = std::make_unique<catalog::CatalogTransaction>(cfg);
+            transaction->register_commit_hook([&]() -> std::error_code {
+                commit_hook_called = true;
+                context_bound_in_commit = (transaction->transaction_context() == observed_context);
+                return {};
+            });
+            return transaction;
+        },
+        .mutator_factory = harness.mutator_factory,
+        .accessor_factory = harness.accessor_factory,
+        .identifier_allocator = &harness.allocator,
+        .transaction_manager = &txn_manager
+    });
+
+    dispatcher.register_handler<CreateSchemaRequest>([](DdlCommandContext&, const CreateSchemaRequest&) {
+        return make_success();
+    });
+
+    const auto response = dispatcher.dispatch(make_create_schema());
+
+    CHECK(response.success);
+    CHECK(commit_hook_called);
+    CHECK(context_bound_in_commit);
+    const auto telemetry = txn_manager.telemetry_snapshot();
+    CHECK(telemetry.committed_transactions == 1U);
+    CHECK(telemetry.aborted_transactions == 0U);
+    CHECK(txn_manager.active_transaction_count() == 0U);
+}
+
+TEST_CASE("DdlCommandDispatcher aborts TransactionManager context on failure")
+{
+    DispatcherHarness harness;
+    txn::TransactionIdAllocatorStub allocator{1'600U};
+    txn::TransactionManager txn_manager{allocator};
+
+    bool abort_hook_called = false;
+
+    DdlCommandDispatcher dispatcher({
+        .transaction_factory = [&](txn::TransactionContext* ctx) {
+            REQUIRE(ctx != nullptr);
+            catalog::CatalogTransactionConfig cfg{};
+            cfg.transaction_context = ctx;
+            cfg.transaction_manager = &txn_manager;
+            auto transaction = std::make_unique<catalog::CatalogTransaction>(cfg);
+            transaction->register_abort_hook([&]() { abort_hook_called = true; });
+            return transaction;
+        },
+        .mutator_factory = harness.mutator_factory,
+        .accessor_factory = harness.accessor_factory,
+        .identifier_allocator = &harness.allocator,
+        .transaction_manager = &txn_manager
+    });
+
+    dispatcher.register_handler<CreateSchemaRequest>([](DdlCommandContext&, const CreateSchemaRequest&) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "handler failed");
+    });
+
+    const auto response = dispatcher.dispatch(make_create_schema());
+
+    CHECK_FALSE(response.success);
+    CHECK(abort_hook_called);
+    const auto telemetry = txn_manager.telemetry_snapshot();
+    CHECK(telemetry.committed_transactions == 0U);
+    CHECK(telemetry.aborted_transactions == 1U);
+    CHECK(txn_manager.active_transaction_count() == 0U);
 }
 
 TEST_CASE("DdlCommandDispatcher reports handler exceptions")

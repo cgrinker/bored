@@ -132,6 +132,37 @@ TEST_CASE("Catalog transaction captures snapshot from transaction manager")
     manager.commit(second);
 }
 
+TEST_CASE("Catalog transaction refreshes snapshot via transaction manager when context is shared")
+{
+    CatalogCache::instance().reset();
+
+    bored::txn::TransactionIdAllocatorStub allocator{10U};
+    bored::txn::TransactionManager manager{allocator};
+
+    auto ctx = manager.begin();
+    CatalogTransactionConfig config{};
+    config.transaction_context = &ctx;
+    config.transaction_manager = &manager;
+    CatalogTransaction transaction{config};
+
+    auto initial_snapshot = transaction.snapshot();
+    CHECK(initial_snapshot.in_progress.empty());
+
+    auto other = manager.begin();
+    (void)other;
+
+    transaction.refresh_snapshot();
+    auto refreshed = transaction.snapshot();
+    REQUIRE(refreshed.in_progress.size() == 1U);
+    CHECK(refreshed.in_progress.front() == other.id());
+
+    manager.commit(other);
+
+    transaction.refresh_snapshot();
+    auto after_commit = transaction.snapshot();
+    CHECK(after_commit.in_progress.empty());
+}
+
 TEST_CASE("Catalog accessor caches relation scans and filters visibility")
 {
     CatalogCache::instance().reset();

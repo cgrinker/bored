@@ -9,16 +9,22 @@
 #include <optional>
 #include <string>
 
+namespace bored::txn {
+class TransactionManager;
+class TransactionContext;
+}  // namespace bored::txn
+
 namespace bored::ddl {
 
 class DdlCommandDispatcher final {
 public:
     struct Config final {
-        std::function<std::unique_ptr<catalog::CatalogTransaction>()> transaction_factory;
+        std::function<std::unique_ptr<catalog::CatalogTransaction>(txn::TransactionContext*)> transaction_factory;
         std::function<std::unique_ptr<catalog::CatalogMutator>(catalog::CatalogTransaction&)> mutator_factory;
         std::function<std::unique_ptr<catalog::CatalogAccessor>(catalog::CatalogTransaction&)> accessor_factory;
         catalog::CatalogIdentifierAllocator* identifier_allocator = nullptr;
         std::function<std::uint64_t()> commit_lsn_provider;
+        txn::TransactionManager* transaction_manager = nullptr;
         DdlTelemetryRegistry* telemetry_registry = nullptr;
         std::string telemetry_identifier;
         DropTableCleanupHook drop_table_cleanup_hook{};
@@ -51,7 +57,9 @@ private:
     using HandlerFn = std::function<DdlCommandResponse(DdlCommandContext&, const DdlCommand&)>;
 
     struct TransactionScope final {
-        explicit TransactionScope(catalog::CatalogTransaction& transaction);
+    TransactionScope(catalog::CatalogTransaction& transaction,
+             txn::TransactionManager* manager,
+             txn::TransactionContext* context);
         ~TransactionScope();
 
         TransactionScope(const TransactionScope&) = delete;
@@ -62,6 +70,8 @@ private:
 
     private:
         catalog::CatalogTransaction& transaction_;
+        txn::TransactionManager* manager_ = nullptr;
+        txn::TransactionContext* context_ = nullptr;
         bool completed_ = false;
     };
 

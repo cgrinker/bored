@@ -40,8 +40,12 @@
 
 ## Milestone 4: Commit, Abort, and Recovery Validation (1 sprint)
 - [x] Implement commit protocol that flushes WAL, advances durability ACK, and publishes snapshot visibility atomically (Wal-backed commit staging/flush, durability horizon telemetry now flows through `StorageTelemetryRegistry`, and retention/checkpoint integrations honor the shared horizon).
-- [ ] Add abort path that walks undo chains, restores tuples, and releases locks deterministically.
-- [ ] Wire catalog mutator/transaction to register undo callbacks with `TransactionManager` and ensure staged catalog tuples roll back on abort.
+- [x] Add abort path that walks undo chains, restores tuples, and releases locks deterministically.
+	- Added stacked update abort coverage in `tests/page_manager_tests.cpp` to confirm undo chains rewind multiple updates and restore original tuples.
+	- Verified latch release callbacks fire on abort via new test harness, ensuring page-level locks are released deterministically when transactions roll back.
+- [x] Wire catalog mutator/transaction to register undo callbacks with `TransactionManager` and ensure staged catalog tuples roll back on abort.
+	- [x] `CatalogTransaction` attaches undo/on_abort hooks when provided a shared `TransactionContext`, and dispatcher/parser/handler harnesses now forward the manager when configured.
+	- [x] Production catalog entry points (CLI, bootstrapper, and background maintenance) now inherit shared `TransactionManager` contexts from the dispatcher, which binds them into `CatalogTransaction` instances even when factories provide allocator-only configs.
 - [ ] Extend `WalRecoveryDriver` to rebuild in-flight transactions, reapply commits, and rollback incomplete operations.
 - [ ] Integrate lock manager acquisitions with transaction contexts so abort releases held latches/locks automatically.
 - [ ] Add end-to-end abort tests covering storage and catalog rollback with lock cleanup, updating docs to describe the sequence.

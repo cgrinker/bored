@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -481,6 +482,57 @@ TEST_CASE("PageManager abort reverts tuple update", "[txn]")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
+TEST_CASE("PageManager abort unwinds stacked tuple updates", "[txn]")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_stacked_update_abort_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 702U));
+
+    const std::array<std::byte, 5> base_payload{std::byte{'a'}, std::byte{'l'}, std::byte{'p'}, std::byte{'h'}, std::byte{'a'}};
+    PageManager::TupleInsertResult base_insert{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, base_payload, 444U, base_insert));
+
+    TransactionIdAllocatorStub allocator{31U};
+    TransactionManager txn_manager{allocator};
+    auto ctx = txn_manager.begin();
+
+    const std::array<std::byte, 5> first_payload{std::byte{'b'}, std::byte{'e'}, std::byte{'t'}, std::byte{'a'}, std::byte{'1'}};
+    PageManager::TupleUpdateResult first_update{};
+    REQUIRE_FALSE(manager.update_tuple(page_span, base_insert.slot.index, first_payload, 444U, first_update, &ctx));
+
+    const std::array<std::byte, 5> second_payload{std::byte{'g'}, std::byte{'a'}, std::byte{'m'}, std::byte{'m'}, std::byte{'a'}};
+    PageManager::TupleUpdateResult second_update{};
+    REQUIRE_FALSE(manager.update_tuple(page_span, first_update.slot.index, second_payload, 444U, second_update, &ctx));
+
+    auto staged_storage = bored::storage::read_tuple_storage(std::span<const std::byte>(page_span.data(), page_span.size()), second_update.slot.index);
+    auto staged_view = tuple_payload_view(staged_storage);
+    REQUIRE(staged_view.size() == second_payload.size());
+    CHECK(std::equal(staged_view.begin(), staged_view.end(), second_payload.begin(), second_payload.end()));
+
+    txn_manager.abort(ctx);
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+
+    auto restored_storage = bored::storage::read_tuple_storage(std::span<const std::byte>(page_span.data(), page_span.size()), base_insert.slot.index);
+    auto restored_view = tuple_payload_view(restored_storage);
+    REQUIRE(restored_view.size() == base_payload.size());
+    CHECK(std::equal(restored_view.begin(), restored_view.end(), base_payload.begin(), base_payload.end()));
+
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
 TEST_CASE("PageManager abort undoes overflow insert", "[txn]")
 {
     auto io = make_async_io();
@@ -656,6 +708,54 @@ TEST_CASE("PageManager abort reverts overflow update", "[txn]")
 
     auto header_after_abort = bored::storage::page_header(std::span<const std::byte>(page_span.data(), page_span.size()));
     CHECK(bored::storage::has_flag(header_after_abort, bored::storage::PageFlag::HasOverflow));
+
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager abort invokes latch release callbacks", "[txn]")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_abort_release_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+
+    std::atomic<int> release_calls{0};
+    PageManager::Config config{};
+    config.latch_callbacks.acquire = [](std::uint32_t, PageLatchMode) -> std::error_code {
+        return {};
+    };
+    config.latch_callbacks.release = [&release_calls](std::uint32_t, PageLatchMode) {
+        release_calls.fetch_add(1, std::memory_order_relaxed);
+    };
+
+    PageManager manager{&fsm, wal_writer, config};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 9101U));
+
+    TransactionIdAllocatorStub allocator{77U};
+    TransactionManager txn_manager{allocator};
+    auto ctx = txn_manager.begin();
+
+    const std::array<std::byte, 4> payload{std::byte{'l'}, std::byte{'a'}, std::byte{'t'}, std::byte{'c'}};
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, payload, 991U, insert_result, TupleHeader{}, &ctx));
+
+    const auto before_abort = release_calls.load(std::memory_order_relaxed);
+    REQUIRE(before_abort >= 1);
+
+    txn_manager.abort(ctx);
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+    const auto after_abort = release_calls.load(std::memory_order_relaxed);
+    CHECK(after_abort > before_abort);
 
     io->shutdown();
     (void)std::filesystem::remove_all(wal_dir);

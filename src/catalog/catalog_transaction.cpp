@@ -1,19 +1,47 @@
 #include "bored/catalog/catalog_transaction.hpp"
 
+#include "bored/txn/transaction_manager.hpp"
+
 #include <stdexcept>
+#include <system_error>
 
 namespace bored::catalog {
 
 CatalogTransaction::CatalogTransaction(const CatalogTransactionConfig& config)
     : id_allocator_{config.id_allocator}
     , snapshot_manager_{config.snapshot_manager}
+    , txn_manager_{config.transaction_manager}
+    , txn_context_{config.transaction_context}
 {
-    if (id_allocator_ == nullptr || snapshot_manager_ == nullptr) {
-        throw std::invalid_argument{"CatalogTransaction requires allocator and snapshot manager"};
+    if (txn_context_ != nullptr) {
+        if (txn_manager_ != nullptr) {
+            txn_manager_->refresh_snapshot(*txn_context_);
+        }
+        transaction_id_ = txn_context_->id();
+        snapshot_ = CatalogSnapshot{txn_context_->snapshot()};
+    } else {
+        if (id_allocator_ == nullptr || snapshot_manager_ == nullptr) {
+            throw std::invalid_argument{"CatalogTransaction requires allocator and snapshot manager"};
+        }
+
+        transaction_id_ = id_allocator_->allocate();
+        snapshot_ = CatalogSnapshot{snapshot_manager_->capture_snapshot(transaction_id_)};
     }
 
-    transaction_id_ = id_allocator_->allocate();
-    snapshot_ = CatalogSnapshot{snapshot_manager_->capture_snapshot(transaction_id_)};
+    if (txn_context_ != nullptr) {
+        txn_context_->register_undo([this]() -> std::error_code {
+            this->perform_abort_cleanup();
+            state_ = State::Aborted;
+            return {};
+        });
+
+        txn_context_->on_abort([this]() {
+            this->perform_abort_cleanup();
+            state_ = State::Aborted;
+        });
+
+        context_hooks_registered_ = true;
+    }
 }
 
 std::uint64_t CatalogTransaction::transaction_id() const noexcept
@@ -28,6 +56,14 @@ const CatalogSnapshot& CatalogTransaction::snapshot() const noexcept
 
 void CatalogTransaction::refresh_snapshot()
 {
+    if (txn_context_ != nullptr) {
+        if (txn_manager_ != nullptr) {
+            txn_manager_->refresh_snapshot(*txn_context_);
+        }
+        snapshot_ = CatalogSnapshot{txn_context_->snapshot()};
+        return;
+    }
+
     snapshot_ = CatalogSnapshot{snapshot_manager_->capture_snapshot(transaction_id_)};
 }
 
@@ -49,6 +85,58 @@ bool CatalogTransaction::is_committed() const noexcept
 bool CatalogTransaction::is_aborted() const noexcept
 {
     return state_ == State::Aborted;
+}
+
+txn::TransactionContext* CatalogTransaction::transaction_context() const noexcept
+{
+    return txn_context_;
+}
+
+void CatalogTransaction::bind_transaction_context(txn::TransactionManager* manager,
+                                                   txn::TransactionContext* context)
+{
+    if (context == nullptr) {
+        return;
+    }
+
+    if (txn_context_ != nullptr) {
+        if (txn_context_ != context) {
+            throw std::logic_error{"CatalogTransaction already bound to a different TransactionContext"};
+        }
+
+        if (manager != nullptr && txn_manager_ != manager) {
+            txn_manager_ = manager;
+            txn_manager_->refresh_snapshot(*txn_context_);
+        }
+
+        snapshot_ = CatalogSnapshot{txn_context_->snapshot()};
+        return;
+    }
+
+    txn_context_ = context;
+    txn_manager_ = manager;
+    transaction_id_ = txn_context_->id();
+
+    if (txn_manager_ != nullptr) {
+        txn_manager_->refresh_snapshot(*txn_context_);
+    }
+
+    snapshot_ = CatalogSnapshot{txn_context_->snapshot()};
+
+    if (!context_hooks_registered_) {
+        txn_context_->register_undo([this]() -> std::error_code {
+            this->perform_abort_cleanup();
+            state_ = State::Aborted;
+            return {};
+        });
+
+        txn_context_->on_abort([this]() {
+            this->perform_abort_cleanup();
+            state_ = State::Aborted;
+        });
+
+        context_hooks_registered_ = true;
+    }
 }
 
 void CatalogTransaction::register_commit_hook(CommitHook hook)
@@ -92,6 +180,7 @@ std::error_code CatalogTransaction::commit()
     state_ = State::Committed;
     commit_hooks_.clear();
     abort_hooks_.clear();
+    abort_cleaned_ = true;
     return {};
 }
 
@@ -104,10 +193,8 @@ std::error_code CatalogTransaction::abort()
         return {};
     }
 
-    run_abort_hooks();
+    perform_abort_cleanup();
     state_ = State::Aborted;
-    commit_hooks_.clear();
-    abort_hooks_.clear();
     return {};
 }
 
@@ -126,6 +213,18 @@ void CatalogTransaction::run_abort_hooks() noexcept
 bool CatalogTransaction::can_register_hook() const noexcept
 {
     return state_ == State::Active;
+}
+
+void CatalogTransaction::perform_abort_cleanup() noexcept
+{
+    if (abort_cleaned_) {
+        return;
+    }
+
+    run_abort_hooks();
+    commit_hooks_.clear();
+    abort_hooks_.clear();
+    abort_cleaned_ = true;
 }
 
 }  // namespace bored::catalog
