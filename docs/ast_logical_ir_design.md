@@ -74,3 +74,8 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 3. Update documentation (`docs/parser_operator_guide.md`, `docs/relational_layer_design.md`) with references to the AST/IR pipeline and debug workflows.
 4. Capture performance baselines for binding and lowering stages using synthetic workloads in `benchmarks/` for regression tracking.
 5. Establish coding conventions for future AST/IR extensions (naming, ownership, testing patterns).
+
+## Upcoming Tasks
+
+- [x] Support ORDER BY references to SELECT-item aliases within the binder.  \
+	Binder now tracks select-item aliases, resolves them during ORDER BY binding, and surfaces diagnostics for duplicate aliases with new Catch2 coverage.

@@ -13,6 +13,8 @@
 namespace bored::parser::relational {
 namespace {
 
+using AliasMap = std::unordered_map<std::string, const Expression*>;
+
 std::string normalise_identifier(std::string_view text)
 {
     std::string result;
@@ -311,9 +313,9 @@ public:
 
         Scope scope{};
         bind_from_clause(*statement.query, scope, result);
-        bind_select_list(*statement.query, scope, result);
+        const auto aliases = bind_select_list(*statement.query, scope, result);
         bind_where_clause(*statement.query, scope, result);
-        bind_order_by(*statement.query, scope, result);
+        bind_order_by(*statement.query, scope, aliases, result);
         bind_limit(*statement.query, scope, result);
         return result;
     }
@@ -377,14 +379,27 @@ private:
         scope.register_table(table, *metadata, binding);
     }
 
-    void bind_select_list(QuerySpecification& query, Scope& scope, BindingResult& result) const
+    AliasMap bind_select_list(QuerySpecification& query, Scope& scope, BindingResult& result) const
     {
+        AliasMap aliases{};
         for (auto* item : query.select_items) {
             if (item == nullptr || item->expression == nullptr) {
                 continue;
             }
             bind_expression(*item->expression, scope, result);
+            if (item->alias.has_value()) {
+                const auto key = normalise_identifier(item->alias->value);
+                const auto inserted = aliases.emplace(key, item->expression).second;
+                if (!inserted) {
+                    ParserDiagnostic diagnostic{};
+                    diagnostic.severity = ParserSeverity::Error;
+                    diagnostic.message = "Select item alias '" + item->alias->value + "' is ambiguous";
+                    diagnostic.remediation_hints = {"Rename one of the select item aliases to be unique."};
+                    result.diagnostics.push_back(std::move(diagnostic));
+                }
+            }
         }
+        return aliases;
     }
 
     void bind_where_clause(QuerySpecification& query, Scope& scope, BindingResult& result) const
@@ -394,13 +409,16 @@ private:
         }
     }
 
-    void bind_order_by(QuerySpecification& query, Scope& scope, BindingResult& result) const
+    void bind_order_by(QuerySpecification& query,
+                       Scope& scope,
+                       const AliasMap& aliases,
+                       BindingResult& result) const
     {
         for (auto* item : query.order_by) {
             if (item == nullptr || item->expression == nullptr) {
                 continue;
             }
-            bind_expression(*item->expression, scope, result);
+            bind_order_expression(*item->expression, scope, aliases, result);
         }
     }
 
@@ -415,6 +433,33 @@ private:
         if (query.limit->offset != nullptr) {
             bind_expression(*query.limit->offset, scope, result);
         }
+    }
+
+    void bind_order_expression(Expression& expression,
+                                Scope& scope,
+                                const AliasMap& aliases,
+                                BindingResult& result) const
+    {
+        if (expression.kind == NodeKind::IdentifierExpression) {
+            auto& identifier = static_cast<IdentifierExpression&>(expression);
+            if (identifier.name.parts.size() == 1U) {
+                const auto key = normalise_identifier(identifier.name.parts.front().value);
+                auto it = aliases.find(key);
+                if (it != aliases.end()) {
+                    const auto* target = it->second;
+                    if (target != nullptr && target->inferred_type.has_value()) {
+                        set_expression_type(identifier,
+                                            target->inferred_type->type,
+                                            target->inferred_type->nullable);
+                    } else {
+                        set_expression_type(identifier, ScalarType::Unknown, true);
+                    }
+                    return;
+                }
+            }
+        }
+
+        bind_expression(expression, scope, result);
     }
 
     void bind_expression(Expression& expression, Scope& scope, BindingResult& result) const

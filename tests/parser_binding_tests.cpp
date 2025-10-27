@@ -312,6 +312,56 @@ TEST_CASE("binder records decimal promotions", "[parser][binder]")
     CHECK_FALSE(right_literal.required_coercion.has_value());
 }
 
+TEST_CASE("binder resolves order by aliases", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.quantity AS qty FROM sales.inventory AS inv ORDER BY qty;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE(binding_result.success());
+
+    auto* query = parse_result.statement->query;
+    REQUIRE(query != nullptr);
+    REQUIRE(query->order_by.size() == 1U);
+    auto* item = query->order_by.front();
+    REQUIRE(item != nullptr);
+    auto& identifier = static_cast<relational::IdentifierExpression&>(*item->expression);
+    CHECK_FALSE(identifier.binding.has_value());
+    REQUIRE(identifier.inferred_type.has_value());
+    CHECK(identifier.inferred_type->type == relational::ScalarType::UInt32);
+}
+
+TEST_CASE("binder rejects duplicate select aliases", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.id AS key, inv.quantity AS key FROM sales.inventory AS inv ORDER BY key;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE(binding_result.diagnostics.size() == 1U);
+    CHECK(binding_result.diagnostics.front().message == "Select item alias 'key' is ambiguous");
+}
+
 TEST_CASE("binder reports ambiguous unqualified column references", "[parser][binder]")
 {
     StubCatalog catalog_adapter;
