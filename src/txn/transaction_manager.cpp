@@ -59,6 +59,15 @@ void TransactionContext::on_abort(std::function<void()> callback)
     state_->abort_callbacks.emplace_back(std::move(callback));
 }
 
+void TransactionContext::register_undo(std::function<std::error_code()> callback)
+{
+    if (!state_) {
+        throw std::logic_error{"TransactionContext::register_undo requires active context"};
+    }
+
+    state_->undo_callbacks.emplace_back(std::move(callback));
+}
+
 TransactionContext::operator bool() const noexcept
 {
     return static_cast<bool>(state_);
@@ -296,6 +305,24 @@ void TransactionManager::complete_abort(TransactionContext& ctx)
         return;
     }
 
+    std::error_code undo_error{};
+    for (auto it = state->undo_callbacks.rbegin(); it != state->undo_callbacks.rend(); ++it) {
+        if (*it) {
+            try {
+                if (auto ec = (*it)()) {
+                    if (!undo_error) {
+                        undo_error = ec;
+                    }
+                }
+            } catch (...) {
+                if (!undo_error) {
+                    undo_error = std::make_error_code(std::errc::io_error);
+                }
+            }
+        }
+    }
+    state->undo_callbacks.clear();
+
     {
         std::scoped_lock lock{mutex_};
         state->state = TransactionState::AbortCleanup;
@@ -312,6 +339,10 @@ void TransactionManager::complete_abort(TransactionContext& ctx)
 
     state->commit_callbacks.clear();
     state->abort_callbacks.clear();
+
+    if (undo_error) {
+        state->last_error = undo_error;
+    }
 
     {
         std::scoped_lock lock{mutex_};

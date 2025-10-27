@@ -151,6 +151,46 @@ TEST_CASE("TransactionManager abort triggers callbacks and clears active set", "
     CHECK(manager.oldest_active_transaction() == 0U);
 }
 
+TEST_CASE("TransactionManager abort executes undo callbacks", "[txn]")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{33U};
+    bored::txn::TransactionManager manager{allocator};
+
+    auto ctx = manager.begin();
+    std::vector<int> order;
+    ctx.register_undo([&]() {
+        order.push_back(1);
+        return std::error_code{};
+    });
+    ctx.register_undo([&]() {
+        order.push_back(2);
+        return std::error_code{};
+    });
+
+    manager.abort(ctx);
+
+    const std::vector<int> expected{2, 1};
+    CHECK(order == expected);
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+    CHECK(ctx.last_error() == std::make_error_code(std::errc::operation_canceled));
+}
+
+TEST_CASE("TransactionManager abort surfaces undo error", "[txn]")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{90U};
+    bored::txn::TransactionManager manager{allocator};
+
+    auto ctx = manager.begin();
+    ctx.register_undo([]() {
+        return std::make_error_code(std::errc::not_enough_memory);
+    });
+
+    manager.abort(ctx);
+
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+    CHECK(ctx.last_error() == std::make_error_code(std::errc::not_enough_memory));
+}
+
 TEST_CASE("TransactionManager low water mark advances once active set drains", "[txn]")
 {
     bored::txn::TransactionIdAllocatorStub allocator{80U};

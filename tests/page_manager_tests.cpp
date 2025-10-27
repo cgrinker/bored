@@ -6,6 +6,7 @@
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_reader.hpp"
+#include "bored/txn/transaction_manager.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -44,6 +45,8 @@ using bored::storage::WalReader;
 using bored::storage::TupleHeader;
 using bored::storage::tuple_header_size;
 using bored::storage::tuple_storage_length;
+using bored::txn::TransactionIdAllocatorStub;
+using bored::txn::TransactionManager;
 
 namespace {
 
@@ -344,6 +347,316 @@ TEST_CASE("PageManager update tuple logs WAL record")
     CHECK(header_view.undo_next_lsn == second_header->lsn);
 
     REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager abort undoes inline insert", "[txn]")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_insert_abort_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 501U));
+
+    TransactionIdAllocatorStub allocator{10U};
+    TransactionManager txn_manager{allocator};
+    auto ctx = txn_manager.begin();
+
+    const std::array<std::byte, 4> payload{std::byte{'t'}, std::byte{'e'}, std::byte{'s'}, std::byte{'t'}};
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, payload, 123U, insert_result, TupleHeader{}, &ctx));
+
+    auto directory_before = bored::storage::slot_directory(std::span<const std::byte>(page_span.data(), page_span.size()));
+    REQUIRE(directory_before[insert_result.slot.index].length != 0U);
+
+    txn_manager.abort(ctx);
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+
+    auto directory_after = bored::storage::slot_directory(std::span<const std::byte>(page_span.data(), page_span.size()));
+    CHECK(directory_after[insert_result.slot.index].length == 0U);
+
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager abort restores deleted tuple", "[txn]")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_delete_abort_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 601U));
+
+    const std::array<std::byte, 3> base_payload{std::byte{'f'}, std::byte{'o'}, std::byte{'o'}};
+    PageManager::TupleInsertResult base_insert{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, base_payload, 321U, base_insert));
+
+    TransactionIdAllocatorStub allocator{20U};
+    TransactionManager txn_manager{allocator};
+    auto ctx = txn_manager.begin();
+
+    PageManager::TupleDeleteResult delete_result{};
+    REQUIRE_FALSE(manager.delete_tuple(page_span, base_insert.slot.index, 321U, delete_result, &ctx));
+
+    auto directory_after_delete = bored::storage::slot_directory(std::span<const std::byte>(page_span.data(), page_span.size()));
+    REQUIRE(directory_after_delete[base_insert.slot.index].length == 0U);
+
+    txn_manager.abort(ctx);
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+
+    auto restored_storage = bored::storage::read_tuple_storage(std::span<const std::byte>(page_span.data(), page_span.size()), base_insert.slot.index);
+    REQUIRE(restored_storage.size() == bored::storage::tuple_storage_length(base_payload.size()));
+    auto restored_payload = tuple_payload_view(restored_storage);
+    REQUIRE(restored_payload.size() == base_payload.size());
+    CHECK(std::equal(restored_payload.begin(), restored_payload.end(), base_payload.begin(), base_payload.end()));
+
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager abort reverts tuple update", "[txn]")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_update_abort_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 701U));
+
+    const std::array<std::byte, 3> original_payload{std::byte{'b'}, std::byte{'a'}, std::byte{'r'}};
+    PageManager::TupleInsertResult base_insert{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, original_payload, 555U, base_insert));
+
+    TransactionIdAllocatorStub allocator{30U};
+    TransactionManager txn_manager{allocator};
+    auto ctx = txn_manager.begin();
+
+    const std::array<std::byte, 3> updated_payload{std::byte{'b'}, std::byte{'a'}, std::byte{'z'}};
+    PageManager::TupleUpdateResult update_result{};
+    REQUIRE_FALSE(manager.update_tuple(page_span, base_insert.slot.index, updated_payload, 555U, update_result, &ctx));
+
+    auto updated_storage = bored::storage::read_tuple_storage(std::span<const std::byte>(page_span.data(), page_span.size()), base_insert.slot.index);
+    auto updated_view = tuple_payload_view(updated_storage);
+    REQUIRE(std::equal(updated_view.begin(), updated_view.end(), updated_payload.begin(), updated_payload.end()));
+
+    txn_manager.abort(ctx);
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+
+    auto restored_storage = bored::storage::read_tuple_storage(std::span<const std::byte>(page_span.data(), page_span.size()), base_insert.slot.index);
+    auto restored_view = tuple_payload_view(restored_storage);
+    REQUIRE(restored_view.size() == original_payload.size());
+    CHECK(std::equal(restored_view.begin(), restored_view.end(), original_payload.begin(), original_payload.end()));
+
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager abort undoes overflow insert", "[txn]")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_overflow_insert_abort_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 7001U));
+
+    std::vector<std::byte> big_payload(9000U);
+    for (std::size_t index = 0; index < big_payload.size(); ++index) {
+        big_payload[index] = static_cast<std::byte>(index & 0xFFU);
+    }
+
+    TransactionIdAllocatorStub allocator{33U};
+    TransactionManager txn_manager{allocator};
+    auto ctx = txn_manager.begin();
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, big_payload, 5555U, insert_result, TupleHeader{}, &ctx));
+    REQUIRE(insert_result.used_overflow);
+    REQUIRE_FALSE(insert_result.overflow_page_ids.empty());
+
+    auto header_before = bored::storage::page_header(std::span<const std::byte>(page_span.data(), page_span.size()));
+    REQUIRE(bored::storage::has_flag(header_before, bored::storage::PageFlag::HasOverflow));
+
+    txn_manager.abort(ctx);
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+
+    auto header_after = bored::storage::page_header(std::span<const std::byte>(page_span.data(), page_span.size()));
+    CHECK_FALSE(bored::storage::has_flag(header_after, bored::storage::PageFlag::HasOverflow));
+
+    auto directory_after = bored::storage::slot_directory(std::span<const std::byte>(page_span.data(), page_span.size()));
+    CHECK(directory_after[insert_result.slot.index].length == 0U);
+
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager abort restores overflow delete", "[txn]")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_overflow_delete_abort_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 7002U));
+
+    std::vector<std::byte> big_payload(8192U);
+    for (std::size_t index = 0; index < big_payload.size(); ++index) {
+        big_payload[index] = static_cast<std::byte>((index * 13U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, big_payload, 7777U, insert_result));
+    REQUIRE(insert_result.used_overflow);
+    REQUIRE_FALSE(insert_result.overflow_page_ids.empty());
+
+    TransactionIdAllocatorStub allocator{44U};
+    TransactionManager txn_manager{allocator};
+    auto ctx = txn_manager.begin();
+
+    PageManager::TupleDeleteResult delete_result{};
+    REQUIRE_FALSE(manager.delete_tuple(page_span, insert_result.slot.index, 7777U, delete_result, &ctx));
+
+    auto directory_after_delete = bored::storage::slot_directory(std::span<const std::byte>(page_span.data(), page_span.size()));
+    REQUIRE(directory_after_delete[insert_result.slot.index].length == 0U);
+
+    txn_manager.abort(ctx);
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+
+    auto directory_after_abort = bored::storage::slot_directory(std::span<const std::byte>(page_span.data(), page_span.size()));
+    CHECK(directory_after_abort[insert_result.slot.index].length != 0U);
+
+    auto tuple_payload_view = bored::storage::read_tuple(std::span<const std::byte>(page_span.data(), page_span.size()), insert_result.slot.index);
+    auto overflow_header = bored::storage::parse_overflow_tuple(tuple_payload_view);
+    REQUIRE(overflow_header);
+    CHECK(overflow_header->chunk_count == insert_result.overflow_page_ids.size());
+    if (!insert_result.overflow_page_ids.empty()) {
+        CHECK(overflow_header->first_overflow_page_id == insert_result.overflow_page_ids.front());
+    }
+
+    auto inline_payload = bored::storage::overflow_tuple_inline_payload(tuple_payload_view, *overflow_header);
+    REQUIRE(inline_payload.size() == insert_result.inline_length);
+    REQUIRE(inline_payload.size() <= big_payload.size());
+    REQUIRE(std::equal(inline_payload.begin(), inline_payload.end(), big_payload.begin(), big_payload.begin() + inline_payload.size()));
+
+    auto header_after_abort = bored::storage::page_header(std::span<const std::byte>(page_span.data(), page_span.size()));
+    CHECK(bored::storage::has_flag(header_after_abort, bored::storage::PageFlag::HasOverflow));
+
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager abort reverts overflow update", "[txn]")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_overflow_update_abort_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 7003U));
+
+    std::vector<std::byte> big_payload(9100U);
+    for (std::size_t index = 0; index < big_payload.size(); ++index) {
+        big_payload[index] = static_cast<std::byte>((index * 19U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult insert_result{};
+    REQUIRE_FALSE(manager.insert_tuple(page_span, big_payload, 8888U, insert_result));
+    REQUIRE(insert_result.used_overflow);
+
+    TransactionIdAllocatorStub allocator{55U};
+    TransactionManager txn_manager{allocator};
+    auto ctx = txn_manager.begin();
+
+    const std::array<std::byte, 32> compact_payload{
+        std::byte{'c'}, std::byte{'o'}, std::byte{'m'}, std::byte{'p'},
+        std::byte{'a'}, std::byte{'c'}, std::byte{'t'}, std::byte{' '},
+        std::byte{'p'}, std::byte{'a'}, std::byte{'y'}, std::byte{'l'},
+        std::byte{'o'}, std::byte{'a'}, std::byte{'d'}, std::byte{' '},
+        std::byte{'r'}, std::byte{'e'}, std::byte{'p'}, std::byte{'l'},
+        std::byte{'a'}, std::byte{'c'}, std::byte{'e'}, std::byte{'s'},
+        std::byte{' '}, std::byte{'o'}, std::byte{'v'}, std::byte{'e'},
+        std::byte{'r'}, std::byte{'f'}, std::byte{'l'}, std::byte{'o'}};
+
+    PageManager::TupleUpdateResult update_result{};
+    REQUIRE_FALSE(manager.update_tuple(page_span, insert_result.slot.index, compact_payload, 8888U, update_result, &ctx));
+
+    auto tuple_after_update = bored::storage::read_tuple(std::span<const std::byte>(page_span.data(), page_span.size()), update_result.slot.index);
+    REQUIRE(tuple_after_update.size() == compact_payload.size());
+    REQUIRE(std::equal(tuple_after_update.begin(), tuple_after_update.end(), compact_payload.begin(), compact_payload.end()));
+
+    txn_manager.abort(ctx);
+    CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
+
+    auto tuple_after_abort = bored::storage::read_tuple(std::span<const std::byte>(page_span.data(), page_span.size()), insert_result.slot.index);
+    auto overflow_header = bored::storage::parse_overflow_tuple(tuple_after_abort);
+    REQUIRE(overflow_header);
+    CHECK(overflow_header->chunk_count == insert_result.overflow_page_ids.size());
+
+    auto inline_payload = bored::storage::overflow_tuple_inline_payload(tuple_after_abort, *overflow_header);
+    REQUIRE(inline_payload.size() == insert_result.inline_length);
+    REQUIRE(inline_payload.size() <= big_payload.size());
+    REQUIRE(std::equal(inline_payload.begin(), inline_payload.end(), big_payload.begin(), big_payload.begin() + inline_payload.size()));
+
+    auto header_after_abort = bored::storage::page_header(std::span<const std::byte>(page_span.data(), page_span.size()));
+    CHECK(bored::storage::has_flag(header_after_abort, bored::storage::PageFlag::HasOverflow));
+
     io->shutdown();
     (void)std::filesystem::remove_all(wal_dir);
 }

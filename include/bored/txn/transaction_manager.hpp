@@ -27,6 +27,7 @@ public:
 
     void on_commit(std::function<void()> callback);
     void on_abort(std::function<void()> callback);
+    void register_undo(std::function<std::error_code()> callback);
 
     explicit operator bool() const noexcept;
 
@@ -38,6 +39,7 @@ private:
         TransactionState state = TransactionState::Idle;
         std::vector<std::function<void()>> commit_callbacks{};
         std::vector<std::function<void()>> abort_callbacks{};
+        std::vector<std::function<std::error_code()>> undo_callbacks{};
         std::optional<CommitTicket> commit_ticket{};
         std::error_code last_error{};
     };

@@ -16,6 +16,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace bored::txn {
+class TransactionContext;
+}
+
 namespace bored::storage {
 
 class OperationScope;
@@ -78,18 +82,21 @@ public:
                                                std::span<const std::byte> payload,
                                                std::uint64_t row_id,
                                                TupleInsertResult& out_result,
-                                               TupleHeader tuple_header = {}) const;
+                                               TupleHeader tuple_header = {},
+                                               txn::TransactionContext* txn = nullptr) const;
 
     [[nodiscard]] std::error_code delete_tuple(std::span<std::byte> page,
                                                std::uint16_t slot_index,
                                                std::uint64_t row_id,
-                                               TupleDeleteResult& out_result) const;
+                                               TupleDeleteResult& out_result,
+                                               txn::TransactionContext* txn = nullptr) const;
 
     [[nodiscard]] std::error_code update_tuple(std::span<std::byte> page,
                                                std::uint16_t slot_index,
                                                std::span<const std::byte> new_payload,
                                                std::uint64_t row_id,
-                                               TupleUpdateResult& out_result) const;
+                                               TupleUpdateResult& out_result,
+                                               txn::TransactionContext* txn = nullptr) const;
 
     [[nodiscard]] std::error_code compact_page(std::span<std::byte> page,
                                                PageCompactionResult& out_result) const;
@@ -151,6 +158,9 @@ private:
                                                                   std::vector<WalOverflowChunkMeta>& chunk_metas,
                                                                   std::vector<std::vector<std::byte>>& chunk_payloads,
                                                                   WalOverflowTruncateMeta& truncate_meta) const;
+    void register_abort_latch_release(txn::TransactionContext* txn,
+                                      std::uint32_t page_id,
+                                      PageLatchMode mode) const;
     void record_latch(PageLatchMode mode, std::chrono::nanoseconds wait, bool success) const;
     void record_operation(OperationKind kind, std::chrono::nanoseconds duration, bool success) const;
     [[nodiscard]] OperationTelemetrySnapshot& operation_metrics(OperationKind kind) const;

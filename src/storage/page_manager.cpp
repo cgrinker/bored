@@ -7,9 +7,13 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
+#include "bored/storage/checksum.hpp"
 #include "bored/storage/free_space_map_persistence.hpp"
+#include "bored/storage/wal_apply_helpers.hpp"
+#include "bored/txn/transaction_manager.hpp"
 
 namespace bored::storage {
 
@@ -18,6 +22,24 @@ namespace {
 std::span<const std::byte> as_const_span(std::span<std::byte> buffer)
 {
     return {buffer.data(), buffer.size()};
+}
+
+WalRecordHeader make_wal_header(const WalRecordDescriptor& descriptor, const WalAppendResult& result)
+{
+    WalRecordHeader header{};
+    header.total_length = result.total_length;
+    WalRecordFlag flags = descriptor.flags;
+    if (!descriptor.payload.empty()) {
+        flags = flags | WalRecordFlag::HasPayload;
+    }
+    header.type = static_cast<std::uint16_t>(descriptor.type);
+    header.flags = static_cast<std::uint16_t>(flags);
+    header.lsn = result.lsn;
+    header.prev_lsn = result.prev_lsn;
+    header.page_id = descriptor.page_id;
+    header.checksum = 0U;
+    apply_wal_checksum(header, descriptor.payload);
+    return header;
 }
 
 class PageLatchGuard final {
@@ -236,11 +258,34 @@ std::error_code PageManager::build_overflow_truncate_payload(const WalTupleMeta&
     return {};
 }
 
+void PageManager::register_abort_latch_release(txn::TransactionContext* txn,
+                                               std::uint32_t page_id,
+                                               PageLatchMode mode) const
+{
+    if (txn == nullptr) {
+        return;
+    }
+
+    if (txn->state() != txn::TransactionState::Active) {
+        return;
+    }
+
+    if (!config_.latch_callbacks.release) {
+        return;
+    }
+
+    auto release = config_.latch_callbacks.release;
+    txn->on_abort([release, page_id, mode]() {
+        release(page_id, mode);
+    });
+}
+
 std::error_code PageManager::insert_tuple(std::span<std::byte> page,
                                           std::span<const std::byte> payload,
                                           std::uint64_t row_id,
                                           TupleInsertResult& out_result,
-                                          TupleHeader tuple_header) const
+                                          TupleHeader tuple_header,
+                                          txn::TransactionContext* txn) const
 {
     OperationScope telemetry_scope{this, OperationKind::Insert};
 
@@ -268,6 +313,8 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     if (auto latch_ec = latch_guard.status(); latch_ec) {
         return latch_ec;
     }
+
+    register_abort_latch_release(txn, header.page_id, PageLatchMode::Exclusive);
 
     if (auto plan = prepare_append_tuple(page_const, payload.size())) {
         WalTupleMeta meta{};
@@ -311,6 +358,22 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
         out_result.logical_length = payload.size();
         out_result.inline_length = payload.size();
         out_result.overflow_page_ids.clear();
+        if (txn != nullptr) {
+            auto header_copy = make_wal_header(descriptor, wal_result);
+            auto meta_copy = meta;
+            auto manager = const_cast<PageManager*>(this);
+            auto page_ptr = page.data();
+            auto page_size = page.size();
+            auto page_id = header.page_id;
+            txn->register_undo([manager, page_ptr, page_size, page_id, header_copy, meta_copy]() -> std::error_code {
+                PageLatchGuard latch{&manager->config_.latch_callbacks, page_id, PageLatchMode::Exclusive};
+                if (auto latch_ec = latch.status(); latch_ec) {
+                    return latch_ec;
+                }
+                std::span<std::byte> undo_page{page_ptr, page_size};
+                return wal::apply_tuple_delete(undo_page, header_copy, meta_copy, manager->fsm_, true);
+            });
+        }
         telemetry_scope.set_success();
         return {};
     }
@@ -532,6 +595,38 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     out_result.logical_length = payload.size();
     out_result.inline_length = inline_length;
     out_result.overflow_page_ids = overflow_page_ids;
+    if (txn != nullptr) {
+        auto manager = const_cast<PageManager*>(this);
+        auto header_copy = make_wal_header(descriptor, wal_result);
+        auto meta_copy = meta;
+        auto page_ptr = page.data();
+        auto page_size = page.size();
+        auto page_id = header.page_id;
+        auto overflow_pages = overflow_page_ids;
+        txn->register_undo([manager,
+                            page_ptr,
+                            page_size,
+                            page_id,
+                            header_copy,
+                            meta_copy,
+                            overflow_pages = std::move(overflow_pages)]() mutable -> std::error_code {
+            PageLatchGuard latch{&manager->config_.latch_callbacks, page_id, PageLatchMode::Exclusive};
+            if (auto latch_ec = latch.status(); latch_ec) {
+                return latch_ec;
+            }
+
+            std::span<std::byte> undo_page{page_ptr, page_size};
+            if (auto ec = wal::apply_tuple_delete(undo_page, header_copy, meta_copy, manager->fsm_, true); ec) {
+                return ec;
+            }
+
+            for (auto overflow_page_id : overflow_pages) {
+                manager->overflow_cache_.erase(overflow_page_id);
+            }
+
+            return {};
+        });
+    }
     telemetry_scope.set_success();
     return {};
 }
@@ -539,7 +634,8 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
 std::error_code PageManager::delete_tuple(std::span<std::byte> page,
                                           std::uint16_t slot_index,
                                           std::uint64_t row_id,
-                                          TupleDeleteResult& out_result) const
+                                          TupleDeleteResult& out_result,
+                                          txn::TransactionContext* txn) const
 {
     OperationScope telemetry_scope{this, OperationKind::Delete};
 
@@ -556,6 +652,8 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
     if (auto latch_ec = latch_guard.status(); latch_ec) {
         return latch_ec;
     }
+
+    register_abort_latch_release(txn, header.page_id, PageLatchMode::Exclusive);
 
     auto tuple_storage = read_tuple_storage(page_const, slot_index);
     if (tuple_storage.size() <= tuple_header_size()) {
@@ -681,6 +779,49 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
         return std::make_error_code(std::errc::io_error);
     }
 
+    if (txn != nullptr) {
+        auto manager = const_cast<PageManager*>(this);
+        auto before_header = make_wal_header(before_descriptor, before_result);
+        auto payload_copy = std::move(before_buffer);
+        auto page_ptr = page.data();
+        auto page_size = page.size();
+        auto page_id = header.page_id;
+        txn->register_undo([manager,
+                            page_ptr,
+                            page_size,
+                            page_id,
+                            before_header,
+                            payload_copy = std::move(payload_copy)]() mutable -> std::error_code {
+            auto payload_span = std::span<const std::byte>(payload_copy.data(), payload_copy.size());
+            auto before_view = decode_wal_tuple_before_image(payload_span);
+            if (!before_view) {
+                return std::make_error_code(std::errc::invalid_argument);
+            }
+
+            PageLatchGuard latch{&manager->config_.latch_callbacks, page_id, PageLatchMode::Exclusive};
+            if (auto latch_ec = latch.status(); latch_ec) {
+                return latch_ec;
+            }
+
+            std::span<std::byte> undo_page{page_ptr, page_size};
+            for (const auto& chunk_view : before_view->overflow_chunks) {
+                manager->overflow_cache_[chunk_view.meta.overflow_page_id] = PageManager::OverflowChunkCacheEntry{
+                    chunk_view.meta,
+                    std::vector<std::byte>(chunk_view.payload.begin(), chunk_view.payload.end())};
+            }
+
+            return wal::apply_tuple_insert(undo_page,
+                                           before_header,
+                                           before_view->meta,
+                                           before_view->tuple_payload,
+                                           manager->fsm_,
+                                           true,
+                                           before_view->previous_page_lsn,
+                                           before_view->previous_free_start,
+                                           before_view->previous_tuple_offset);
+        });
+    }
+
     out_result.wal = wal_result;
     telemetry_scope.set_success();
     return {};
@@ -690,7 +831,8 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
                                           std::uint16_t slot_index,
                                           std::span<const std::byte> new_payload,
                                           std::uint64_t row_id,
-                                          TupleUpdateResult& out_result) const
+                                          TupleUpdateResult& out_result,
+                                          txn::TransactionContext* txn) const
 {
     OperationScope telemetry_scope{this, OperationKind::Update};
 
@@ -711,6 +853,8 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     if (auto latch_ec = latch_guard.status(); latch_ec) {
         return latch_ec;
     }
+
+    register_abort_latch_release(txn, header.page_id, PageLatchMode::Exclusive);
 
     auto current_storage = read_tuple_storage(page_const, slot_index);
     if (current_storage.size() <= tuple_header_size()) {
@@ -895,6 +1039,49 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
         new_slot.index = slot_index;
         new_slot.offset = adjusted.offset;
         new_slot.length = adjusted.length;
+    }
+
+    if (txn != nullptr) {
+        auto manager = const_cast<PageManager*>(this);
+        auto before_header = make_wal_header(before_descriptor, before_result);
+        auto payload_copy = std::move(before_buffer);
+        auto page_ptr = page.data();
+        auto page_size = page.size();
+        auto page_id = header.page_id;
+        txn->register_undo([manager,
+                            page_ptr,
+                            page_size,
+                            page_id,
+                            before_header,
+                            payload_copy = std::move(payload_copy)]() mutable -> std::error_code {
+            auto payload_span = std::span<const std::byte>(payload_copy.data(), payload_copy.size());
+            auto before_view = decode_wal_tuple_before_image(payload_span);
+            if (!before_view) {
+                return std::make_error_code(std::errc::invalid_argument);
+            }
+
+            PageLatchGuard latch{&manager->config_.latch_callbacks, page_id, PageLatchMode::Exclusive};
+            if (auto latch_ec = latch.status(); latch_ec) {
+                return latch_ec;
+            }
+
+            std::span<std::byte> undo_page{page_ptr, page_size};
+            for (const auto& chunk_view : before_view->overflow_chunks) {
+                manager->overflow_cache_[chunk_view.meta.overflow_page_id] = PageManager::OverflowChunkCacheEntry{
+                    chunk_view.meta,
+                    std::vector<std::byte>(chunk_view.payload.begin(), chunk_view.payload.end())};
+            }
+
+            return wal::apply_tuple_insert(undo_page,
+                                           before_header,
+                                           before_view->meta,
+                                           before_view->tuple_payload,
+                                           manager->fsm_,
+                                           true,
+                                           before_view->previous_page_lsn,
+                                           before_view->previous_free_start,
+                                           before_view->previous_tuple_offset);
+        });
     }
 
     out_result.slot = new_slot;

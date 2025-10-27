@@ -35,6 +35,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/page_manager.cpp
     src/storage/lock_manager.cpp
     src/storage/free_space_map_persistence.cpp
+    src/storage/wal_apply_helpers.cpp
     src/storage/wal_writer.cpp
     src/storage/wal_reader.cpp
     src/storage/wal_recovery.cpp
