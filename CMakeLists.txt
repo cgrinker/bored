@@ -153,7 +153,8 @@ if(BORED_ENABLE_TESTS)
                 tests/parser_ddl_integration_tests.cpp
                 tests/parser_select_tests.cpp
         tests/parser_relational_ast_tests.cpp
-        tests/parser_binding_tests.cpp
+    tests/parser_binding_tests.cpp
+    tests/parser_logical_plan_tests.cpp
         )
     endif()
 
