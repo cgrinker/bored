@@ -50,9 +50,12 @@ private:
 
 class FailingFlushPipeline final : public bored::txn::CommitPipeline {
 public:
+    std::vector<std::string> events;
+
     std::error_code prepare_commit(const bored::txn::CommitRequest& request, bored::txn::CommitTicket& out_ticket) override
     {
         ++prepare_calls;
+        events.emplace_back("prepare");
         out_ticket.transaction_id = request.transaction_id;
         out_ticket.commit_sequence = 202U;
         prepared_ticket_ = out_ticket;
@@ -62,14 +65,20 @@ public:
     std::error_code flush_commit(const bored::txn::CommitTicket&) override
     {
         ++flush_calls;
+        events.emplace_back("flush");
         return std::make_error_code(std::errc::io_error);
     }
 
-    void confirm_commit(const bored::txn::CommitTicket&) override { ++confirm_calls; }
+    void confirm_commit(const bored::txn::CommitTicket&) override
+    {
+        ++confirm_calls;
+        events.emplace_back("confirm");
+    }
 
     void rollback_commit(const bored::txn::CommitTicket& ticket) noexcept override
     {
         ++rollback_calls;
+        events.emplace_back("rollback");
         rolled_back_ticket_ = ticket;
     }
 
@@ -234,6 +243,11 @@ TEST_CASE("TransactionManager commit drives commit pipeline", "[txn]")
     CHECK(pipeline.confirmed_ticket.transaction_id == ctx.id());
     CHECK(pipeline.confirmed_ticket.commit_sequence == 101U);
 
+    CHECK(manager.durable_commit_lsn() == pipeline.confirmed_ticket.commit_sequence);
+
+    auto snapshot_after = manager.current_snapshot();
+    CHECK(snapshot_after.read_lsn == manager.durable_commit_lsn());
+
     auto telemetry = manager.telemetry_snapshot();
     CHECK(telemetry.committed_transactions == 1U);
     CHECK(telemetry.aborted_transactions == 0U);
@@ -250,6 +264,8 @@ TEST_CASE("TransactionManager commit failure rolls back pipeline", "[txn]")
 
     CHECK(ctx.state() == bored::txn::TransactionState::Aborted);
     CHECK(ctx.last_error() == std::make_error_code(std::errc::io_error));
+
+    CHECK(manager.durable_commit_lsn() == 0U);
 
     const std::vector<std::string> expected{"prepare", "flush", "rollback"};
     CHECK(pipeline.events == expected);

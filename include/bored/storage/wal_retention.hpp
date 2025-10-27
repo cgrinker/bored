@@ -1,10 +1,12 @@
 #pragma once
 
+#include "bored/storage/wal_durability_horizon.hpp"
 #include "bored/storage/wal_reader.hpp"
 
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <system_error>
 #include <vector>
 
@@ -27,7 +29,8 @@ class WalRetentionManager final {
 public:
     WalRetentionManager(std::filesystem::path wal_directory,
                         std::string file_prefix,
-                        std::string file_extension);
+                        std::string file_extension,
+                        std::shared_ptr<WalDurabilityHorizon> durability_horizon = {});
 
     std::error_code apply(const WalRetentionConfig& config,
                           std::uint64_t current_segment_id,
@@ -46,6 +49,7 @@ private:
     std::filesystem::path wal_directory_{};
     std::string file_prefix_{};
     std::string file_extension_{};
+    std::shared_ptr<WalDurabilityHorizon> durability_horizon_{};
 };
 
 }  // namespace bored::storage

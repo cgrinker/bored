@@ -62,11 +62,16 @@ WalWriter::WalWriter(std::shared_ptr<AsyncIo> io, WalWriterConfig config)
         });
     }
 
+    durability_horizon_ = config_.durability_horizon;
+
     const bool retention_enabled = config_.retention.retention_segments > 0U
         || config_.retention.retention_hours.count() > 0
         || !config_.retention.archive_path.empty();
     if (retention_enabled) {
-        retention_manager_ = std::make_unique<WalRetentionManager>(config_.directory, config_.file_prefix, config_.file_extension);
+        retention_manager_ = std::make_unique<WalRetentionManager>(config_.directory,
+                                                                   config_.file_prefix,
+                                                                   config_.file_extension,
+                                                                   durability_horizon_);
     }
 }
 
@@ -229,7 +234,9 @@ std::error_code WalWriter::ensure_capacity(std::size_t aligned_length)
     return open_segment();
 }
 
-std::error_code WalWriter::append_record(const WalRecordDescriptor& descriptor, WalAppendResult& out_result)
+std::error_code WalWriter::append_record_internal(const WalRecordDescriptor& descriptor,
+                                                  WalAppendResult& out_result,
+                                                  WalStagedAppend* stage)
 {
     if (closed_) {
         return std::make_error_code(std::errc::operation_not_permitted);
@@ -264,6 +271,14 @@ std::error_code WalWriter::append_record(const WalRecordDescriptor& descriptor, 
     if (auto ec = ensure_capacity(aligned_length); ec) {
         return ec;
     }
+
+    const std::size_t initial_buffer_offset = buffer_offset_;
+    const std::uint64_t initial_next_lsn = next_lsn_;
+    const std::uint64_t initial_last_lsn = last_lsn_;
+    const bool initial_have_last_lsn = have_last_lsn_;
+    const std::uint64_t initial_segment_end_lsn = segment_header_.end_lsn;
+    const bool initial_segment_header_dirty = segment_header_dirty_;
+    const std::size_t initial_bytes_since_last_flush = bytes_since_last_flush_;
 
     WalRecordFlag flags = descriptor.flags;
     if (!descriptor.payload.empty()) {
@@ -301,8 +316,21 @@ std::error_code WalWriter::append_record(const WalRecordDescriptor& descriptor, 
     out_result.total_length = total_length;
     out_result.written_bytes = aligned_length;
 
-    if (auto ec = maybe_flush_after_append(); ec) {
-        return ec;
+    if (!stage) {
+        if (auto ec = maybe_flush_after_append(); ec) {
+            return ec;
+        }
+    } else {
+        stage->buffer_offset = initial_buffer_offset;
+        stage->aligned_length = aligned_length;
+        stage->next_lsn_before = initial_next_lsn;
+        stage->last_lsn_before = initial_last_lsn;
+        stage->had_last_lsn_before = initial_have_last_lsn;
+        stage->segment_end_lsn_before = initial_segment_end_lsn;
+        stage->segment_header_dirty_before = initial_segment_header_dirty;
+        stage->bytes_since_last_flush_before = initial_bytes_since_last_flush;
+        stage->segment_id = current_segment_id_;
+        stage->valid = true;
     }
 
     const auto append_end = std::chrono::steady_clock::now();
@@ -316,6 +344,11 @@ std::error_code WalWriter::append_record(const WalRecordDescriptor& descriptor, 
     }
 
     return {};
+}
+
+std::error_code WalWriter::append_record(const WalRecordDescriptor& descriptor, WalAppendResult& out_result)
+{
+    return append_record_internal(descriptor, out_result, nullptr);
 }
 
 std::error_code WalWriter::append_commit_record(const WalCommitHeader& header, WalAppendResult& out_result)
@@ -334,7 +367,55 @@ std::error_code WalWriter::append_commit_record(const WalCommitHeader& header, W
     descriptor.flags = WalRecordFlag::HasPayload;
     descriptor.payload = std::span<const std::byte>(buffer.data(), buffer.size());
 
-    return append_record(descriptor, out_result);
+    return append_record_internal(descriptor, out_result, nullptr);
+}
+
+std::error_code WalWriter::stage_commit_record(const WalCommitHeader& header,
+                                               WalAppendResult& out_result,
+                                               WalStagedAppend& out_stage)
+{
+    out_stage = WalStagedAppend{};
+
+    std::array<std::byte, wal_commit_payload_size()> buffer{};
+    auto payload = std::span<std::byte>(buffer.data(), buffer.size());
+    if (!encode_wal_commit(payload, header)) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::Commit;
+    descriptor.page_id = header.transaction_id <= std::numeric_limits<std::uint32_t>::max()
+        ? static_cast<std::uint32_t>(header.transaction_id)
+        : 0U;
+    descriptor.flags = WalRecordFlag::HasPayload;
+    descriptor.payload = std::span<const std::byte>(buffer.data(), buffer.size());
+
+    auto ec = append_record_internal(descriptor, out_result, &out_stage);
+    if (ec) {
+        out_stage.valid = false;
+    }
+    return ec;
+}
+
+void WalWriter::rollback_staged_append(const WalStagedAppend& stage) noexcept
+{
+    if (!stage.valid) {
+        return;
+    }
+
+    buffer_offset_ = stage.buffer_offset;
+    next_lsn_ = stage.next_lsn_before;
+    last_lsn_ = stage.last_lsn_before;
+    have_last_lsn_ = stage.had_last_lsn_before;
+    segment_header_.end_lsn = stage.segment_end_lsn_before;
+    segment_header_dirty_ = stage.segment_header_dirty_before;
+    bytes_since_last_flush_ = stage.bytes_since_last_flush_before;
+
+    const auto begin = buffer_.begin() + static_cast<std::ptrdiff_t>(stage.buffer_offset);
+    const auto end = begin + static_cast<std::ptrdiff_t>(stage.aligned_length);
+    if (begin >= buffer_.begin() && end <= buffer_.end()) {
+        std::fill(begin, end, std::byte{0});
+    }
 }
 
 std::error_code WalWriter::flush()
@@ -415,6 +496,11 @@ WalWriterTelemetrySnapshot WalWriter::telemetry_snapshot() const
 {
     std::lock_guard guard(telemetry_mutex_);
     return telemetry_;
+}
+
+std::shared_ptr<WalDurabilityHorizon> WalWriter::durability_horizon() const noexcept
+{
+    return durability_horizon_;
 }
 
 std::error_code WalWriter::notify_commit()

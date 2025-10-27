@@ -1,6 +1,6 @@
 # Transaction Commit & Abort Flow
 
-This note captures the intended control flow for milestone 4 before wiring the code paths. It focuses on the state transitions managed by `TransactionManager`, how the commit pipeline coordinates with the WAL writer, and where durability acknowledgements surface back to the caller.
+This note captures the current control flow for milestone 4 now that the WAL-backed commit pipeline is live. It focuses on the state transitions managed by `TransactionManager`, how `WalCommitPipeline` stages and flushes commit records through `WalWriter`, and where durability acknowledgements surface back to the caller.
 
 ## State Machine
 
@@ -27,16 +27,16 @@ Idle -> Active -> Preparing -> FlushingWal -> Durable -> Publishing -> Committed
 
 1. **Prepare**
    - Transition `Active -> Preparing` under the manager mutex.
-   - Stop new WAL append registration for the context and freeze the mutation queue.
-2. **Assign LSN**
-   - Reserve a `CommitSequence` from the WAL writer (monotonic per commit).
-   - Stamp the transaction's in-flight commit record and queue it with the writer.
+   - Stop new WAL append registration for the context, refresh the snapshot with the latest durable commit LSN, and freeze the mutation queue.
+2. **Stage Commit Record**
+   - Acquire the next WAL LSN from the writer and stamp the transaction's commit metadata (`txn id`, `next txn`, `oldest active`).
+   - Use `WalWriter::stage_commit_record` to encode the commit payload while deferring the flush; the staged append tracks buffer offsets so a later rollback can rewind safely.
 3. **Flush**
-   - Move to `FlushingWal` and invoke `WalWriter::flush_to(commit_lsn)`.
-   - Wait for the writer's durability future/ticket to resolve.
+   - Move to `FlushingWal` and invoke `WalCommitPipeline::flush_commit`, which issues `WalWriter::flush()` to persist everything buffered up to (and including) the staged commit record.
 4. **Durable Ack**
    - On flush completion transition to `Durable`.
-   - Notify `WalRetentionManager` and checkpoint scheduler that commit horizon advanced.
+   - `WalCommitPipeline::confirm_commit` fires durability hooks which now feed a shared `WalDurabilityHorizon`; retention and checkpoint schedulers consult the horizon to advance pruning windows safely.
+   - `TransactionManager::update_durable_commit_lsn` persists the confirmed `CommitSequence` so snapshot builders reuse the newest durable horizon.
 5. **Publish**
    - Transition to `Publishing`, update global xmin/xmax, clear from snapshot machinery, release locks.
 6. **Complete**
@@ -51,9 +51,10 @@ Idle -> Active -> Preparing -> FlushingWal -> Durable -> Publishing -> Committed
 
 ## Durability Interfaces
 
-- **Commit Sequence Tickets**: `WalWriter` will expose `acquire_commit_slot()` returning `(CommitSequence, WalFlushTicket)`.
-- **Flush Ticket**: Awaitable/`std::future` signalling when the WAL has persisted every record up to the commit sequence.
-- **Txn Context Integration**: `TransactionContext` holds the ticket during `FlushingWal` and swaps it into commit callbacks for extensions that need durability confirmation.
+- **Commit Staging**: `WalCommitPipeline::prepare_commit` captures `CommitRequest` metadata, stamps a `WalCommitHeader`, and calls `WalWriter::stage_commit_record`. The returned `CommitTicket` exposes the commit LSN (`CommitSequence`) while the pipeline retains rollback state.
+- **Flush Path**: `WalCommitPipeline::flush_commit` synchronously invokes `WalWriter::flush()`. Failures trigger `rollback_commit`, which rewinds the staged append before surfacing the error back to `TransactionManager`.
+- **Durability Hooks**: `WalCommitPipeline::confirm_commit` releases the pending entry and hands the `CommitTicket`, `WalCommitHeader`, and `WalAppendResult` to any registered hook. The default hook advances a shared `WalDurabilityHorizon` so higher layers (retention, checkpoint scheduler) can observe the new commit and oldest-active horizons once the transaction reaches `Publishing`.
+- **Txn Context Integration**: `TransactionContext` caches the `CommitTicket` during `FlushingWal` and clears it once the manager enters `Publishing`. `TransactionManager` stores the durable `CommitSequence` for later snapshots via `update_durable_commit_lsn`, and callbacks registered through `TransactionContext::on_commit` now run only after durability confirmation.
 
 ## Recovery Implications
 
@@ -62,7 +63,6 @@ Idle -> Active -> Preparing -> FlushingWal -> Durable -> Publishing -> Committed
 
 ## Next Steps
 
-1. Extend `TransactionState` enum and transaction context storage to carry the new states and commit ticket.
-2. Teach `TransactionManager::commit/abort` to walk the state machine and coordinate with `WalWriter` + undo walkers.
-3. Add integration tests that inject failures between state transitions to validate durability and abort semantics.
-4. Refresh operator documentation (`docs/storage.md`) with commit/abort telemetry and operational guidance once the code path is live.
+1. Add crash/abort integration tests that inject failures between `FlushingWal` and `Publishing` to validate staged rollback and undo sequencing.
+2. Refresh operator documentation (`docs/storage.md`, transaction operator guide) with commit/abort telemetry once horizon propagation lands.
+3. Extend retention and checkpoint telemetry to surface the observed durable horizon alongside existing latency counters.

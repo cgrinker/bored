@@ -80,6 +80,11 @@ CommitPipeline* TransactionManager::commit_pipeline() const noexcept
     return commit_pipeline_.load(std::memory_order_acquire);
 }
 
+CommitSequence TransactionManager::durable_commit_lsn() const noexcept
+{
+    return durable_commit_lsn_.load(std::memory_order_acquire);
+}
+
 TransactionContext TransactionManager::begin(const TransactionOptions& options)
 {
     auto state = std::make_shared<TransactionContext::State>();
@@ -118,6 +123,8 @@ void TransactionManager::commit(TransactionContext& ctx)
         }
         state->state = TransactionState::Preparing;
         if (pipeline) {
+            state->snapshot = build_snapshot_locked(state->id);
+            request.snapshot = state->snapshot;
             request.next_transaction_id = id_allocator_ != nullptr ? id_allocator_->peek_next() : 0U;
             request.oldest_active_transaction_id = oldest_active_ != 0U ? oldest_active_ : external_low_water_mark_;
         }
@@ -170,6 +177,8 @@ void TransactionManager::commit(TransactionContext& ctx)
     if (pipeline && prepared_commit) {
         pipeline->confirm_commit(ticket);
     }
+
+    update_durable_commit_lsn(ticket.commit_sequence);
 
     {
         std::scoped_lock lock{mutex_};
@@ -324,6 +333,22 @@ void TransactionManager::complete_abort(TransactionContext& ctx)
     throw std::system_error{ec, message};
 }
 
+void TransactionManager::update_durable_commit_lsn(CommitSequence commit_lsn) noexcept
+{
+    if (commit_lsn == 0U) {
+        return;
+    }
+
+    auto current = durable_commit_lsn_.load(std::memory_order_relaxed);
+    while (commit_lsn > current
+           && !durable_commit_lsn_.compare_exchange_weak(current,
+                                                         commit_lsn,
+                                                         std::memory_order_release,
+                                                         std::memory_order_relaxed)) {
+        // retry until stored value is up to date or already ahead
+    }
+}
+
 void TransactionManager::record_state_locked(const StatePtr& state)
 {
     // Clean out expired entry if one already exists for this id.
@@ -377,7 +402,7 @@ std::size_t TransactionManager::count_active_locked() const
 Snapshot TransactionManager::build_snapshot_locked(TransactionId self_id) const
 {
     Snapshot snapshot{};
-    snapshot.read_lsn = 0U;  // Commit sequencing will populate this once integrated with WAL.
+    snapshot.read_lsn = durable_commit_lsn_.load(std::memory_order_acquire);
     snapshot.xmax = id_allocator_ != nullptr ? id_allocator_->peek_next() : 0U;
 
     std::vector<TransactionId> in_progress;

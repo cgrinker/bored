@@ -56,6 +56,8 @@ public:
     void set_commit_pipeline(CommitPipeline* pipeline);
     CommitPipeline* commit_pipeline() const noexcept;
 
+    CommitSequence durable_commit_lsn() const noexcept;
+
     TransactionContext begin(const TransactionOptions& options = {});
     void commit(TransactionContext& ctx);
     void abort(TransactionContext& ctx);
@@ -80,9 +82,11 @@ private:
     Snapshot build_snapshot_locked(TransactionId self_id) const;
     void complete_abort(TransactionContext& ctx);
     [[noreturn]] void fail_commit(TransactionContext& ctx, const char* stage, std::error_code ec);
+    void update_durable_commit_lsn(CommitSequence commit_lsn) noexcept;
 
     TransactionIdAllocator* id_allocator_ = nullptr;
     std::atomic<CommitPipeline*> commit_pipeline_{nullptr};
+    std::atomic<CommitSequence> durable_commit_lsn_{0U};
 
     struct Telemetry final {
         std::uint64_t committed_transactions = 0U;

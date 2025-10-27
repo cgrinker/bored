@@ -79,7 +79,7 @@ TEST_CASE("VacuumBackgroundLoop retries after failure", "[vacuum]")
     };
 
     auto config = make_worker_config();
-    config.tick_interval = 1s;
+    config.tick_interval = 2s;
     VacuumBackgroundLoop loop{std::move(config), make_safe_horizon_provider(), dispatch};
     loop.start();
     loop.schedule_page(84U, 20U);

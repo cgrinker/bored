@@ -21,10 +21,12 @@ constexpr bool has_retention_policy(const WalRetentionConfig& config)
 
 WalRetentionManager::WalRetentionManager(std::filesystem::path wal_directory,
                                          std::string file_prefix,
-                                         std::string file_extension)
+                                         std::string file_extension,
+                                         std::shared_ptr<WalDurabilityHorizon> durability_horizon)
     : wal_directory_{std::move(wal_directory)}
     , file_prefix_{std::move(file_prefix)}
     , file_extension_{std::move(file_extension)}
+    , durability_horizon_{std::move(durability_horizon)}
 {
 }
 
@@ -121,8 +123,13 @@ std::error_code WalRetentionManager::apply(const WalRetentionConfig& config,
     std::vector<WalSegmentView> candidates;
     candidates.reserve(segments.size());
 
+    const auto protected_lsn = durability_horizon_ ? durability_horizon_->oldest_active_commit_lsn() : 0U;
+
     for (const auto& segment : segments) {
         if (segment.header.segment_id >= current_segment_id) {
+            continue;
+        }
+        if (protected_lsn != 0U && segment.header.end_lsn >= protected_lsn) {
             continue;
         }
         candidates.push_back(segment);

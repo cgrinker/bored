@@ -39,6 +39,7 @@ CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> chec
     , telemetry_identifier_{config_.telemetry_identifier}
     , retention_telemetry_identifier_{config_.retention_telemetry_identifier}
     , retention_config_{config.retention}
+    , durability_horizon_{config.durability_horizon}
 {
     if (config_.lsn_gap_trigger == 0U) {
         config_.lsn_gap_trigger = 4U * kWalBlockSize;
@@ -107,7 +108,13 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     }
 
     const auto writer = wal_writer();
-    const auto current_lsn = writer ? writer->next_lsn() : 0U;
+    std::uint64_t current_lsn = 0U;
+    if (durability_horizon_) {
+        current_lsn = durability_horizon_->last_commit_lsn();
+    }
+    if (current_lsn == 0U && writer) {
+        current_lsn = writer->next_lsn();
+    }
 
     TriggerReason trigger_reason = TriggerReason::None;
     if (!should_run(now, snapshot, current_lsn, force, trigger_reason)) {
@@ -241,7 +248,14 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     last_checkpoint_time_ = now;
     last_checkpoint_id_ = next_checkpoint_id_;
     ++next_checkpoint_id_;
-    if (writer) {
+    if (durability_horizon_) {
+        const auto durable_lsn = durability_horizon_->last_commit_lsn();
+        if (durable_lsn != 0U) {
+            last_checkpoint_lsn_ = durable_lsn;
+        } else {
+            last_checkpoint_lsn_ = current_lsn;
+        }
+    } else if (writer) {
         last_checkpoint_lsn_ = writer->next_lsn();
     } else {
         last_checkpoint_lsn_ = current_lsn;

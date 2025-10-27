@@ -29,7 +29,7 @@
 	- [x] Run `VacuumWorker` inside a background loop with force-run pokes and telemetry surfacing for operators.
 - [x] Expand unit tests to cover concurrent insert/update/delete visibility across transaction snapshots (catalog accessor suite now exercises pending/committed version chains).
 
-**Next Task:** Back the commit pipeline with `WalWriter` so commit tickets flush to durability and retention/checkpoint hooks advance.
+**Next Task:** Build crash/abort drills around the WAL-backed commit path and capture operator-facing telemetry for the durable horizon.
 
 ## Milestone 3: Locking, Latching, and Conflict Detection (1 sprint)
 - [x] Implement row/page-intent lock hierarchy with deadlock detection or timeout policy (initial timeout policy shipped; deadlock detector hooks retained for follow-up tuning).
@@ -39,7 +39,7 @@
 - [x] Provide stress tests simulating conflicting writers/readers to validate lock ordering and fairness.
 
 ## Milestone 4: Commit, Abort, and Recovery Validation (1 sprint)
-- [ ] Implement commit protocol that flushes WAL, advances durability ACK, and publishes snapshot visibility atomically (commit pipeline scaffolding landed; WAL writer integration pending).
+- [ ] Implement commit protocol that flushes WAL, advances durability ACK, and publishes snapshot visibility atomically (Wal-backed commit staging/flush, durable horizon tracking, and retention/checkpoint integration landed; publishing telemetry still pending).
 - [ ] Add abort path that walks undo chains, restores tuples, and releases locks deterministically.
 - [ ] Extend `WalRecoveryDriver` to rebuild in-flight transactions, reapply commits, and rollback incomplete operations.
 - [ ] Capture integration tests that crash/restart during commit/abort windows and verify MVCC invariants.

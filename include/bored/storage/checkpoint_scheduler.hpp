@@ -2,6 +2,7 @@
 
 #include "bored/storage/checkpoint_manager.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
+#include "bored/storage/wal_durability_horizon.hpp"
 #include "bored/storage/wal_retention.hpp"
 
 #include <chrono>
@@ -35,6 +36,7 @@ public:
         StorageTelemetryRegistry* telemetry_registry = nullptr;
         std::string telemetry_identifier{};
         std::string retention_telemetry_identifier{};
+        std::shared_ptr<WalDurabilityHorizon> durability_horizon{};
     };
 
     using SnapshotProvider = std::function<std::error_code(CheckpointSnapshot&)>;
@@ -99,6 +101,7 @@ private:
     mutable CheckpointTelemetrySnapshot telemetry_{};
     mutable WalRetentionTelemetrySnapshot retention_telemetry_{};
     mutable std::mutex telemetry_mutex_{};
+    std::shared_ptr<WalDurabilityHorizon> durability_horizon_{};
 };
 
 }  // namespace bored::storage

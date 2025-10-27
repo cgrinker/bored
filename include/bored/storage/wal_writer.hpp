@@ -2,6 +2,7 @@
 
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/wal_format.hpp"
+#include "bored/storage/wal_durability_horizon.hpp"
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_retention.hpp"
 
@@ -54,6 +55,7 @@ struct WalWriterConfig final {
     WalTelemetryRegistry* telemetry_registry = nullptr;
     std::string telemetry_identifier{};
     WalRetentionConfig retention{};
+    std::shared_ptr<WalDurabilityHorizon> durability_horizon{};
 };
 
 struct WalRecordDescriptor final {
@@ -71,6 +73,19 @@ struct WalAppendResult final {
     std::size_t written_bytes = 0U;
 };
 
+struct WalStagedAppend final {
+    std::size_t buffer_offset = 0U;
+    std::size_t aligned_length = 0U;
+    std::uint64_t next_lsn_before = 0U;
+    std::uint64_t last_lsn_before = 0U;
+    bool had_last_lsn_before = false;
+    std::uint64_t segment_end_lsn_before = 0U;
+    bool segment_header_dirty_before = false;
+    std::size_t bytes_since_last_flush_before = 0U;
+    std::uint64_t segment_id = 0U;
+    bool valid = false;
+};
+
 class WalWriter final {
 public:
     WalWriter(std::shared_ptr<AsyncIo> io, WalWriterConfig config);
@@ -83,6 +98,10 @@ public:
 
     [[nodiscard]] std::error_code append_record(const WalRecordDescriptor& descriptor, WalAppendResult& out_result);
     [[nodiscard]] std::error_code append_commit_record(const WalCommitHeader& header, WalAppendResult& out_result);
+    [[nodiscard]] std::error_code stage_commit_record(const WalCommitHeader& header,
+                                                     WalAppendResult& out_result,
+                                                     WalStagedAppend& out_stage);
+    void rollback_staged_append(const WalStagedAppend& stage) noexcept;
     [[nodiscard]] std::error_code flush();
     [[nodiscard]] std::error_code close();
     [[nodiscard]] std::error_code notify_commit();
@@ -91,6 +110,7 @@ public:
     [[nodiscard]] std::uint64_t next_lsn() const noexcept;
     [[nodiscard]] std::filesystem::path segment_path(std::uint64_t segment_id) const;
     [[nodiscard]] WalWriterTelemetrySnapshot telemetry_snapshot() const;
+    [[nodiscard]] std::shared_ptr<WalDurabilityHorizon> durability_horizon() const noexcept;
 
 private:
     [[nodiscard]] std::error_code ensure_directory();
@@ -100,6 +120,9 @@ private:
     [[nodiscard]] std::error_code write_segment_header(bool dsync);
     [[nodiscard]] std::error_code maybe_flush_after_append();
     [[nodiscard]] std::error_code apply_retention();
+    [[nodiscard]] std::error_code append_record_internal(const WalRecordDescriptor& descriptor,
+                                                         WalAppendResult& out_result,
+                                                         WalStagedAppend* stage);
 
     [[nodiscard]] std::filesystem::path make_segment_path(std::uint64_t segment_id) const;
 
@@ -132,6 +155,7 @@ private:
     std::string telemetry_identifier_{};
 
     std::unique_ptr<WalRetentionManager> retention_manager_{};
+    std::shared_ptr<WalDurabilityHorizon> durability_horizon_{};
 };
 
 }  // namespace bored::storage
