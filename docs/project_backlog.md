@@ -6,4 +6,8 @@
 - **Operator tooling for retention and recovery** — finalize CLI/docs for retention knobs, checkpoint scheduling, and recovery workflows so SRE playbooks stay consistent with current WAL lifecycle. Operator experience requirements are documented in [storage.md](./storage.md).
 
 ## Parser Logical IR
-- **Join-aware logical plan dumps** — extend `dump_select_plan` to surface join normalization stages once join lowering lands, keeping plan traces aligned with the milestones in [ast_logical_ir_design.md](./ast_logical_ir_design.md).
+- **Benchmark binder/lowering stages** — capture baseline timings for `parse_select` + `lower_select` using representative workloads so we can flag regressions via `benchmarks/parser_benchmarks.cpp`.
+- **Document AST/IR extension conventions** — codify naming, ownership, and testing guidelines for future logical operator additions, expanding on the expectations outlined in [ast_logical_ir_design.md](./ast_logical_ir_design.md).
+
+## Transaction & Concurrency Control
+- **MVCC design review** — Completed via `docs/transaction_concurrency_design.md` (2025-10-26); milestone follow-ups tracked in `docs/transaction_concurrency_milestones.md`.

@@ -1,17 +1,36 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <vector>
 
 namespace bored::txn {
 
 using TransactionId = std::uint64_t;
+using CommitSequence = std::uint64_t;
+
+struct TransactionOptions final {
+    bool read_only = false;
+    bool deferrable = false;
+};
+
+enum class TransactionState {
+    Idle,
+    Active,
+    Preparing,
+    Committed,
+    Aborted
+};
 
 struct Snapshot final {
+    CommitSequence read_lsn = 0U;
     TransactionId xmin = 0U;
     TransactionId xmax = 0U;
     std::vector<TransactionId> in_progress{};
 };
+
+class TransactionContext;
 
 class SnapshotManager {
 public:

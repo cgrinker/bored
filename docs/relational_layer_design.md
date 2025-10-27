@@ -40,11 +40,11 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
      - Implement semantic analysis to resolve identifiers against the catalog and annotate types.
      - Produce a logical plan tree (relational algebra IR) as input to the optimizer.
 
-5. **Transaction & Concurrency Control Manager**
+5. **Transaction & Concurrency Control Manager** _(Milestones tracked in [transaction_concurrency_milestones.md](transaction_concurrency_milestones.md); design blueprint in [transaction_concurrency_design.md](transaction_concurrency_design.md))_
    - **Responsibilities:** Coordinate transactional lifecycle, isolation levels, and conflict detection (e.g., MVCC).
    - **Prerequisites:** Catalog visibility rules; WAL/page manager hooks for transaction IDs and LSN tracking.
    - **Key Tasks:**
-     - Choose concurrency model (basic MVCC).
+  - Choose concurrency model (basic MVCC captured in design blueprint).
      - Instrument page and tuple access with latching/locking APIs.
      - Integrate with WAL commit protocol and retention manager.
 
@@ -89,6 +89,6 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
       - Integrate telemetry (query latencies, lock waits) into existing diagnostics pipelines.
 
 ## Next Steps
-- Execute the parser front-end milestones (see `parser_frontend_milestones.md`) now that DDL work is complete.
-- Integrate PEGTL into the toolchain via vcpkg and CMake (dependency committed).
-- Establish transaction manager design review to select the initial concurrency model (Item 5).
+- Execute Transaction & Concurrency Milestone 1 (Txn identity and visibility plumbing) as outlined in `docs/transaction_concurrency_milestones.md`.
+- Update catalog and planner call sites to start consuming `TransactionManager` snapshots once Milestone 1 primitives land.
+- Revisit parser front-end backlog items after transaction plumbing stabilizes to prioritise remaining grammar follow-ups.
