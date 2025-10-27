@@ -175,14 +175,15 @@ TEST_CASE("CheckpointScheduler honors interval and lsn gap triggers")
     REQUIRE_FALSE(scheduler.maybe_run(time_zero, provider, false, suppressed_result));
     REQUIRE_FALSE(suppressed_result.has_value());
 
-    WalRecordDescriptor descriptor{};
-    descriptor.type = WalRecordType::Commit;
-    descriptor.page_id = 0U;
-    descriptor.flags = WalRecordFlag::None;
-    descriptor.payload = {};
+    bored::storage::WalCommitHeader commit_header{};
+    commit_header.transaction_id = 1U;
+    commit_header.commit_lsn = wal_writer->next_lsn();
+    commit_header.next_transaction_id = 2U;
+    commit_header.oldest_active_transaction_id = 0U;
+    commit_header.oldest_active_commit_lsn = commit_header.commit_lsn;
 
     WalAppendResult dummy{};
-    REQUIRE_FALSE(wal_writer->append_record(descriptor, dummy));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, dummy));
 
     std::optional<WalAppendResult> lsn_result;
     REQUIRE_FALSE(scheduler.maybe_run(time_zero, provider, false, lsn_result));

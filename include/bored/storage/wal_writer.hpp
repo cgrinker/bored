@@ -2,6 +2,7 @@
 
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/wal_format.hpp"
+#include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_retention.hpp"
 
 #include <chrono>
@@ -81,6 +82,7 @@ public:
     WalWriter& operator=(WalWriter&&) = delete;
 
     [[nodiscard]] std::error_code append_record(const WalRecordDescriptor& descriptor, WalAppendResult& out_result);
+    [[nodiscard]] std::error_code append_commit_record(const WalCommitHeader& header, WalAppendResult& out_result);
     [[nodiscard]] std::error_code flush();
     [[nodiscard]] std::error_code close();
     [[nodiscard]] std::error_code notify_commit();

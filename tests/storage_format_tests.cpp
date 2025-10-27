@@ -204,6 +204,27 @@ TEST_CASE("WAL checksum covers header and payload")
     REQUIRE_FALSE(bored::storage::verify_wal_checksum(header, kTestPayload));
 }
 
+TEST_CASE("WAL commit payload encodes and decodes metadata")
+{
+    bored::storage::WalCommitHeader header{};
+    header.transaction_id = 123U;
+    header.commit_lsn = 456U;
+    header.next_transaction_id = 789U;
+    header.oldest_active_transaction_id = 42U;
+    header.oldest_active_commit_lsn = 111U;
+
+    std::array<std::byte, bored::storage::wal_commit_payload_size()> buffer{};
+    REQUIRE(bored::storage::encode_wal_commit(std::span<std::byte>(buffer.data(), buffer.size()), header));
+
+    auto decoded = bored::storage::decode_wal_commit(std::span<const std::byte>(buffer.data(), buffer.size()));
+    REQUIRE(decoded);
+    CHECK(decoded->transaction_id == header.transaction_id);
+    CHECK(decoded->commit_lsn == header.commit_lsn);
+    CHECK(decoded->next_transaction_id == header.next_transaction_id);
+    CHECK(decoded->oldest_active_transaction_id == header.oldest_active_transaction_id);
+    CHECK(decoded->oldest_active_commit_lsn == header.oldest_active_commit_lsn);
+}
+
 TEST_CASE("WAL tuple insert payload round-trips")
 {
     bored::storage::WalTupleMeta meta{};

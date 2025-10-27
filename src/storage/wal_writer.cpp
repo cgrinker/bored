@@ -5,11 +5,13 @@
 #include "bored/storage/wal_telemetry_registry.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <mutex>
 #include <limits>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 
@@ -314,6 +316,25 @@ std::error_code WalWriter::append_record(const WalRecordDescriptor& descriptor, 
     }
 
     return {};
+}
+
+std::error_code WalWriter::append_commit_record(const WalCommitHeader& header, WalAppendResult& out_result)
+{
+    std::array<std::byte, wal_commit_payload_size()> buffer{};
+    auto payload = std::span<std::byte>(buffer.data(), buffer.size());
+    if (!encode_wal_commit(payload, header)) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::Commit;
+    descriptor.page_id = header.transaction_id <= std::numeric_limits<std::uint32_t>::max()
+        ? static_cast<std::uint32_t>(header.transaction_id)
+        : 0U;
+    descriptor.flags = WalRecordFlag::HasPayload;
+    descriptor.payload = std::span<const std::byte>(buffer.data(), buffer.size());
+
+    return append_record(descriptor, out_result);
 }
 
 std::error_code WalWriter::flush()

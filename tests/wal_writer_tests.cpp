@@ -1,12 +1,14 @@
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/checksum.hpp"
+#include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_telemetry_registry.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -123,6 +125,60 @@ TEST_CASE("WalWriter writes aligned record and updates headers")
     REQUIRE(bored::storage::verify_wal_checksum(record_header, payload_span));
 
     io->shutdown();
+    (void)std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("WalWriter appends commit record with metadata")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_commit_metadata_");
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    WalWriter writer{io, config};
+
+    bored::storage::WalCommitHeader commit_header{};
+    commit_header.transaction_id = 42U;
+    commit_header.commit_lsn = writer.next_lsn();
+    commit_header.next_transaction_id = 84U;
+    commit_header.oldest_active_transaction_id = 7U;
+    commit_header.oldest_active_commit_lsn = commit_header.commit_lsn;
+
+    WalAppendResult append_result{};
+    auto ec = writer.append_commit_record(commit_header, append_result);
+    REQUIRE_FALSE(ec);
+    REQUIRE(append_result.total_length == sizeof(WalRecordHeader) + bored::storage::wal_commit_payload_size());
+    REQUIRE(append_result.lsn == commit_header.commit_lsn);
+
+    REQUIRE_FALSE(writer.flush());
+    REQUIRE_FALSE(writer.close());
+    io->shutdown();
+
+    auto segment_path = writer.segment_path(0U);
+    REQUIRE(std::filesystem::exists(segment_path));
+
+    auto bytes = read_file_bytes(segment_path);
+    REQUIRE(bytes.size() >= bored::storage::kWalBlockSize + append_result.written_bytes);
+
+    auto record_offset = bored::storage::kWalBlockSize;
+    const auto* record_header = reinterpret_cast<const WalRecordHeader*>(bytes.data() + record_offset);
+    REQUIRE(record_header->type == static_cast<std::uint16_t>(WalRecordType::Commit));
+    REQUIRE(record_header->total_length == append_result.total_length);
+
+    auto payload_size = record_header->total_length - sizeof(WalRecordHeader);
+    auto payload_span = std::span<const std::byte>(bytes.data() + record_offset + sizeof(WalRecordHeader), payload_size);
+    auto decoded = bored::storage::decode_wal_commit(payload_span);
+    REQUIRE(decoded);
+    CHECK(decoded->transaction_id == commit_header.transaction_id);
+    CHECK(decoded->commit_lsn == commit_header.commit_lsn);
+    CHECK(decoded->next_transaction_id == commit_header.next_transaction_id);
+    CHECK(decoded->oldest_active_transaction_id == commit_header.oldest_active_transaction_id);
+    CHECK(decoded->oldest_active_commit_lsn == commit_header.oldest_active_commit_lsn);
+
     (void)std::filesystem::remove_all(dir);
 }
 

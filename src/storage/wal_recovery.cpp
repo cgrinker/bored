@@ -4,6 +4,7 @@
 #include "bored/storage/wal_payloads.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -63,8 +64,14 @@ std::optional<std::uint32_t> owner_page_id(const WalRecordView& view)
         }
         return meta->owner.page_id;
     }
+    case WalRecordType::Commit: {
+        auto commit = decode_wal_commit(payload);
+        if (commit && commit->transaction_id != 0U && commit->transaction_id <= std::numeric_limits<std::uint32_t>::max()) {
+            return static_cast<std::uint32_t>(commit->transaction_id);
+        }
+        return view.header.page_id;
+    }
     case WalRecordType::PageCompaction:
-    case WalRecordType::Commit:
     case WalRecordType::Abort:
     case WalRecordType::Checkpoint:
         return view.header.page_id;

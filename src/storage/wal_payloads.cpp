@@ -268,6 +268,16 @@ bool encode_wal_overflow_truncate(std::span<std::byte> buffer,
     return true;
 }
 
+bool encode_wal_commit(std::span<std::byte> buffer, const WalCommitHeader& header)
+{
+    if (!fits(buffer, sizeof(WalCommitHeader))) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &header, sizeof(WalCommitHeader));
+    return true;
+}
+
 bool encode_wal_checkpoint(std::span<std::byte> buffer,
                            const WalCheckpointHeader& header,
                            std::span<const WalCheckpointDirtyPageEntry> dirty_pages,
@@ -363,6 +373,17 @@ std::optional<WalOverflowTruncateMeta> decode_wal_overflow_truncate_meta(std::sp
     WalOverflowTruncateMeta meta{};
     std::memcpy(&meta, buffer.data(), sizeof(WalOverflowTruncateMeta));
     return meta;
+}
+
+std::optional<WalCommitHeader> decode_wal_commit(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalCommitHeader))) {
+        return std::nullopt;
+    }
+
+    WalCommitHeader header{};
+    std::memcpy(&header, buffer.data(), sizeof(WalCommitHeader));
+    return header;
 }
 
 std::span<const std::byte> wal_overflow_chunk_payload(std::span<const std::byte> buffer,

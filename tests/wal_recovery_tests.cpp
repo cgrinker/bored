@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <span>
@@ -52,6 +53,21 @@ std::filesystem::path make_temp_dir(const std::string& prefix)
     return dir;
 }
 
+bored::storage::WalCommitHeader make_commit_header(WalWriter& writer,
+                                                   std::uint64_t transaction_id,
+                                                   std::uint64_t next_transaction_id = 0U,
+                                                   std::uint64_t oldest_active_txn = 0U,
+                                                   std::uint64_t oldest_active_commit_lsn = 0U)
+{
+    bored::storage::WalCommitHeader header{};
+    header.transaction_id = transaction_id;
+    header.commit_lsn = writer.next_lsn();
+    header.next_transaction_id = next_transaction_id != 0U ? next_transaction_id : (transaction_id + 1U);
+    header.oldest_active_transaction_id = oldest_active_txn;
+    header.oldest_active_commit_lsn = oldest_active_commit_lsn != 0U ? oldest_active_commit_lsn : header.commit_lsn;
+    return header;
+}
+
 }  // namespace
 
 TEST_CASE("WalRecoveryDriver builds redo and undo plan")
@@ -90,11 +106,9 @@ TEST_CASE("WalRecoveryDriver builds redo and undo plan")
     WalAppendResult tx1_b{};
     REQUIRE_FALSE(writer.append_record(descriptor, tx1_b));
 
-    descriptor.type = WalRecordType::Commit;
-    descriptor.page_id = 1001U;
-    descriptor.payload = {};
+    auto commit_header = make_commit_header(writer, 1001U, 1002U, 1001U);
     WalAppendResult tx1_commit{};
-    REQUIRE_FALSE(writer.append_record(descriptor, tx1_commit));
+    REQUIRE_FALSE(writer.append_commit_record(commit_header, tx1_commit));
 
     descriptor.type = WalRecordType::TupleDelete;
     descriptor.page_id = 2002U;
@@ -151,11 +165,9 @@ TEST_CASE("WalRecoveryDriver marks truncated tail")
     WalAppendResult tx_commit{};
     REQUIRE_FALSE(writer.append_record(descriptor, tx_commit));
 
-    descriptor.type = WalRecordType::Commit;
-    descriptor.page_id = 501U;
-    descriptor.payload = {};
+    auto commit_header = make_commit_header(writer, 501U, 502U, 501U);
     WalAppendResult tx_commit_record{};
-    REQUIRE_FALSE(writer.append_record(descriptor, tx_commit_record));
+    REQUIRE_FALSE(writer.append_commit_record(commit_header, tx_commit_record));
 
     descriptor.type = WalRecordType::TupleInsert;
     descriptor.page_id = 777U;

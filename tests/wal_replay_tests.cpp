@@ -76,6 +76,21 @@ std::filesystem::path make_temp_dir(const std::string& prefix)
     return dir;
 }
 
+bored::storage::WalCommitHeader make_commit_header(const std::shared_ptr<WalWriter>& wal_writer,
+                                                   std::uint64_t transaction_id,
+                                                   std::uint64_t next_transaction_id = 0U,
+                                                   std::uint64_t oldest_active_txn = 0U,
+                                                   std::uint64_t oldest_active_commit_lsn = 0U)
+{
+    bored::storage::WalCommitHeader header{};
+    header.transaction_id = transaction_id;
+    header.commit_lsn = wal_writer ? wal_writer->next_lsn() : 0U;
+    header.next_transaction_id = next_transaction_id != 0U ? next_transaction_id : (transaction_id + 1U);
+    header.oldest_active_transaction_id = oldest_active_txn;
+    header.oldest_active_commit_lsn = oldest_active_commit_lsn != 0U ? oldest_active_commit_lsn : header.commit_lsn;
+    return header;
+}
+
 }  // namespace
 
 TEST_CASE("WalReplayer replays committed tuple changes")
@@ -108,13 +123,9 @@ TEST_CASE("WalReplayer replays committed tuple changes")
     PageManager::TupleUpdateResult update_result{};
     REQUIRE_FALSE(manager.update_tuple(page_span, insert_result.slot.index, tuple_update, 1001U, update_result));
 
-    WalRecordDescriptor commit{};
-    commit.type = WalRecordType::Commit;
-    commit.page_id = page_id;
-    commit.flags = bored::storage::WalRecordFlag::None;
-    commit.payload = {};
+    auto commit_header = make_commit_header(wal_writer, page_id, page_id + 1U, page_id);
     bored::storage::WalAppendResult commit_result{};
-    REQUIRE_FALSE(wal_writer->append_record(commit, commit_result));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_result));
 
     const auto page_after = page_buffer;
 
@@ -409,13 +420,9 @@ TEST_CASE("WalReplayer undoes uncommitted update using before image")
     PageManager::TupleInsertResult insert_result{};
     REQUIRE_FALSE(manager.insert_tuple(page_span, insert_payload, 9001U, insert_result));
 
-    WalRecordDescriptor commit{};
-    commit.type = WalRecordType::Commit;
-    commit.page_id = page_id;
-    commit.flags = bored::storage::WalRecordFlag::None;
-    commit.payload = {};
+    auto commit_header = make_commit_header(wal_writer, page_id, page_id + 1U, page_id);
     bored::storage::WalAppendResult commit_result{};
-    REQUIRE_FALSE(wal_writer->append_record(commit, commit_result));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_result));
 
     const auto baseline_page = page_buffer;
     const auto baseline_free_bytes = fsm.current_free_bytes(page_id);
@@ -492,13 +499,9 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
     REQUIRE_FALSE(manager.insert_tuple(page_span, payload, 8080U, insert_result));
     REQUIRE(insert_result.used_overflow);
 
-    WalRecordDescriptor commit{};
-    commit.type = WalRecordType::Commit;
-    commit.page_id = page_id;
-    commit.flags = bored::storage::WalRecordFlag::None;
-    commit.payload = {};
+    auto commit_header = make_commit_header(wal_writer, page_id, page_id + 1U, page_id);
     bored::storage::WalAppendResult commit_result{};
-    REQUIRE_FALSE(wal_writer->append_record(commit, commit_result));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_result));
 
     PageManager::TupleDeleteResult delete_result{};
     REQUIRE_FALSE(manager.delete_tuple(page_span, insert_result.slot.index, 8080U, delete_result));
@@ -704,13 +707,9 @@ TEST_CASE("Wal crash drill restores overflow before image")
     REQUIRE(insert_result.used_overflow);
     REQUIRE(insert_result.overflow_page_ids.size() >= 2U);
 
-    WalRecordDescriptor commit{};
-    commit.type = WalRecordType::Commit;
-    commit.page_id = page_id;
-    commit.flags = bored::storage::WalRecordFlag::None;
-    commit.payload = {};
+    auto commit_header = make_commit_header(wal_writer, page_id, page_id + 1U, page_id);
     bored::storage::WalAppendResult commit_result{};
-    REQUIRE_FALSE(wal_writer->append_record(commit, commit_result));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_result));
 
     const auto baseline_page = page_buffer;
     const auto baseline_free_bytes = fsm.current_free_bytes(page_id);
@@ -857,21 +856,13 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
     REQUIRE(insert_b.used_overflow);
     REQUIRE(insert_b.overflow_page_ids.size() >= 2U);
 
-    WalRecordDescriptor commit_a{};
-    commit_a.type = WalRecordType::Commit;
-    commit_a.page_id = page_id_a;
-    commit_a.flags = bored::storage::WalRecordFlag::None;
-    commit_a.payload = {};
+    auto commit_header_a = make_commit_header(wal_writer, page_id_a, page_id_a + 1U, page_id_a);
     bored::storage::WalAppendResult commit_result_a{};
-    REQUIRE_FALSE(wal_writer->append_record(commit_a, commit_result_a));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header_a, commit_result_a));
 
-    WalRecordDescriptor commit_b{};
-    commit_b.type = WalRecordType::Commit;
-    commit_b.page_id = page_id_b;
-    commit_b.flags = bored::storage::WalRecordFlag::None;
-    commit_b.payload = {};
+    auto commit_header_b = make_commit_header(wal_writer, page_id_b, page_id_b + 1U, page_id_b);
     bored::storage::WalAppendResult commit_result_b{};
-    REQUIRE_FALSE(wal_writer->append_record(commit_b, commit_result_b));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header_b, commit_result_b));
 
     const auto baseline_page_a = page_a_buffer;
     const auto baseline_page_b = page_b_buffer;
@@ -1064,13 +1055,9 @@ TEST_CASE("Wal crash drill restores catalog tuple before image")
                                        insert_result));
     const auto baseline_page = page_buffer;
 
-    WalRecordDescriptor commit{};
-    commit.type = WalRecordType::Commit;
-    commit.page_id = page_id;
-    commit.flags = bored::storage::WalRecordFlag::None;
-    commit.payload = {};
+    auto commit_header = make_commit_header(wal_writer, page_id, page_id + 1U, page_id);
     bored::storage::WalAppendResult commit_append{};
-    REQUIRE_FALSE(wal_writer->append_record(commit, commit_append));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_append));
 
     CatalogTableDescriptor updated_descriptor = baseline_descriptor;
     updated_descriptor.tuple.xmin = baseline_descriptor.tuple.xmin + 10U;
@@ -1166,13 +1153,9 @@ TEST_CASE("Wal crash drill restores index descriptor before image")
                                        pending_descriptor.index_id.value,
                                        insert_result));
 
-    WalRecordDescriptor commit{};
-    commit.type = WalRecordType::Commit;
-    commit.page_id = page_id;
-    commit.flags = bored::storage::WalRecordFlag::None;
-    commit.payload = {};
+    auto commit_header = make_commit_header(wal_writer, page_id, page_id + 1U, page_id);
     bored::storage::WalAppendResult commit_append{};
-    REQUIRE_FALSE(wal_writer->append_record(commit, commit_append));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_append));
 
     const auto baseline_page = page_buffer;
 
@@ -1316,13 +1299,9 @@ TEST_CASE("Wal crash drill rolls back catalog id allocator counters")
                                        allocator_row_id,
                                        insert_result));
 
-    WalRecordDescriptor commit{};
-    commit.type = WalRecordType::Commit;
-    commit.page_id = allocator_page_id;
-    commit.flags = bored::storage::WalRecordFlag::None;
-    commit.payload = {};
+    auto commit_header = make_commit_header(wal_writer, allocator_page_id, allocator_page_id + 1U, allocator_page_id);
     bored::storage::WalAppendResult commit_append{};
-    REQUIRE_FALSE(wal_writer->append_record(commit, commit_append));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_append));
 
     const auto committed_page = page_buffer;
 
@@ -1424,13 +1403,9 @@ TEST_CASE("Wal crash drill preserves committed allocator counters during concurr
                                        allocator_row_id,
                                        insert_result));
 
-    WalRecordDescriptor commit_insert{};
-    commit_insert.type = WalRecordType::Commit;
-    commit_insert.page_id = allocator_page_id;
-    commit_insert.flags = bored::storage::WalRecordFlag::None;
-    commit_insert.payload = {};
+    auto commit_insert_header = make_commit_header(wal_writer, allocator_page_id, allocator_page_id + 1U, allocator_page_id);
     bored::storage::WalAppendResult commit_insert_append{};
-    REQUIRE_FALSE(wal_writer->append_record(commit_insert, commit_insert_append));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_insert_header, commit_insert_append));
 
     CatalogAllocatorState committed_state = baseline_state;
     committed_state.next_schema_id += 11U;
@@ -1448,13 +1423,9 @@ TEST_CASE("Wal crash drill preserves committed allocator counters during concurr
                                        allocator_row_id,
                                        committed_update));
 
-    WalRecordDescriptor commit_update{};
-    commit_update.type = WalRecordType::Commit;
-    commit_update.page_id = allocator_page_id;
-    commit_update.flags = bored::storage::WalRecordFlag::None;
-    commit_update.payload = {};
+    auto commit_update_header = make_commit_header(wal_writer, allocator_page_id, allocator_page_id + 1U, allocator_page_id);
     bored::storage::WalAppendResult commit_update_append{};
-    REQUIRE_FALSE(wal_writer->append_record(commit_update, commit_update_append));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_update_header, commit_update_append));
 
     const auto committed_page = page_buffer;
 
@@ -1596,13 +1567,9 @@ TEST_CASE("Wal crash drill detects catalog before image corruption")
                                        row_id,
                                        insert_result));
 
-    WalRecordDescriptor commit{};
-    commit.type = WalRecordType::Commit;
-    commit.page_id = page_id;
-    commit.flags = bored::storage::WalRecordFlag::None;
-    commit.payload = {};
+    auto commit_header = make_commit_header(wal_writer, page_id, page_id + 1U, page_id);
     bored::storage::WalAppendResult commit_append{};
-    REQUIRE_FALSE(wal_writer->append_record(commit, commit_append));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_append));
 
     const auto committed_page = page_buffer;
 
@@ -1731,13 +1698,9 @@ TEST_CASE("WalReplayer replays page compaction")
     REQUIRE_FALSE(manager.compact_page(page_span, compaction_result));
     REQUIRE(compaction_result.performed);
 
-    WalRecordDescriptor commit{};
-    commit.type = WalRecordType::Commit;
-    commit.page_id = page_id;
-    commit.flags = bored::storage::WalRecordFlag::None;
-    commit.payload = {};
+    auto commit_header = make_commit_header(wal_writer, page_id, page_id + 1U, page_id);
     bored::storage::WalAppendResult commit_result{};
-    REQUIRE_FALSE(wal_writer->append_record(commit, commit_result));
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_result));
 
     const auto post_compaction_snapshot = page_buffer;
 

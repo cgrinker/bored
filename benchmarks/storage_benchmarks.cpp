@@ -369,13 +369,14 @@ OverflowFixture build_overflow_fixture(const BenchmarkOptions& options)
             continue;
         }
 
-        bs::WalRecordDescriptor commit{};
-        commit.type = bs::WalRecordType::Commit;
-        commit.page_id = page_id;
-        commit.flags = bs::WalRecordFlag::None;
-        commit.payload = {};
-        bs::WalAppendResult commit_result{};
-        throw_if_error(wal_writer->append_record(commit, commit_result), "append commit record");
+    bs::WalCommitHeader commit_header{};
+    commit_header.transaction_id = page_id;
+    commit_header.commit_lsn = wal_writer->next_lsn();
+    commit_header.next_transaction_id = page_id + 1U;
+    commit_header.oldest_active_transaction_id = page_id;
+    commit_header.oldest_active_commit_lsn = commit_header.commit_lsn;
+    bs::WalAppendResult commit_result{};
+    throw_if_error(wal_writer->append_commit_record(commit_header, commit_result), "append commit record");
 
         std::array<std::byte, 256> shrink_payload{};
         shrink_payload.fill(std::byte{0x7A});
