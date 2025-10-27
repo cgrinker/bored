@@ -58,7 +58,8 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 **Tasks:**
 1. ✅ Define logical operator structures and enums capturing required metadata (output schema, predicates, grouping keys).  \
 	Introduced `logical_plan.hpp` with operator hierarchy (scan/project/filter/aggregate/sort/limit), output schema columns, and visitor support plus Catch2 coverage.
-2. Implement an AST lowering walker that consumes bound nodes and emits logical operators with schema propagation.
+2. ✅ Implement an AST lowering walker that consumes bound nodes and emits logical operators with schema propagation.  \
+	Added `logical_lowering.hpp`/`.cpp` to translate bound SELECT statements into scan/filter/project/sort/limit pipelines, preserving inferred types in output schemas and surfacing diagnostics for unsupported shapes, validated by dedicated Catch2 coverage.
 3. Introduce normalization hooks for predicate separation, projection ordering, and join criteria classification.
 4. Surface logical plan dumps for diagnostics and integrate unit tests comparing expected operator trees for representative queries.
 5. Document extension points for the query planner and executor teams, ensuring IR stability guarantees.
