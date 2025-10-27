@@ -315,6 +315,7 @@ public:
         bind_from_clause(*statement.query, scope, result);
         const auto aliases = bind_select_list(*statement.query, scope, result);
         bind_where_clause(*statement.query, scope, result);
+        bind_group_by(*statement.query, scope, aliases, result);
         bind_order_by(*statement.query, scope, aliases, result);
         bind_limit(*statement.query, scope, result);
         return result;
@@ -409,6 +410,19 @@ private:
         }
     }
 
+    void bind_group_by(QuerySpecification& query,
+                       Scope& scope,
+                       const AliasMap& aliases,
+                       BindingResult& result) const
+    {
+        for (auto* expression : query.group_by) {
+            if (expression == nullptr) {
+                continue;
+            }
+            bind_expression_with_alias(*expression, scope, aliases, result);
+        }
+    }
+
     void bind_order_by(QuerySpecification& query,
                        Scope& scope,
                        const AliasMap& aliases,
@@ -418,7 +432,7 @@ private:
             if (item == nullptr || item->expression == nullptr) {
                 continue;
             }
-            bind_order_expression(*item->expression, scope, aliases, result);
+            bind_expression_with_alias(*item->expression, scope, aliases, result);
         }
     }
 
@@ -435,10 +449,10 @@ private:
         }
     }
 
-    void bind_order_expression(Expression& expression,
-                                Scope& scope,
-                                const AliasMap& aliases,
-                                BindingResult& result) const
+    void bind_expression_with_alias(Expression& expression,
+                                    Scope& scope,
+                                    const AliasMap& aliases,
+                                    BindingResult& result) const
     {
         if (expression.kind == NodeKind::IdentifierExpression) {
             auto& identifier = static_cast<IdentifierExpression&>(expression);
@@ -451,6 +465,9 @@ private:
                         set_expression_type(identifier,
                                             target->inferred_type->type,
                                             target->inferred_type->nullable);
+                        if (target->required_coercion.has_value()) {
+                            identifier.required_coercion = target->required_coercion;
+                        }
                     } else {
                         set_expression_type(identifier, ScalarType::Unknown, true);
                     }

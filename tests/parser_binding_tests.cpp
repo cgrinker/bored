@@ -362,6 +362,84 @@ TEST_CASE("binder rejects duplicate select aliases", "[parser][binder]")
     CHECK(binding_result.diagnostics.front().message == "Select item alias 'key' is ambiguous");
 }
 
+TEST_CASE("binder resolves group by columns", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.quantity FROM sales.inventory AS inv GROUP BY inv.quantity;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE(binding_result.success());
+
+    auto* query = parse_result.statement->query;
+    REQUIRE(query != nullptr);
+    REQUIRE(query->group_by.size() == 1U);
+    auto* expression = query->group_by.front();
+    REQUIRE(expression != nullptr);
+    auto& identifier = static_cast<relational::IdentifierExpression&>(*expression);
+    REQUIRE(identifier.binding.has_value());
+    CHECK(identifier.binding->column_name == "quantity");
+}
+
+TEST_CASE("binder resolves group by aliases", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.quantity AS qty FROM sales.inventory AS inv GROUP BY qty;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE(binding_result.success());
+
+    auto* query = parse_result.statement->query;
+    REQUIRE(query != nullptr);
+    REQUIRE(query->group_by.size() == 1U);
+    auto* expression = query->group_by.front();
+    REQUIRE(expression != nullptr);
+    auto& identifier = static_cast<relational::IdentifierExpression&>(*expression);
+    CHECK_FALSE(identifier.binding.has_value());
+    REQUIRE(identifier.inferred_type.has_value());
+    CHECK(identifier.inferred_type->type == relational::ScalarType::UInt32);
+}
+
+TEST_CASE("binder reports unknown group by columns", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.quantity FROM sales.inventory AS inv GROUP BY inv.serial;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE(binding_result.diagnostics.size() == 1U);
+    CHECK(binding_result.diagnostics.front().message == "Column 'serial' not found on table 'inv'");
+}
+
 TEST_CASE("binder reports ambiguous unqualified column references", "[parser][binder]")
 {
     StubCatalog catalog_adapter;

@@ -95,6 +95,11 @@ TEST_CASE("describe renders select statement", "[parser][relational_ast]")
     predicate.right = &right_literal;
     query.where = &predicate;
 
+    auto& group_expr = arena.make<relational::IdentifierExpression>();
+    group_expr.name.parts.push_back(bored::parser::Identifier{.value = "inventory"});
+    group_expr.name.parts.push_back(bored::parser::Identifier{.value = "category"});
+    query.group_by.push_back(&group_expr);
+
     auto& order_item = arena.make<relational::OrderByItem>();
     auto& order_expr = arena.make<relational::IdentifierExpression>();
     order_expr.name.parts.push_back(bored::parser::Identifier{.value = "inventory"});
@@ -116,7 +121,7 @@ TEST_CASE("describe renders select statement", "[parser][relational_ast]")
     query.limit = &limit;
 
     const auto rendered = relational::describe(select_stmt);
-    REQUIRE(rendered == "SELECT DISTINCT * FROM inventory WHERE (inventory.id = 42) ORDER BY inventory.created_at DESC LIMIT 10 OFFSET 5");
+    REQUIRE(rendered == "SELECT DISTINCT * FROM inventory WHERE (inventory.id = 42) GROUP BY inventory.category ORDER BY inventory.created_at DESC LIMIT 10 OFFSET 5");
 }
 
 TEST_CASE("expression visitor traverses tree", "[parser][relational_ast]")

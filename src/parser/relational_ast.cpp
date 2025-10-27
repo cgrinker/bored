@@ -191,6 +191,21 @@ std::string describe(const SelectStatement& statement)
         stream << " WHERE " << describe_expression(*query.where);
     }
 
+    if (!query.group_by.empty()) {
+        stream << " GROUP BY ";
+        bool first_group = true;
+        for (const auto* expression : query.group_by) {
+            if (!expression) {
+                continue;
+            }
+            if (!first_group) {
+                stream << ", ";
+            }
+            stream << describe_expression(*expression);
+            first_group = false;
+        }
+    }
+
     if (!query.order_by.empty()) {
         stream << " ORDER BY ";
         bool first_order = true;

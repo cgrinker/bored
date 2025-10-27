@@ -226,6 +226,7 @@ struct QuerySpecification : Node {
     TableReference* from = nullptr;
     std::vector<TableReference*> from_tables{};
     Expression* where = nullptr;
+    std::vector<Expression*> group_by{};
     std::vector<OrderByItem*> order_by{};
     LimitClause* limit = nullptr;
 };

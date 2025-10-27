@@ -44,6 +44,8 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 	Binder now analyses comparison operands, emits `required_coercion` targets on expressions, and tests cover numeric promotions plus string vs integer mismatches.
 5. ✅ Extend Catch2 suites with binder-focused tests covering ambiguity, shadowing, and unresolved identifiers.  \
 	Added multi-table FROM parsing plus new binder tests that assert ambiguous column diagnostics, duplicate alias handling, and unresolved qualifier errors.
+6. ✅ Bind GROUP BY clauses, including alias support and diagnostics.  \
+	Grammar now parses GROUP BY lists, AST captures them, binder resolves aliases and reports missing columns, and new Catch2 coverage validates both positive and negative scenarios.
 
 ### Milestone 3: Logical Plan Construction & Normalization
 **Goal:** Lower bound ASTs into a logical relational algebra IR and perform initial normalization passes.

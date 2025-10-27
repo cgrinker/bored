@@ -76,6 +76,9 @@ struct kw_from : keyword<'F', 'R', 'O', 'M'> {
 struct kw_where : keyword<'W', 'H', 'E', 'R', 'E'> {
 };
 
+struct kw_group : keyword<'G', 'R', 'O', 'U', 'P'> {
+};
+
 struct kw_order : keyword<'O', 'R', 'D', 'E', 'R'> {
 };
 
@@ -1332,6 +1335,9 @@ struct select_value_expression_rule : select_expression_rule {
 struct where_expression_rule : select_expression_rule {
 };
 
+struct group_expression_rule : select_expression_rule {
+};
+
 struct order_expression_rule : select_expression_rule {
 };
 
@@ -1389,6 +1395,14 @@ struct order_list_rule
                  pegtl::star<optional_space, comma, optional_space, order_item_rule>> {
 };
 
+struct group_list_rule
+    : pegtl::seq<group_expression_rule,
+                 pegtl::star<optional_space, comma, optional_space, group_expression_rule>> {
+};
+
+struct group_by_clause_rule : pegtl::seq<kw_group, required_space, kw_by, required_space, group_list_rule> {
+};
+
 struct order_by_clause_rule
     : pegtl::seq<kw_order, required_space, kw_by, required_space, order_list_rule> {
 };
@@ -1408,6 +1422,7 @@ struct select_statement_grammar
                  select_list_rule,
                  pegtl::opt<required_space, from_clause_rule>,
                  pegtl::opt<required_space, where_clause_rule>,
+                 pegtl::opt<required_space, group_by_clause_rule>,
                  pegtl::opt<required_space, order_by_clause_rule>,
                  pegtl::opt<required_space, limit_clause_rule>,
                  optional_space,
@@ -1722,6 +1737,27 @@ struct select_action<order_expression_rule> {
         item.direction = relational::OrderByItem::Direction::Ascending;
         state.query->order_by.push_back(&item);
         state.current_order_item = &item;
+        state.expression_stack.clear();
+    }
+};
+
+template <>
+struct select_action<group_expression_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr || state.query == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        auto* expression = pop_expression(state);
+        if (expression == nullptr) {
+            state.expression_stack.clear();
+            return;
+        }
+
+        state.query->group_by.push_back(expression);
         state.expression_stack.clear();
     }
 };
