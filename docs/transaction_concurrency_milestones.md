@@ -14,7 +14,7 @@
 - [x] Align retention and checkpoint requirements with the chosen MVCC window (oldest active transaction tracking).
 
 ## Milestone 1: Transaction Identity & Visibility Plumbing (1 sprint)
-- [ ] Introduce `TxnId` generator backed by WAL/LSN monotonicity and persist allocator state across checkpoints.
+- [x] Introduce `TxnId` generator backed by WAL/LSN monotonicity and persist allocator state across checkpoints.
 - [ ] Wire catalog lookups to accept a snapshot descriptor (`TxnSnapshot`) and filter entries according to MVCC visibility rules.
 - [x] Extend WAL commit records with transaction metadata (txn id, commit timestamp/LSN) for recovery replay.
 - [ ] Capture oldest-active/oldest-commit LSNs for retention management and checkpoint coordination.

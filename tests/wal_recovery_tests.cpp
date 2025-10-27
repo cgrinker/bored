@@ -141,6 +141,53 @@ TEST_CASE("WalRecoveryDriver builds redo and undo plan")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
+TEST_CASE("WalRecoveryDriver captures transaction allocator metadata")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_recovery_allocator_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 2U * bored::storage::kWalBlockSize;
+    config.buffer_size = bored::storage::kWalBlockSize;
+    config.size_flush_threshold = bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    WalWriter writer{io, config};
+
+    const auto commit1_lsn = writer.next_lsn();
+    auto commit_header_a = make_commit_header(writer, 101U, 501U, 123U, commit1_lsn - 64U);
+    WalAppendResult commit_a{};
+    REQUIRE_FALSE(writer.append_commit_record(commit_header_a, commit_a));
+
+    const auto commit2_lsn = writer.next_lsn();
+    auto commit_header_b = make_commit_header(writer, 202U, 450U, 99U, commit2_lsn - 128U);
+    WalAppendResult commit_b{};
+    REQUIRE_FALSE(writer.append_commit_record(commit_header_b, commit_b));
+
+    auto commit_header_c = make_commit_header(writer, 303U);
+    commit_header_c.next_transaction_id = 0U;
+    commit_header_c.oldest_active_transaction_id = 0U;
+    commit_header_c.oldest_active_commit_lsn = 0U;
+    WalAppendResult commit_c{};
+    REQUIRE_FALSE(writer.append_commit_record(commit_header_c, commit_c));
+
+    REQUIRE_FALSE(writer.close());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    CHECK(plan.next_transaction_id_high_water == 501U);
+    CHECK(plan.oldest_active_transaction_id == 99U);
+    const auto expected_oldest_commit_lsn = std::min(commit_header_a.oldest_active_commit_lsn,
+                                                     commit_header_b.oldest_active_commit_lsn);
+    CHECK(plan.oldest_active_commit_lsn == expected_oldest_commit_lsn);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
 TEST_CASE("WalRecoveryDriver marks truncated tail")
 {
     auto io = make_async_io();

@@ -29,6 +29,9 @@ struct WalRecoveryPlan final {
     bool truncated_tail = false;
     std::uint64_t truncated_segment_id = 0U;
     std::uint64_t truncated_lsn = 0U;
+    std::uint64_t next_transaction_id_high_water = 0U;
+    std::uint64_t oldest_active_transaction_id = 0U;
+    std::uint64_t oldest_active_commit_lsn = 0U;
 };
 
 class WalRecoveryDriver final {

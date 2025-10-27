@@ -114,6 +114,9 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
     plan.truncated_tail = false;
     plan.truncated_segment_id = 0U;
     plan.truncated_lsn = 0U;
+    plan.next_transaction_id_high_water = 0U;
+    plan.oldest_active_transaction_id = 0U;
+    plan.oldest_active_commit_lsn = 0U;
 
     std::vector<WalSegmentView> segments;
     if (auto ec = reader_.enumerate_segments(segments); ec) {
@@ -174,6 +177,36 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
 
             switch (type) {
             case WalRecordType::Commit: {
+                auto payload = std::span<const std::byte>(record_view.payload.data(), record_view.payload.size());
+                auto commit = decode_wal_commit(payload);
+                if (!commit) {
+                    return std::make_error_code(std::errc::invalid_argument);
+                }
+
+                auto safe_increment = [](std::uint64_t value) {
+                    return value < std::numeric_limits<std::uint64_t>::max() ? value + 1U : value;
+                };
+
+                const auto next_txn_id = commit->next_transaction_id != 0U
+                    ? commit->next_transaction_id
+                    : safe_increment(commit->transaction_id);
+                plan.next_transaction_id_high_water = std::max(plan.next_transaction_id_high_water, next_txn_id);
+
+                if (commit->transaction_id != 0U) {
+                    plan.next_transaction_id_high_water = std::max(plan.next_transaction_id_high_water, safe_increment(commit->transaction_id));
+                }
+
+                if (commit->oldest_active_transaction_id != 0U) {
+                    if (plan.oldest_active_transaction_id == 0U || commit->oldest_active_transaction_id < plan.oldest_active_transaction_id) {
+                        plan.oldest_active_transaction_id = commit->oldest_active_transaction_id;
+                    }
+                }
+                if (commit->oldest_active_commit_lsn != 0U) {
+                    if (plan.oldest_active_commit_lsn == 0U || commit->oldest_active_commit_lsn < plan.oldest_active_commit_lsn) {
+                        plan.oldest_active_commit_lsn = commit->oldest_active_commit_lsn;
+                    }
+                }
+
                 auto it = transactions.find(txn_id);
                 if (it != transactions.end()) {
                     auto& prepared = it->second.records;
