@@ -60,6 +60,7 @@ if(BORED_ENABLE_PARSER)
             src/parser/relational_binder.cpp
             src/parser/relational_logical_lowering.cpp
             src/parser/relational_logical_normalization.cpp
+        src/parser/relational_logical_plan_printer.cpp
     )
     target_link_libraries(${PROJECT_NAME}_lib
         PUBLIC
@@ -159,6 +160,7 @@ if(BORED_ENABLE_TESTS)
                 tests/parser_logical_plan_tests.cpp
                 tests/parser_logical_lowering_tests.cpp
                 tests/parser_logical_normalization_tests.cpp
+                tests/parser_logical_plan_printer_tests.cpp
         )
     endif()
 
