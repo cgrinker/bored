@@ -68,6 +68,17 @@ std::optional<CatalogSchemaDescriptor> CatalogAccessor::schema(SchemaId id) cons
     return CatalogSchemaDescriptor{entry.tuple, entry.schema_id, entry.database_id, entry.name};
 }
 
+std::vector<CatalogSchemaDescriptor> CatalogAccessor::schemas() const
+{
+    ensure_schemas_loaded();
+    std::vector<CatalogSchemaDescriptor> result;
+    result.reserve(schemas_.size());
+    for (const auto& entry : schemas_) {
+        result.emplace_back(entry.tuple, entry.schema_id, entry.database_id, entry.name);
+    }
+    return result;
+}
+
 std::vector<CatalogSchemaDescriptor> CatalogAccessor::schemas(DatabaseId database_id) const
 {
     ensure_schemas_loaded();
@@ -89,6 +100,17 @@ std::optional<CatalogTableDescriptor> CatalogAccessor::table(RelationId id) cons
     }
     const auto& entry = tables_[it->second];
     return CatalogTableDescriptor{entry.tuple, entry.relation_id, entry.schema_id, entry.table_type, entry.root_page_id, entry.name};
+}
+
+std::vector<CatalogTableDescriptor> CatalogAccessor::tables() const
+{
+    ensure_tables_loaded();
+    std::vector<CatalogTableDescriptor> result;
+    result.reserve(tables_.size());
+    for (const auto& entry : tables_) {
+        result.emplace_back(entry.tuple, entry.relation_id, entry.schema_id, entry.table_type, entry.root_page_id, entry.name);
+    }
+    return result;
 }
 
 std::vector<CatalogTableDescriptor> CatalogAccessor::tables(SchemaId schema_id) const

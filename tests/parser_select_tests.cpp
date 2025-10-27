@@ -170,3 +170,45 @@ TEST_CASE("parse_select supports distinct order and limit", "[parser][select]")
     const auto& offset_literal = static_cast<const relational::LiteralExpression&>(*limit->offset);
     REQUIRE(offset_literal.text == "5");
 }
+
+TEST_CASE("parse_select captures inner join metadata", "[parser][select]")
+{
+    const std::string sql =
+        "SELECT o.id, c.name FROM orders AS o INNER JOIN customers AS c ON o.customer_id = c.id;";
+    const auto result = bored::parser::parse_select(sql);
+    CAPTURE(sql);
+    if (!result.diagnostics.empty()) {
+        CAPTURE(result.diagnostics.front().message);
+    }
+    REQUIRE(result.success());
+    REQUIRE(result.statement != nullptr);
+
+    const auto* query = result.statement->query;
+    REQUIRE(query != nullptr);
+    REQUIRE(query->from_tables.size() == 2U);
+    REQUIRE(query->joins.size() == 1U);
+
+    const auto* left_table = query->from_tables.front();
+    REQUIRE(left_table != nullptr);
+    REQUIRE(left_table->alias.has_value());
+    REQUIRE(left_table->alias->value == "o");
+
+    const auto* right_table = query->from_tables.back();
+    REQUIRE(right_table != nullptr);
+    REQUIRE(right_table->alias.has_value());
+    REQUIRE(right_table->alias->value == "c");
+
+    const auto& join = query->joins.front();
+    REQUIRE(join.type == relational::JoinType::Inner);
+    REQUIRE(join.left_kind == relational::JoinClause::InputKind::Table);
+    REQUIRE(join.left_index == 0U);
+    REQUIRE(join.right_index == 1U);
+    REQUIRE(join.predicate != nullptr);
+    REQUIRE(join.predicate->kind == relational::NodeKind::BinaryExpression);
+
+    const auto& predicate = static_cast<const relational::BinaryExpression&>(*join.predicate);
+    REQUIRE(predicate.left != nullptr);
+    REQUIRE(predicate.left->kind == relational::NodeKind::IdentifierExpression);
+    REQUIRE(predicate.right != nullptr);
+    REQUIRE(predicate.right->kind == relational::NodeKind::IdentifierExpression);
+}

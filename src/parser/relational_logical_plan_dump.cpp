@@ -50,7 +50,22 @@ LogicalPlanDumpResult dump_select_plan(std::string_view sql, const LogicalPlanDu
     }
 
     result.plan_text = describe_plan(*lowering.plan);
+    if (options.plan_text_sink) {
+        options.plan_text_sink(result.plan_text);
+    }
+
+    if (options.include_normalization) {
+        result.normalization = normalize_plan(*lowering.plan);
+    }
     return result;
+}
+
+LogicalPlanDumpResult dump_select_plan(std::string_view sql,
+                                       LogicalPlanDumpOptions options,
+                                       const std::function<void(std::string_view)>& sink)
+{
+    options.plan_text_sink = sink;
+    return dump_select_plan(sql, options);
 }
 
 }  // namespace bored::parser::relational

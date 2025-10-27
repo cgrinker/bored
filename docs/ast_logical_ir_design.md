@@ -64,7 +64,8 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 	Added `logical_normalization.hpp`/`.cpp` to walk logical plans, collect filter predicates, preserve projection ordering, and provide join classification stubs (ready for future join support), validated via Catch2 normalization tests.
 4. ✅ Surface logical plan dumps for diagnostics and integrate unit tests comparing expected operator trees for representative queries.  \
 	Added `logical_plan_printer.hpp`/`.cpp` plus the new `dump_select_plan` helper so tooling can capture plan text after binding/lowering, and expanded Catch2 coverage in `parser_logical_plan_printer_tests.cpp` to assert filter/sort/limit pipelines render as expected and that lowering emits trace callbacks when configured.
-5. Document extension points for the query planner and executor teams, ensuring IR stability guarantees.
+5. ✅ Document extension points for the query planner and executor teams, ensuring IR stability guarantees.  \
+	 codified `CatalogBinderAdapter` so runtime components can expose catalog metadata to the binder, added plan sink hooks plus `dump_select_plan` normalization output, and updated operator guide documentation to call out how tracers consume these surfaces.
 
 ### Milestone 4: Testing & Tooling Integration
 **Goal:** Ensure the AST and logical IR layers integrate cleanly with existing tooling and diagnostics.
@@ -81,7 +82,22 @@ The parser front-end now produces preliminary syntax trees for DDL verbs. To pro
 4. Capture performance baselines for binding and lowering stages using synthetic workloads in `benchmarks/` for regression tracking.
 5. Establish coding conventions for future AST/IR extensions (naming, ownership, testing patterns).
 
-## Upcoming Tasks
+### Milestone 5: Join-Aware Logical Planning
+**Goal:** Introduce multi-relation query support with join-aware binding, lowering, and diagnostics so optimizer work can proceed on realistic SELECT workloads.
 
-- [x] Support ORDER BY references to SELECT-item aliases within the binder.  \
-	Binder now tracks select-item aliases, resolves them during ORDER BY binding, and surfaces diagnostics for duplicate aliases with new Catch2 coverage.
+**Exit Criteria:**
+- Binder recognises explicit and implicit join constructs, resolves participating relations, and categorises join predicates for normalization.
+- Logical plan lowering emits join operators with propagated output schemas and predicate metadata ready for optimizer consumption.
+- Plan dumps, normalization traces, and diagnostics surface join structure and predicate classification for debugging complex queries.
+
+**Tasks:**
+1. [ ] Extend bound AST structures and binder scopes to represent join relations, qualifying column references across joined tables and detecting ambiguous bindings.
+2. [ ] Define logical join operator variants (inner, left/right outer, cross) with schema propagation helpers and update visitors accordingly.
+3. [ ] Implement AST-to-IR lowering for joined FROM clauses, including join predicate extraction and residual filter separation.
+4. [ ] Enhance normalization passes and `dump_select_plan` output to classify join predicates, residual filters, and provide readable join ordering traces.
+5. [ ] Add Catch2 coverage for multi-join queries spanning binding, lowering, normalization, and textual dumps to lock in regression protection.
+
+_Current Status:_ Parser now emits explicit join metadata and the binder binds join predicates; lowering still gates on single-table plans until join operators land.
+
+## Upcoming Tasks
+Tracked in `docs/project_backlog.md`.

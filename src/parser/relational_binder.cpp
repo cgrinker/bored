@@ -313,6 +313,7 @@ public:
 
         Scope scope{};
         bind_from_clause(*statement.query, scope, result);
+        bind_join_clauses(*statement.query, scope, result);
         const auto aliases = bind_select_list(*statement.query, scope, result);
         bind_where_clause(*statement.query, scope, result);
         bind_group_by(*statement.query, scope, aliases, result);
@@ -332,6 +333,21 @@ private:
                 continue;
             }
             bind_table_reference(*table, scope, result);
+        }
+    }
+
+    void bind_join_clauses(QuerySpecification& query, Scope& scope, BindingResult& result) const
+    {
+        for (auto& join : query.joins) {
+            if (join.predicate != nullptr) {
+                bind_expression(*join.predicate, scope, result);
+            } else if (join.type != JoinType::Cross) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "JOIN clause requires an ON predicate";
+                diagnostic.remediation_hints = {"Provide an ON expression or use CROSS JOIN for predicate-free joins."};
+                result.diagnostics.push_back(std::move(diagnostic));
+            }
         }
     }
 

@@ -40,3 +40,8 @@ Each diagnostic ships with remediation hints; surface them to developers or auto
 4. **Feed improvements back** – Capture recurring warnings/errors and extend parser grammar or catalog support accordingly to keep scripts clean.
 
 Keeping parser diagnostics visible ensures DDL migrations remain predictable and that parser limitations are addressed before they impact production workloads.
+
+## Logical Plan Tracing
+- Use `parser::relational::CatalogBinderAdapter` to adapt a live `catalog::CatalogAccessor` into a `BinderCatalog` when you want to inspect SELECT pipelines against the current catalog.
+- Call `parser::relational::dump_select_plan` with a configured `BinderConfig` to parse, bind, and lower ad-hoc SELECT statements. Provide a `plan_text_sink` to route the formatted plan into your logging system, or rely on the overload that accepts a sink directly.
+- Set `include_normalization = true` on `LogicalPlanDumpOptions` to capture predicate, projection, and join classification details alongside the textual dump—useful when reconciling optimizer traces.

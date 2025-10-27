@@ -106,6 +106,14 @@ enum class ScalarType : std::uint8_t {
     Utf8
 };
 
+enum class JoinType : std::uint8_t {
+    Inner = 0,
+    LeftOuter,
+    RightOuter,
+    FullOuter,
+    Cross
+};
+
 struct TypeAnnotation final {
     ScalarType type = ScalarType::Unknown;
     bool nullable = true;
@@ -199,6 +207,19 @@ struct TableReference : Node {
     std::optional<TableBinding> binding{};
 };
 
+struct JoinClause final {
+    enum class InputKind : std::uint8_t {
+        Table = 0,
+        Join
+    };
+
+    JoinType type = JoinType::Inner;
+    InputKind left_kind = InputKind::Table;
+    std::size_t left_index = 0U;
+    std::size_t right_index = 0U;
+    Expression* predicate = nullptr;
+};
+
 struct OrderByItem : Node {
     enum class Direction : std::uint8_t {
         Ascending = 0,
@@ -225,6 +246,7 @@ struct QuerySpecification : Node {
     std::vector<SelectItem*> select_items{};
     TableReference* from = nullptr;
     std::vector<TableReference*> from_tables{};
+    std::vector<JoinClause> joins{};
     Expression* where = nullptr;
     std::vector<Expression*> group_by{};
     std::vector<OrderByItem*> order_by{};

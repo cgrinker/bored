@@ -58,6 +58,7 @@ if(BORED_ENABLE_PARSER)
             src/parser/ddl_script_executor.cpp
             src/parser/relational_ast.cpp
             src/parser/relational_binder.cpp
+            src/parser/relational_catalog_binder_adapter.cpp
             src/parser/relational_logical_lowering.cpp
             src/parser/relational_logical_normalization.cpp
         src/parser/relational_logical_plan_dump.cpp

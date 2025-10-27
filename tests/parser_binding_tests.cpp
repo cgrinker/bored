@@ -183,6 +183,57 @@ TEST_CASE("binder resolves qualified star expressions", "[parser][binder]")
     CHECK(*star.binding->table_alias == "inv");
 }
 
+TEST_CASE("binder binds join predicates", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+    catalog_adapter.add_table(make_shipments_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "SELECT inv.id, shp.status FROM sales.inventory AS inv INNER JOIN sales.shipments AS shp ON inv.id = shp.id;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE(binding_result.success());
+
+    auto* query = parse_result.statement->query;
+    REQUIRE(query != nullptr);
+    REQUIRE(query->from_tables.size() == 2U);
+
+    auto* left_table = query->from_tables.front();
+    REQUIRE(left_table != nullptr);
+    REQUIRE(left_table->binding.has_value());
+    CHECK(left_table->binding->relation_id == catalog::RelationId{100U});
+
+    auto* right_table = query->from_tables.back();
+    REQUIRE(right_table != nullptr);
+    REQUIRE(right_table->binding.has_value());
+    CHECK(right_table->binding->relation_id == catalog::RelationId{200U});
+
+    REQUIRE(query->joins.size() == 1U);
+    const auto& join = query->joins.front();
+    REQUIRE(join.predicate != nullptr);
+    REQUIRE(join.predicate->kind == relational::NodeKind::BinaryExpression);
+    const auto& predicate = static_cast<const relational::BinaryExpression&>(*join.predicate);
+    REQUIRE(predicate.left != nullptr);
+    REQUIRE(predicate.left->kind == relational::NodeKind::IdentifierExpression);
+    const auto& left_id = static_cast<const relational::IdentifierExpression&>(*predicate.left);
+    REQUIRE(left_id.binding.has_value());
+    CHECK(left_id.binding->relation_id == catalog::RelationId{100U});
+
+    REQUIRE(predicate.right != nullptr);
+    REQUIRE(predicate.right->kind == relational::NodeKind::IdentifierExpression);
+    const auto& right_id = static_cast<const relational::IdentifierExpression&>(*predicate.right);
+    REQUIRE(right_id.binding.has_value());
+    CHECK(right_id.binding->relation_id == catalog::RelationId{200U});
+}
+
 TEST_CASE("binder reports unknown star qualifier", "[parser][binder]")
 {
     StubCatalog catalog_adapter;

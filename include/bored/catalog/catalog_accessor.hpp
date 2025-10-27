@@ -33,9 +33,11 @@ public:
     [[nodiscard]] std::optional<CatalogDatabaseDescriptor> database(std::string_view name) const;
 
     [[nodiscard]] std::optional<CatalogSchemaDescriptor> schema(SchemaId id) const;
+    [[nodiscard]] std::vector<CatalogSchemaDescriptor> schemas() const;
     [[nodiscard]] std::vector<CatalogSchemaDescriptor> schemas(DatabaseId database_id) const;
 
     [[nodiscard]] std::optional<CatalogTableDescriptor> table(RelationId id) const;
+    [[nodiscard]] std::vector<CatalogTableDescriptor> tables() const;
     [[nodiscard]] std::vector<CatalogTableDescriptor> tables(SchemaId schema_id) const;
 
     [[nodiscard]] std::vector<CatalogColumnDescriptor> columns(RelationId relation_id) const;

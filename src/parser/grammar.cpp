@@ -73,6 +73,30 @@ struct kw_distinct : keyword<'D', 'I', 'S', 'T', 'I', 'N', 'C', 'T'> {
 struct kw_from : keyword<'F', 'R', 'O', 'M'> {
 };
 
+struct kw_join : keyword<'J', 'O', 'I', 'N'> {
+};
+
+struct kw_inner : keyword<'I', 'N', 'N', 'E', 'R'> {
+};
+
+struct kw_left : keyword<'L', 'E', 'F', 'T'> {
+};
+
+struct kw_right : keyword<'R', 'I', 'G', 'H', 'T'> {
+};
+
+struct kw_full : keyword<'F', 'U', 'L', 'L'> {
+};
+
+struct kw_outer : keyword<'O', 'U', 'T', 'E', 'R'> {
+};
+
+struct kw_cross : keyword<'C', 'R', 'O', 'S', 'S'> {
+};
+
+struct kw_on : keyword<'O', 'N'> {
+};
+
 struct kw_where : keyword<'W', 'H', 'E', 'R', 'E'> {
 };
 
@@ -1153,6 +1177,21 @@ struct SelectParseState final {
     relational::QuerySpecification* query = nullptr;
     relational::SelectItem* current_select_item = nullptr;
     relational::TableReference* current_table = nullptr;
+    std::size_t current_table_index = 0U;
+    std::size_t last_table_index = 0U;
+    bool has_last_table = false;
+    std::optional<std::size_t> last_join_index{};
+    relational::JoinType join_type_override = relational::JoinType::Inner;
+    bool join_type_override_set = false;
+    struct PendingJoin final {
+        relational::JoinType type = relational::JoinType::Inner;
+        relational::JoinClause::InputKind left_kind = relational::JoinClause::InputKind::Table;
+        std::size_t left_index = 0U;
+        std::size_t right_index = 0U;
+        bool has_right = false;
+    };
+    std::optional<PendingJoin> pending_join{};
+    relational::Expression* pending_join_predicate = nullptr;
     relational::OrderByItem* current_order_item = nullptr;
     relational::LimitClause* limit_clause = nullptr;
     std::vector<relational::Expression*> expression_stack{};
@@ -1360,10 +1399,77 @@ struct select_list_rule
                  pegtl::star<optional_space, comma, optional_space, select_item_rule>> {
 };
 
-struct select_table_reference_rule
+struct join_inner_keyword : kw_inner {
+};
+
+struct join_left_keyword : kw_left {
+};
+
+struct join_right_keyword : kw_right {
+};
+
+struct join_full_keyword : kw_full {
+};
+
+struct join_outer_keyword : kw_outer {
+};
+
+struct join_cross_keyword : kw_cross {
+};
+
+struct join_on_keyword : kw_on {
+};
+
+struct select_table_factor_rule
     : pegtl::seq<select_table_identifier_rule,
                  pegtl::opt<required_space,
                             pegtl::seq<kw_as, required_space, select_table_alias_identifier_rule>>> {
+};
+
+struct select_join_type_inner_rule : join_inner_keyword {
+};
+
+struct select_join_type_left_rule
+    : pegtl::seq<join_left_keyword, pegtl::opt<required_space, join_outer_keyword>> {
+};
+
+struct select_join_type_right_rule
+    : pegtl::seq<join_right_keyword, pegtl::opt<required_space, join_outer_keyword>> {
+};
+
+struct select_join_type_full_rule
+    : pegtl::seq<join_full_keyword, pegtl::opt<required_space, join_outer_keyword>> {
+};
+
+struct select_join_type_cross_rule : join_cross_keyword {
+};
+
+struct select_join_type_rule
+    : pegtl::sor<select_join_type_inner_rule,
+                 select_join_type_left_rule,
+                 select_join_type_right_rule,
+                 select_join_type_full_rule,
+                 select_join_type_cross_rule> {
+};
+
+struct select_join_type_with_space_rule
+    : pegtl::seq<select_join_type_rule, required_space> {
+};
+
+struct select_join_condition_rule : select_expression_rule {
+};
+
+struct select_join_clause_rule
+    : pegtl::seq<pegtl::opt<select_join_type_with_space_rule>,
+                 kw_join,
+                 required_space,
+                 select_table_factor_rule,
+                 pegtl::opt<required_space, join_on_keyword, required_space, select_join_condition_rule>> {
+};
+
+struct select_table_reference_rule
+    : pegtl::seq<select_table_factor_rule,
+                 pegtl::star<optional_space, select_join_clause_rule>> {
 };
 
 struct select_table_reference_list_rule
@@ -1687,6 +1793,18 @@ struct select_action<select_table_identifier_rule> {
         }
         state.query->from_tables.push_back(&table);
         state.current_table = &table;
+        if (!state.query->from_tables.empty()) {
+            state.current_table_index = state.query->from_tables.size() - 1U;
+            state.last_table_index = state.current_table_index;
+            state.has_last_table = true;
+            if (!state.pending_join.has_value()) {
+                state.last_join_index.reset();
+            }
+            if (state.pending_join.has_value() && !state.pending_join->has_right) {
+                state.pending_join->right_index = state.current_table_index;
+                state.pending_join->has_right = true;
+            }
+        }
     }
 };
 
@@ -1698,6 +1816,140 @@ struct select_action<select_table_alias_identifier_rule> {
         if (state.current_table != nullptr) {
             state.current_table->alias = make_identifier(in.string());
         }
+    }
+};
+
+template <>
+struct select_action<join_inner_keyword> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        state.join_type_override = relational::JoinType::Inner;
+        state.join_type_override_set = true;
+    }
+};
+
+template <>
+struct select_action<join_left_keyword> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        state.join_type_override = relational::JoinType::LeftOuter;
+        state.join_type_override_set = true;
+    }
+};
+
+template <>
+struct select_action<join_right_keyword> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        state.join_type_override = relational::JoinType::RightOuter;
+        state.join_type_override_set = true;
+    }
+};
+
+template <>
+struct select_action<join_full_keyword> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        state.join_type_override = relational::JoinType::FullOuter;
+        state.join_type_override_set = true;
+    }
+};
+
+template <>
+struct select_action<join_cross_keyword> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        state.join_type_override = relational::JoinType::Cross;
+        state.join_type_override_set = true;
+    }
+};
+
+template <>
+struct select_action<kw_join> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.query == nullptr) {
+            state.join_type_override_set = false;
+            state.pending_join.reset();
+            state.pending_join_predicate = nullptr;
+            return;
+        }
+
+        relational::JoinClause::InputKind left_kind = relational::JoinClause::InputKind::Table;
+        std::size_t left_index = 0U;
+
+        if (state.last_join_index.has_value()) {
+            left_kind = relational::JoinClause::InputKind::Join;
+            left_index = *state.last_join_index;
+        } else if (state.has_last_table) {
+            left_kind = relational::JoinClause::InputKind::Table;
+            left_index = state.last_table_index;
+        } else {
+            state.join_type_override_set = false;
+            state.pending_join.reset();
+            state.pending_join_predicate = nullptr;
+            return;
+        }
+
+        relational::JoinType type = state.join_type_override_set ? state.join_type_override : relational::JoinType::Inner;
+        state.join_type_override_set = false;
+
+        SelectParseState::PendingJoin pending{};
+        pending.type = type;
+        pending.left_kind = left_kind;
+        pending.left_index = left_index;
+        pending.has_right = false;
+        state.pending_join = pending;
+        state.pending_join_predicate = nullptr;
+    }
+};
+
+template <>
+struct select_action<select_join_condition_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        auto* expression = pop_expression(state);
+        state.pending_join_predicate = expression;
+        state.expression_stack.clear();
+    }
+};
+
+template <>
+struct select_action<select_join_clause_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.query == nullptr || !state.pending_join.has_value()) {
+            state.pending_join.reset();
+            state.pending_join_predicate = nullptr;
+            return;
+        }
+
+        auto pending = *state.pending_join;
+        state.pending_join.reset();
+
+        if (!pending.has_right) {
+            state.pending_join_predicate = nullptr;
+            return;
+        }
+
+        relational::JoinClause clause{};
+        clause.type = pending.type;
+        clause.left_kind = pending.left_kind;
+        clause.left_index = pending.left_index;
+        clause.right_index = pending.right_index;
+        clause.predicate = state.pending_join_predicate;
+
+        state.query->joins.push_back(std::move(clause));
+        state.last_join_index = state.query->joins.size() - 1U;
+        state.pending_join_predicate = nullptr;
     }
 };
 

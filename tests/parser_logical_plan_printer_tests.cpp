@@ -170,6 +170,14 @@ TEST_CASE("plan dump utility produces plan text", "[parser][logical_plan_printer
     relational::LogicalPlanDumpOptions options{};
     options.binder_config.catalog = &catalog_adapter;
     options.binder_config.default_schema = std::string{"sales"};
+    options.include_normalization = true;
+
+    bool sink_invoked = false;
+    std::string sink_text;
+    options.plan_text_sink = [&](std::string_view text) {
+        sink_invoked = true;
+        sink_text.assign(text.begin(), text.end());
+    };
 
     const std::string sql =
         "SELECT inv.quantity AS qty FROM sales.inventory AS inv WHERE inv.quantity > 10 ORDER BY qty LIMIT 5;";
@@ -179,4 +187,18 @@ TEST_CASE("plan dump utility produces plan text", "[parser][logical_plan_printer
     CAPTURE(dump.plan_text);
     CHECK(dump.plan_text.find("Sort keys=[") != std::string::npos);
     CHECK(dump.plan_text.find("Scan table=sales.inventory alias=inv") != std::string::npos);
+    CHECK(sink_invoked);
+    CHECK(sink_text == dump.plan_text);
+    REQUIRE(dump.normalization.has_value());
+    CHECK_FALSE(dump.normalization->filters.empty());
+
+    bool overload_sink_invoked = false;
+    const auto dumped_again = relational::dump_select_plan(sql,
+                                                           options,
+                                                           [&](std::string_view text) {
+                                                               overload_sink_invoked = true;
+                                                               CHECK(text.find("Limit row_count=5") != std::string::npos);
+                                                           });
+    REQUIRE(dumped_again.success());
+    CHECK(overload_sink_invoked);
 }
