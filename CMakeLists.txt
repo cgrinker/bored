@@ -50,9 +50,11 @@ add_library(${PROJECT_NAME}_lib
     src/storage/vacuum_worker.cpp
     src/planner/logical_plan.cpp
     src/planner/physical_plan.cpp
+    src/planner/memo.cpp
     src/planner/planner_context.cpp
     src/planner/planner.cpp
     src/planner/rule.cpp
+    src/planner/rules/join_rules.cpp
     src/planner/rules/predicate_pushdown_rule.cpp
     src/txn/transaction_manager.cpp
     src/txn/wal_commit_pipeline.cpp

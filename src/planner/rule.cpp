@@ -75,17 +75,39 @@ bool Rule::apply(const RuleContext& context,
         return false;
     }
 
-    return transform_(context, root, alternatives);
+    const auto applied = transform_(context, root, alternatives);
+    if (applied) {
+        if (auto* memo = context.memo(); memo && context.target_group() != Memo::invalid_group()) {
+            for (const auto& alternative : alternatives) {
+                memo->add_expression(context.target_group(), alternative);
+            }
+        }
+    }
+    return applied;
 }
 
-RuleContext::RuleContext(const PlannerContext* planner_context) noexcept
+RuleContext::RuleContext(const PlannerContext* planner_context,
+                         Memo* memo,
+                         Memo::GroupId target_group) noexcept
     : planner_context_{planner_context}
+    , memo_{memo}
+    , target_group_{target_group}
 {
 }
 
 const PlannerContext* RuleContext::planner_context() const noexcept
 {
     return planner_context_;
+}
+
+Memo* RuleContext::memo() const noexcept
+{
+    return memo_;
+}
+
+Memo::GroupId RuleContext::target_group() const noexcept
+{
+    return target_group_;
 }
 
 void RuleRegistry::register_rule(std::shared_ptr<Rule> rule)

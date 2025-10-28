@@ -1,5 +1,7 @@
 #include "bored/planner/planner.hpp"
 #include "bored/planner/rule.hpp"
+#include "bored/planner/memo.hpp"
+#include "bored/planner/rules/join_rules.hpp"
 #include "bored/planner/rules/predicate_pushdown_rule.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -9,6 +11,7 @@ using bored::planner::LogicalOperatorPtr;
 using bored::planner::LogicalOperatorType;
 using bored::planner::LogicalPlan;
 using bored::planner::LogicalProperties;
+using bored::planner::Memo;
 using bored::planner::PlannerContext;
 using bored::planner::PlannerContextConfig;
 using bored::planner::PlannerOptions;
@@ -28,6 +31,55 @@ LogicalOperatorPtr projection_over_scan()
     LogicalProperties projection_props = scan_props;
     std::vector<LogicalOperatorPtr> children{scan};
     return LogicalOperator::make(LogicalOperatorType::Projection, std::move(children), projection_props);
+}
+
+LogicalOperatorPtr join_of_scans()
+{
+    LogicalProperties left_props{};
+    left_props.output_columns = {"a"};
+    auto left = LogicalOperator::make(LogicalOperatorType::TableScan, {}, left_props);
+
+    LogicalProperties right_props{};
+    right_props.output_columns = {"b"};
+    auto right = LogicalOperator::make(LogicalOperatorType::TableScan, {}, right_props);
+
+    LogicalProperties join_props{};
+    join_props.output_columns = {"a", "b"};
+
+    return LogicalOperator::make(
+        LogicalOperatorType::Join,
+        std::vector<LogicalOperatorPtr>{left, right},
+        join_props);
+}
+
+LogicalOperatorPtr left_deep_join_of_three()
+{
+    LogicalProperties props_a{};
+    props_a.output_columns = {"a"};
+    auto a = LogicalOperator::make(LogicalOperatorType::TableScan, {}, props_a);
+
+    LogicalProperties props_b{};
+    props_b.output_columns = {"b"};
+    auto b = LogicalOperator::make(LogicalOperatorType::TableScan, {}, props_b);
+
+    LogicalProperties props_c{};
+    props_c.output_columns = {"c"};
+    auto c = LogicalOperator::make(LogicalOperatorType::TableScan, {}, props_c);
+
+    LogicalProperties props_ab{};
+    props_ab.output_columns = {"a", "b"};
+    auto ab = LogicalOperator::make(
+        LogicalOperatorType::Join,
+        std::vector<LogicalOperatorPtr>{a, b},
+        props_ab);
+
+    LogicalProperties props_abc{};
+    props_abc.output_columns = {"a", "b", "c"};
+
+    return LogicalOperator::make(
+        LogicalOperatorType::Join,
+        std::vector<LogicalOperatorPtr>{ab, c},
+        props_abc);
 }
 
 LogicalOperatorPtr filter_over_projection_over_scan()
@@ -139,6 +191,80 @@ TEST_CASE("Constant folding stub records attempt without alternatives")
     REQUIRE(trace.applications.size() == 1U);
     CHECK(trace.applications.front().rule_name == "ConstantFolding");
     CHECK_FALSE(trace.applications.front().success);
+}
+
+TEST_CASE("Join commutativity produces swapped alternative and registers with memo")
+{
+    RuleRegistry registry;
+    registry.register_rule(bored::planner::make_join_commutativity_rule());
+
+    PlannerContext planner_context{};
+    Memo memo;
+    auto logical = join_of_scans();
+    auto group = memo.add_group(logical);
+    RuleContext rule_context{&planner_context, &memo, group};
+    RuleEngine engine{&registry};
+
+    std::vector<LogicalOperatorPtr> alternatives;
+    RuleTrace trace{};
+    auto applied = engine.apply_rules(rule_context, logical, alternatives, &trace);
+
+    REQUIRE(applied);
+    REQUIRE(alternatives.size() == 1U);
+    auto alternative = alternatives.front();
+    REQUIRE(alternative);
+    CHECK(alternative->type() == LogicalOperatorType::Join);
+    REQUIRE(alternative->children().size() == 2U);
+    CHECK(alternative->children()[0] == logical->children()[1]);
+    CHECK(alternative->children()[1] == logical->children()[0]);
+
+    const auto* group_ptr = memo.find_group(group);
+    REQUIRE(group_ptr);
+    CHECK(group_ptr->expressions().size() == 2U);
+    REQUIRE(trace.applications.size() == 1U);
+    CHECK(trace.applications.front().rule_name == "JoinCommutativity");
+    CHECK(trace.applications.front().success);
+}
+
+TEST_CASE("Join associativity rotates left-deep join")
+{
+    RuleRegistry registry;
+    registry.register_rule(bored::planner::make_join_associativity_rule());
+
+    PlannerContext planner_context{};
+    Memo memo;
+    auto logical = left_deep_join_of_three();
+    auto group = memo.add_group(logical);
+    RuleContext rule_context{&planner_context, &memo, group};
+    RuleEngine engine{&registry};
+
+    std::vector<LogicalOperatorPtr> alternatives;
+    RuleTrace trace{};
+    auto applied = engine.apply_rules(rule_context, logical, alternatives, &trace);
+
+    REQUIRE(applied);
+    REQUIRE(alternatives.size() == 1U);
+    auto alternative = alternatives.front();
+    REQUIRE(alternative);
+    CHECK(alternative->type() == LogicalOperatorType::Join);
+    REQUIRE(alternative->children().size() == 2U);
+
+    auto new_left = alternative->children()[0];
+    auto new_right = alternative->children()[1];
+    REQUIRE(new_left);
+    REQUIRE(new_right);
+    CHECK(new_right->type() == LogicalOperatorType::Join);
+    REQUIRE(new_right->children().size() == 2U);
+    CHECK(new_left == logical->children()[0]->children()[0]);
+    CHECK(new_right->children()[0] == logical->children()[0]->children()[1]);
+    CHECK(new_right->children()[1] == logical->children()[1]);
+
+    const auto* group_ptr = memo.find_group(group);
+    REQUIRE(group_ptr);
+    CHECK(group_ptr->expressions().size() == 2U);
+    REQUIRE(trace.applications.size() == 1U);
+    CHECK(trace.applications.front().rule_name == "JoinAssociativity");
+    CHECK(trace.applications.front().success);
 }
 
 TEST_CASE("Rule engine handles empty registry")

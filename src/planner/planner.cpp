@@ -1,5 +1,7 @@
 #include "bored/planner/planner.hpp"
+#include "bored/planner/memo.hpp"
 #include "bored/planner/rule.hpp"
+#include "bored/planner/rules/join_rules.hpp"
 #include "bored/planner/rules/predicate_pushdown_rule.hpp"
 
 #include <utility>
@@ -53,6 +55,8 @@ const RuleRegistry& default_rule_registry()
         reg.register_rule(make_projection_pruning_rule());
         reg.register_rule(make_filter_pushdown_rule());
         reg.register_rule(make_constant_folding_rule());
+        reg.register_rule(make_join_commutativity_rule());
+        reg.register_rule(make_join_associativity_rule());
         return reg;
     }();
     return registry;
@@ -69,8 +73,11 @@ PlannerResult plan_query(const PlannerContext& context, const LogicalPlan& plan)
         return result;
     }
 
+    Memo memo;
+    auto root_group = memo.add_group(root);
+
     RuleEngine engine{&default_rule_registry(), context.options().rule_options};
-    RuleContext rule_context{&context};
+    RuleContext rule_context{&context, &memo, root_group};
     std::vector<LogicalOperatorPtr> alternatives;
     RuleTrace trace{};
     engine.apply_rules(rule_context, root, alternatives, context.options().enable_rule_tracing ? &trace : nullptr);

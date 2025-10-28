@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/planner/logical_plan.hpp"
+#include "bored/planner/memo.hpp"
 
 #include <functional>
 #include <memory>
@@ -51,12 +52,18 @@ private:
 
 class RuleContext final {
 public:
-    explicit RuleContext(const PlannerContext* planner_context) noexcept;
+    RuleContext(const PlannerContext* planner_context,
+                Memo* memo = nullptr,
+                Memo::GroupId target_group = Memo::invalid_group()) noexcept;
 
     [[nodiscard]] const PlannerContext* planner_context() const noexcept;
+    [[nodiscard]] Memo* memo() const noexcept;
+    [[nodiscard]] Memo::GroupId target_group() const noexcept;
 
 private:
-    const PlannerContext* planner_context_;
+    const PlannerContext* planner_context_ = nullptr;
+    Memo* memo_ = nullptr;
+    Memo::GroupId target_group_ = Memo::invalid_group();
 };
 
 class RuleRegistry final {
