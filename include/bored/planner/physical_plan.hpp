@@ -20,6 +20,9 @@ enum class PhysicalOperatorType {
 struct PhysicalProperties final {
     std::size_t expected_cardinality = 0U;
     bool preserves_order = false;
+    bool requires_visibility_check = false;
+    std::string relation_name{};
+    std::vector<std::string> partitioning_columns{};
     std::vector<std::string> output_columns{};
 };
 

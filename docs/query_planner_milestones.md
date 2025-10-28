@@ -33,15 +33,18 @@
 ## Milestone 2: Statistics & Costing Integration (1 sprint)
 - [x] Define `StatisticsCatalog` API for accessing row counts, distinct counts, and histogram stubs.
 	- Introduced planner-level `StatisticsCatalog` with table/column stat records, planner context wiring, and Catch2 coverage for registration and lookup semantics.
-- [ ] Implement a baseline cost model (IO + CPU) for scans, joins, and aggregations.
 - [x] Implement a baseline cost model (IO + CPU) for scans, joins, and aggregations.
 	- Added `CostModel` with deterministic IO/CPU costing factors across scans, filters, projections, and joins plus unit coverage; aggregates defer to logical cardinality until operators exist.
-- [ ] Connect cost model to rule framework so cheapest alternative per group is selected.
-- [ ] Add telemetry counters for rule applications, costing invocations, and chosen plan costs.
-- [ ] Create regression tests that assert stable plan choices given frozen statistics fixtures.
+- [x] Connect cost model to rule framework so cheapest alternative per group is selected.
+	- `plan_query` now scores memo groups with the `CostModel`, records chosen plan cost, and memo deduplication avoids join-rule loops during evaluation.
+- [x] Add telemetry counters for rule applications, costing invocations, and chosen plan costs.
+	- `PlannerResult` surfaces attempted/applied rules plus cost evaluation counts, with scaffolding tests covering tracing and non-tracing configurations.
+- [x] Create regression tests that assert stable plan choices given frozen statistics fixtures.
+	- Added a planner scaffolding test that seeds statistics, compares join order costs, and asserts the cheaper alternative is consistently selected.
 
 ## Milestone 3: Physical Operator Selection & Plan Lowering (1 sprint)
-- [ ] Map optimized logical operators to executor-ready physical operators (seq scan, nested-loop join, hash join stub, aggregation).
+- [x] Map optimized logical operators to executor-ready physical operators (seq scan, nested-loop join, hash join stub, aggregation).
+	- Planner lowerer now produces concrete physical operators with relation metadata, scan visibility flags, and respects memo-selected join ordering; hash join and aggregation stubs remain TODO pending logical operators.
 - [ ] Emit physical plan properties (output schema, ordering, partitioning) for executor validation.
 - [ ] Wire transaction snapshot awareness into scan primitives (visibility filters, lock modes).
 - [ ] Ensure DML statements (INSERT/UPDATE/DELETE) request the correct physical write operators with WAL prerequisites.

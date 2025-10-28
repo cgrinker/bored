@@ -1,14 +1,61 @@
 #include "bored/planner/memo.hpp"
 
+#include <cstddef>
 #include <utility>
 
 namespace bored::planner {
 
+namespace {
+
+bool expressions_equivalent(const LogicalOperatorPtr& lhs, const LogicalOperatorPtr& rhs)
+{
+    if (lhs == rhs) {
+        return true;
+    }
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs->type() != rhs->type()) {
+        return false;
+    }
+
+    const auto& lhs_props = lhs->properties();
+    const auto& rhs_props = rhs->properties();
+    if (lhs_props.estimated_cardinality != rhs_props.estimated_cardinality ||
+        lhs_props.preserves_order != rhs_props.preserves_order ||
+        lhs_props.relation_name != rhs_props.relation_name ||
+        lhs_props.output_columns != rhs_props.output_columns) {
+        return false;
+    }
+
+    const auto& lhs_children = lhs->children();
+    const auto& rhs_children = rhs->children();
+    if (lhs_children.size() != rhs_children.size()) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < lhs_children.size(); ++i) {
+        if (!expressions_equivalent(lhs_children[i], rhs_children[i])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+}  // namespace
+
 void MemoGroup::add_expression(LogicalOperatorPtr expression)
 {
-    if (expression) {
-        expressions_.push_back(std::move(expression));
+    if (!expression) {
+        return;
     }
+    for (const auto& existing : expressions_) {
+        if (expressions_equivalent(existing, expression)) {
+            return;
+        }
+    }
+    expressions_.push_back(std::move(expression));
 }
 
 const std::vector<LogicalOperatorPtr>& MemoGroup::expressions() const noexcept
