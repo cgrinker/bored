@@ -12,6 +12,10 @@ namespace bored::planner {
 class StatisticsCatalog;
 }
 
+namespace bored::txn {
+class TransactionContext;
+}
+
 namespace bored::executor {
 
 struct ExecutorContextConfig final {
@@ -20,6 +24,7 @@ struct ExecutorContextConfig final {
     txn::TransactionId transaction_id = 0U;
     txn::Snapshot snapshot{};
     std::pmr::memory_resource* scratch = nullptr;
+    txn::TransactionContext* transaction = nullptr;
 };
 
 class ExecutorContext final {
@@ -32,9 +37,11 @@ public:
     [[nodiscard]] txn::TransactionId transaction_id() const noexcept;
     [[nodiscard]] const txn::Snapshot& snapshot() const noexcept;
     [[nodiscard]] std::pmr::memory_resource* scratch_resource() const noexcept;
+    [[nodiscard]] txn::TransactionContext* transaction_context() const noexcept;
 
     void set_transaction_id(txn::TransactionId transaction_id) noexcept;
     void set_snapshot(txn::Snapshot snapshot) noexcept;
+    void set_transaction_context(txn::TransactionContext* transaction) noexcept;
 
 private:
     ExecutorContextConfig config_{};

@@ -7,6 +7,7 @@
 #include "bored/storage/page_manager.hpp"
 #include "bored/storage/page_operations.hpp"
 #include "bored/storage/wal_writer.hpp"
+#include "bored/txn/transaction_manager.hpp"
 #include "bored/txn/transaction_types.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -63,11 +64,14 @@ std::filesystem::path make_temp_dir(const std::string& prefix)
     return dir;
 }
 
-ExecutorContext make_context(TransactionId transaction_id, Snapshot snapshot)
+ExecutorContext make_context(TransactionId transaction_id,
+                             Snapshot snapshot,
+                             bored::txn::TransactionContext* txn = nullptr)
 {
     ExecutorContextConfig config{};
     config.transaction_id = transaction_id;
     config.snapshot = std::move(snapshot);
+    config.transaction = txn;
     return ExecutorContext{config};
 }
 
@@ -152,13 +156,45 @@ public:
         return manager_->flush_wal();
     }
 
+    std::error_code register_transaction_hooks(bored::txn::TransactionContext& txn,
+                                               ExecutorContext&) override
+    {
+        if (hooks_registered_) {
+            return {};
+        }
+
+        hooks_registered_ = true;
+
+        txn.on_commit([this]() {
+            commit_hook_invoked_ = true;
+            commit_flush_error_ = manager_->flush_wal();
+        });
+
+        txn.on_abort([this]() {
+            abort_hook_invoked_ = true;
+            abort_flush_error_ = manager_->flush_wal();
+        });
+
+        return manager_->flush_wal();
+    }
+
     const std::vector<InsertOutcome>& outcomes() const noexcept { return results_; }
+    bool hooks_registered() const noexcept { return hooks_registered_; }
+    bool commit_hook_invoked() const noexcept { return commit_hook_invoked_; }
+    bool abort_hook_invoked() const noexcept { return abort_hook_invoked_; }
+    std::error_code commit_flush_error() const noexcept { return commit_flush_error_; }
+    std::error_code abort_flush_error() const noexcept { return abort_flush_error_; }
 
 private:
     PageManager* manager_ = nullptr;
     std::span<std::byte> page_span_{};
     std::uint64_t next_row_id_ = 0U;
     std::vector<InsertOutcome> results_{};
+    bool hooks_registered_ = false;
+    bool commit_hook_invoked_ = false;
+    bool abort_hook_invoked_ = false;
+    std::error_code commit_flush_error_{};
+    std::error_code abort_flush_error_{};
 };
 
 }  // namespace
@@ -233,6 +269,136 @@ TEST_CASE("InsertExecutor writes tuples via PageManager")
 
     auto segment_path = wal_writer->segment_path(0U);
     REQUIRE(std::filesystem::exists(segment_path));
+
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("InsertExecutor registers transaction callbacks when context available")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_insert_executor_txn_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    wal_config.flush_on_commit = false;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(16) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 602U));
+
+    std::vector<std::string> rows{"delta", "echo"};
+    auto values_executor = std::make_unique<ValuesExecutor>(rows);
+
+    bored::executor::ExecutorTelemetry telemetry;
+
+    PageManagerInsertTarget target{&manager, page_span, 20'000U};
+
+    InsertExecutor::Config config{};
+    config.target = &target;
+    config.telemetry = &telemetry;
+
+    InsertExecutor executor{std::move(values_executor), config};
+
+    bored::txn::TransactionIdAllocatorStub allocator{4'000U};
+    bored::txn::TransactionManager txn_manager{allocator};
+    auto txn = txn_manager.begin();
+
+    Snapshot snapshot{};
+    snapshot.xmin = txn.id();
+    snapshot.xmax = txn_manager.next_transaction_id();
+    auto context = make_context(txn.id(), snapshot, &txn);
+
+    executor.open(context);
+
+    TupleBuffer sink_buffer{};
+    REQUIRE_FALSE(executor.next(context, sink_buffer));
+
+    executor.close(context);
+
+    REQUIRE(target.hooks_registered());
+    CHECK_FALSE(target.commit_hook_invoked());
+    CHECK_FALSE(target.abort_hook_invoked());
+
+    auto telemetry_before_commit = wal_writer->telemetry_snapshot();
+    CHECK(telemetry_before_commit.flush_calls >= 1U);  // initial flush during registration
+
+    txn_manager.commit(txn);
+
+    REQUIRE(target.commit_hook_invoked());
+    CHECK_FALSE(target.commit_flush_error());
+    CHECK_FALSE(target.abort_hook_invoked());
+
+    auto telemetry_after_commit = wal_writer->telemetry_snapshot();
+    CHECK(telemetry_after_commit.flush_calls >= telemetry_before_commit.flush_calls);
+
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("InsertExecutor abort callback flushes staged writes")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_insert_executor_abort_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    alignas(16) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, 603U));
+
+    std::vector<std::string> rows{"foxtrot"};
+    auto values_executor = std::make_unique<ValuesExecutor>(rows);
+
+    bored::executor::ExecutorTelemetry telemetry;
+
+    PageManagerInsertTarget target{&manager, page_span, 30'000U};
+
+    InsertExecutor::Config config{};
+    config.target = &target;
+    config.telemetry = &telemetry;
+
+    InsertExecutor executor{std::move(values_executor), config};
+
+    bored::txn::TransactionIdAllocatorStub allocator{5'000U};
+    bored::txn::TransactionManager txn_manager{allocator};
+    auto txn = txn_manager.begin();
+
+    Snapshot snapshot{};
+    snapshot.xmin = txn.id();
+    snapshot.xmax = txn_manager.next_transaction_id();
+    auto context = make_context(txn.id(), snapshot, &txn);
+
+    executor.open(context);
+
+    TupleBuffer sink_buffer{};
+    REQUIRE_FALSE(executor.next(context, sink_buffer));
+
+    executor.close(context);
+
+    REQUIRE(target.hooks_registered());
+    CHECK_FALSE(target.abort_hook_invoked());
+
+    txn_manager.abort(txn);
+
+    REQUIRE(target.abort_hook_invoked());
+    CHECK_FALSE(target.abort_flush_error());
+    CHECK_FALSE(target.commit_hook_invoked());
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();

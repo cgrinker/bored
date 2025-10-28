@@ -11,6 +11,10 @@
 #include <string>
 #include <system_error>
 
+namespace bored::txn {
+class TransactionContext;
+}
+
 namespace bored::executor {
 
 class InsertExecutor final : public ExecutorNode {
@@ -29,6 +33,13 @@ public:
                                              InsertStats& out_stats) = 0;
         virtual std::error_code flush(ExecutorContext& context)
         {
+            (void)context;
+            return {};
+        }
+        virtual std::error_code register_transaction_hooks(txn::TransactionContext& txn,
+                                                            ExecutorContext& context)
+        {
+            (void)txn;
             (void)context;
             return {};
         }
@@ -51,11 +62,13 @@ private:
     void drain_child(ExecutorContext& context);
     void apply_telemetry_attempt() const;
     void apply_telemetry_success(const InsertStats& stats) const;
+    void finalize_target(ExecutorContext& context);
 
     Config config_{};
     TupleBuffer child_buffer_{};
     bool child_open_ = false;
     bool drained_ = false;
+    bool transaction_hooks_registered_ = false;
 };
 
 }  // namespace bored::executor

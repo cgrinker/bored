@@ -7,6 +7,7 @@
 #include "bored/storage/page_manager.hpp"
 #include "bored/storage/page_operations.hpp"
 #include "bored/storage/wal_writer.hpp"
+#include "bored/txn/transaction_manager.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -61,11 +62,14 @@ std::filesystem::path make_temp_dir(const std::string& prefix)
     return dir;
 }
 
-ExecutorContext make_context(TransactionId transaction_id, Snapshot snapshot)
+ExecutorContext make_context(TransactionId transaction_id,
+                             Snapshot snapshot,
+                             bored::txn::TransactionContext* txn = nullptr)
 {
     ExecutorContextConfig config{};
     config.transaction_id = transaction_id;
     config.snapshot = std::move(snapshot);
+    config.transaction = txn;
     return ExecutorContext{config};
 }
 
@@ -183,12 +187,29 @@ public:
         return manager_->flush_wal();
     }
 
+    std::error_code register_transaction_hooks(bored::txn::TransactionContext& txn,
+                                               ExecutorContext&) override
+    {
+        if (hooks_registered_) {
+            return {};
+        }
+        hooks_registered_ = true;
+        txn.on_commit([this]() {
+            (void)manager_->flush_wal();
+        });
+        txn.on_abort([this]() {
+            (void)manager_->flush_wal();
+        });
+        return manager_->flush_wal();
+    }
+
     const std::vector<UpdateOutcome>& outcomes() const noexcept { return outcomes_; }
 
 private:
     PageManager* manager_ = nullptr;
     std::span<std::byte> page_span_{};
     std::vector<UpdateOutcome> outcomes_{};
+    bool hooks_registered_ = false;
 };
 
 }  // namespace

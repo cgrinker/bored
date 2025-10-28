@@ -42,6 +42,11 @@ std::pmr::memory_resource* ExecutorContext::scratch_resource() const noexcept
     return config_.scratch;
 }
 
+txn::TransactionContext* ExecutorContext::transaction_context() const noexcept
+{
+    return config_.transaction;
+}
+
 void ExecutorContext::set_transaction_id(txn::TransactionId transaction_id) noexcept
 {
     config_.transaction_id = transaction_id;
@@ -50,6 +55,11 @@ void ExecutorContext::set_transaction_id(txn::TransactionId transaction_id) noex
 void ExecutorContext::set_snapshot(txn::Snapshot snapshot) noexcept
 {
     config_.snapshot = std::move(snapshot);
+}
+
+void ExecutorContext::set_transaction_context(txn::TransactionContext* transaction) noexcept
+{
+    config_.transaction = transaction;
 }
 
 }  // namespace bored::executor

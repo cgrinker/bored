@@ -1,4 +1,5 @@
 #include "bored/executor/insert_executor.hpp"
+#include "bored/executor/executor_context.hpp"
 
 #include <stdexcept>
 
@@ -28,6 +29,7 @@ void InsertExecutor::open(ExecutorContext& context)
     child(0U)->open(context);
     child_open_ = true;
     drained_ = false;
+    transaction_hooks_registered_ = false;
 }
 
 bool InsertExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
@@ -52,11 +54,7 @@ void InsertExecutor::close(ExecutorContext& context)
 
     drained_ = true;
 
-    if (config_.target != nullptr) {
-        if (auto ec = config_.target->flush(context); ec) {
-            throw std::system_error(ec, "InsertExecutor target flush failed");
-        }
-    }
+    finalize_target(context);
 }
 
 void InsertExecutor::ensure_child_available() const
@@ -115,6 +113,31 @@ void InsertExecutor::apply_telemetry_success(const InsertStats& stats) const
     if (config_.telemetry != nullptr) {
         config_.telemetry->record_insert_success(stats.payload_bytes, stats.wal_bytes);
     }
+}
+
+void InsertExecutor::finalize_target(ExecutorContext& context)
+{
+    if (config_.target == nullptr) {
+        return;
+    }
+
+    auto* txn = context.transaction_context();
+    if (txn == nullptr) {
+        if (auto ec = config_.target->flush(context); ec) {
+            throw std::system_error(ec, "InsertExecutor target flush failed");
+        }
+        return;
+    }
+
+    if (transaction_hooks_registered_) {
+        return;
+    }
+
+    if (auto ec = config_.target->register_transaction_hooks(*txn, context); ec) {
+        throw std::system_error(ec, "InsertExecutor transaction hook registration failed");
+    }
+
+    transaction_hooks_registered_ = true;
 }
 
 }  // namespace bored::executor

@@ -1,4 +1,5 @@
 #include "bored/executor/update_executor.hpp"
+#include "bored/executor/executor_context.hpp"
 
 #include <stdexcept>
 
@@ -28,6 +29,7 @@ void UpdateExecutor::open(ExecutorContext& context)
     child(0U)->open(context);
     child_open_ = true;
     drained_ = false;
+    transaction_hooks_registered_ = false;
 }
 
 bool UpdateExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
@@ -52,11 +54,7 @@ void UpdateExecutor::close(ExecutorContext& context)
 
     drained_ = true;
 
-    if (config_.target != nullptr) {
-        if (auto ec = config_.target->flush(context); ec) {
-            throw std::system_error(ec, "UpdateExecutor target flush failed");
-        }
-    }
+    finalize_target(context);
 }
 
 void UpdateExecutor::ensure_child_available() const
@@ -117,6 +115,31 @@ void UpdateExecutor::apply_telemetry_success(const UpdateStats& stats) const
                                                  stats.old_payload_bytes,
                                                  stats.wal_bytes);
     }
+}
+
+void UpdateExecutor::finalize_target(ExecutorContext& context)
+{
+    if (config_.target == nullptr) {
+        return;
+    }
+
+    auto* txn = context.transaction_context();
+    if (txn == nullptr) {
+        if (auto ec = config_.target->flush(context); ec) {
+            throw std::system_error(ec, "UpdateExecutor target flush failed");
+        }
+        return;
+    }
+
+    if (transaction_hooks_registered_) {
+        return;
+    }
+
+    if (auto ec = config_.target->register_transaction_hooks(*txn, context); ec) {
+        throw std::system_error(ec, "UpdateExecutor transaction hook registration failed");
+    }
+
+    transaction_hooks_registered_ = true;
 }
 
 }  // namespace bored::executor

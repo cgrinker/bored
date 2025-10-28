@@ -52,7 +52,7 @@
 - [x] Implement Insert executor that consumes child rows, allocates heap tuples, and emits WAL via `PageManager` hooks.
 - [x] Implement Update executor handling before-image capture, overflow modifications, and commit visibility updates.
 - [x] Implement Delete executor that coordinates lock/undo logging and free space reclamation.
-- [ ] Wire executors into transaction manager callbacks to ensure commit/abort flows flush staged writes.
+- [x] Wire executors into transaction manager callbacks to ensure commit/abort flows flush staged writes.
 - [ ] Add regression tests covering crash-recovery of DML operations and verifying WAL segments via existing readers.
 
 ### Milestone 3 Notes
