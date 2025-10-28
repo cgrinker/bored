@@ -189,6 +189,7 @@ if(BORED_ENABLE_TESTS)
     tests/executor_insert_tests.cpp
     tests/executor_delete_tests.cpp
     tests/executor_update_tests.cpp
+    tests/executor_dml_recovery_tests.cpp
     tests/executor_join_aggregate_integration_tests.cpp
         tests/executor_milestone1_tests.cpp
     )

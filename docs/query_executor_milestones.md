@@ -53,7 +53,7 @@
 - [x] Implement Update executor handling before-image capture, overflow modifications, and commit visibility updates.
 - [x] Implement Delete executor that coordinates lock/undo logging and free space reclamation.
 - [x] Wire executors into transaction manager callbacks to ensure commit/abort flows flush staged writes.
-- [ ] Add regression tests covering crash-recovery of DML operations and verifying WAL segments via existing readers.
+- [x] Add regression tests covering crash-recovery of DML operations and verifying WAL segments via existing readers.
 
 ### Milestone 3 Notes
 - Insert executor drains child pipelines into a pluggable storage target that currently wraps `PageManager`, stamps tuple headers with the running transaction id, and flushes WAL as part of close semantics.
@@ -65,7 +65,8 @@
 - Latest validation: `./build-macos/bored_tests "UpdateExecutor applies updates via PageManager"`.
 - Delete executor now consumes row id/slot index tuples, issues `PageManager` deletes that capture before-images for undo, records reclaimed bytes/WAL metrics, and flushes WAL on close.
 - Latest validation: `./build-macos/bored_tests "DeleteExecutor removes tuples via PageManager"`.
-- Next steps: wire insert/update/delete executors into transaction manager commit/abort callbacks so staged WAL flushes at the right horizon, and extend tests to crash/recovery scenarios once undo walk plumbing is ready.
+- Added `tests/executor_dml_recovery_tests.cpp`, which drives insert/update/delete executors against `PageManager`, flushes WAL through the commit pipeline, and replays crash recovery via `WalReader`, `WalRecoveryDriver`, and `WalReplayer` to confirm page state and record sequencing.
+- Next steps: wire insert/update/delete executors into transaction manager commit/abort callbacks so staged WAL flushes at the right horizon, and extend tests to multi-page crash/recovery scenarios once undo walk plumbing is ready.
 
 ## Milestone 4: Execution Services & Diagnostics (0.5 sprint)
 - [ ] Introduce executor telemetry samplers (rows produced, latency per operator) and register with diagnostics JSON.
