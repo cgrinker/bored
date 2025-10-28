@@ -1,0 +1,45 @@
+#include "bored/executor/executor_context.hpp"
+
+#include <utility>
+
+namespace bored::executor {
+
+ExecutorContext::ExecutorContext()
+{
+    config_.scratch = std::pmr::get_default_resource();
+}
+
+ExecutorContext::ExecutorContext(ExecutorContextConfig config)
+    : config_{std::move(config)}
+{
+    if (config_.scratch == nullptr) {
+        config_.scratch = std::pmr::get_default_resource();
+    }
+}
+
+const bored::catalog::CatalogAccessor* ExecutorContext::catalog() const noexcept
+{
+    return config_.catalog;
+}
+
+const bored::planner::StatisticsCatalog* ExecutorContext::statistics() const noexcept
+{
+    return config_.statistics;
+}
+
+const txn::Snapshot& ExecutorContext::snapshot() const noexcept
+{
+    return config_.snapshot;
+}
+
+std::pmr::memory_resource* ExecutorContext::scratch_resource() const noexcept
+{
+    return config_.scratch;
+}
+
+void ExecutorContext::set_snapshot(txn::Snapshot snapshot) noexcept
+{
+    config_.snapshot = std::move(snapshot);
+}
+
+}  // namespace bored::executor

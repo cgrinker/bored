@@ -58,7 +58,7 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
      - Collect and maintain catalog statistics for cardinality estimates.
      - Produce operator pipelines compatible with the executor framework.
 
-7. **Query Executor Framework**
+7. **Query Executor Framework** _(Milestones tracked in [query_executor_milestones.md](query_executor_milestones.md))_
    - **Responsibilities:** Execute physical plans using iterator or pipeline model; coordinate buffer and WAL interaction during data access and mutation.
    - **Prerequisites:** Planned physical operators; transaction manager for locking; storage engine APIs for page/tuple access.
    - **Key Tasks:**
