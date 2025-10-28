@@ -49,7 +49,8 @@
 	- Physical plans now annotate ordering and partitioning columns, propagating metadata from scans through projections and joins for downstream executor validation.
 - [x] Wire transaction snapshot awareness into scan primitives (visibility filters, lock modes).
 	- Planner lowering now attaches MVCC snapshots to table scans when required, ensuring executors can enforce visibility and lock semantics without re-querying context.
-- [ ] Ensure DML statements (INSERT/UPDATE/DELETE) request the correct physical write operators with WAL prerequisites.
+- [x] Ensure DML statements (INSERT/UPDATE/DELETE) request the correct physical write operators with WAL prerequisites.
+	- Planner lowering now maps DML logical nodes to physical Insert/Update/Delete operators, attaching MVCC snapshots for update/delete and preserving relation metadata for WAL staging.
 - [ ] Expand integration tests to run planner + executor smoke tests using Catch2.
 
 ## Milestone 4: Diagnostics, Telemetry & Hardening (0.5 sprint)

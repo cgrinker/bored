@@ -17,7 +17,10 @@ enum class LogicalOperatorType {
     Filter,
     Join,
     TableScan,
-    Values
+    Values,
+    Insert,
+    Update,
+    Delete
 };
 
 struct LogicalProperties final {

@@ -39,6 +39,12 @@ PhysicalOperatorType to_physical(LogicalOperatorType type) noexcept
         return PhysicalOperatorType::SeqScan;
     case LogicalOperatorType::Values:
         return PhysicalOperatorType::Values;
+    case LogicalOperatorType::Insert:
+        return PhysicalOperatorType::Insert;
+    case LogicalOperatorType::Update:
+        return PhysicalOperatorType::Update;
+    case LogicalOperatorType::Delete:
+        return PhysicalOperatorType::Delete;
     case LogicalOperatorType::Invalid:
     default:
         return PhysicalOperatorType::NoOp;
@@ -106,6 +112,19 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
         } else {
             operator_type = PhysicalOperatorType::NestedLoopJoin;
         }
+    }
+
+    if (logical->type() == LogicalOperatorType::Update || logical->type() == LogicalOperatorType::Delete) {
+        properties.requires_visibility_check = true;
+        properties.snapshot = context.snapshot();
+    }
+
+    if (logical->type() == LogicalOperatorType::Insert) {
+        operator_type = PhysicalOperatorType::Insert;
+    } else if (logical->type() == LogicalOperatorType::Update) {
+        operator_type = PhysicalOperatorType::Update;
+    } else if (logical->type() == LogicalOperatorType::Delete) {
+        operator_type = PhysicalOperatorType::Delete;
     }
 
     return PhysicalOperator::make(operator_type, std::move(lowered_children), std::move(properties));

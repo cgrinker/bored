@@ -17,7 +17,10 @@ enum class PhysicalOperatorType {
     SeqScan,
     NestedLoopJoin,
     HashJoin,
-    Values
+    Values,
+    Insert,
+    Update,
+    Delete
 };
 
 struct PhysicalProperties final {

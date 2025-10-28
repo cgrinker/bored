@@ -307,3 +307,109 @@ TEST_CASE("plan_query selects hash join when both inputs exceed threshold")
     std::sort(partitions.begin(), partitions.end());
     CHECK(partitions == std::vector<std::string>{"customer_id", "order_id"});
 }
+
+TEST_CASE("plan_query lowers insert into physical insert operator")
+{
+    auto values = LogicalOperator::make(LogicalOperatorType::Values, {});
+
+    LogicalProperties insert_props{};
+    insert_props.relation_name = "public.inbox";
+    insert_props.output_columns = {"message", "created_at"};
+
+    auto insert_logical = LogicalOperator::make(
+        LogicalOperatorType::Insert,
+        std::vector<LogicalOperatorPtr>{values},
+        insert_props);
+
+    LogicalPlan plan{insert_logical};
+    PlannerContext context{};
+
+    PlannerResult result = plan_query(context, plan);
+    auto root = result.plan.root();
+    REQUIRE(root);
+    CHECK(root->type() == PhysicalOperatorType::Insert);
+    CHECK(root->properties().relation_name == "public.inbox");
+    CHECK(root->properties().output_columns == std::vector<std::string>{"message", "created_at"});
+    CHECK_FALSE(root->properties().requires_visibility_check);
+    CHECK_FALSE(root->properties().snapshot.has_value());
+    REQUIRE(root->children().size() == 1U);
+    CHECK(root->children().front()->type() == PhysicalOperatorType::Values);
+}
+
+TEST_CASE("plan_query lowers update into physical update operator with snapshot")
+{
+    auto scan = make_table_scan("public.accounts", 100U, {"account_id", "balance"});
+
+    LogicalProperties update_props{};
+    update_props.relation_name = "public.accounts";
+    update_props.output_columns = {"account_id", "balance"};
+
+    auto update_logical = LogicalOperator::make(
+        LogicalOperatorType::Update,
+        std::vector<LogicalOperatorPtr>{scan},
+        update_props);
+
+    LogicalPlan plan{update_logical};
+
+    Snapshot snapshot{};
+    snapshot.read_lsn = 128U;
+    snapshot.xmin = 10U;
+    snapshot.xmax = 20U;
+
+    PlannerContextConfig config{};
+    config.snapshot = snapshot;
+    PlannerContext context{config};
+
+    PlannerResult result = plan_query(context, plan);
+    auto root = result.plan.root();
+    REQUIRE(root);
+    CHECK(root->type() == PhysicalOperatorType::Update);
+    CHECK(root->properties().relation_name == "public.accounts");
+    CHECK(root->properties().requires_visibility_check);
+    REQUIRE(root->properties().snapshot.has_value());
+    const auto& physical_snapshot = *root->properties().snapshot;
+    CHECK(physical_snapshot.read_lsn == 128U);
+    CHECK(physical_snapshot.xmin == 10U);
+    CHECK(physical_snapshot.xmax == 20U);
+    REQUIRE(root->children().size() == 1U);
+    CHECK(root->children().front()->type() == PhysicalOperatorType::SeqScan);
+}
+
+TEST_CASE("plan_query lowers delete into physical delete operator with snapshot")
+{
+    auto scan = make_table_scan("public.sessions", 200U, {"session_id"});
+
+    LogicalProperties delete_props{};
+    delete_props.relation_name = "public.sessions";
+    delete_props.output_columns = {"session_id"};
+
+    auto delete_logical = LogicalOperator::make(
+        LogicalOperatorType::Delete,
+        std::vector<LogicalOperatorPtr>{scan},
+        delete_props);
+
+    LogicalPlan plan{delete_logical};
+
+    Snapshot snapshot{};
+    snapshot.read_lsn = 256U;
+    snapshot.xmin = 11U;
+    snapshot.xmax = 21U;
+
+    PlannerContextConfig config{};
+    config.snapshot = snapshot;
+    PlannerContext context{config};
+
+    PlannerResult result = plan_query(context, plan);
+    auto root = result.plan.root();
+    REQUIRE(root);
+    CHECK(root->type() == PhysicalOperatorType::Delete);
+    CHECK(root->properties().relation_name == "public.sessions");
+    CHECK(root->properties().requires_visibility_check);
+    REQUIRE(root->properties().snapshot.has_value());
+    const auto& physical_snapshot = *root->properties().snapshot;
+    CHECK(physical_snapshot.read_lsn == 256U);
+    CHECK(physical_snapshot.xmin == 11U);
+    CHECK(physical_snapshot.xmax == 21U);
+    REQUIRE(root->children().size() == 1U);
+    CHECK(root->children().front()->type() == PhysicalOperatorType::SeqScan);
+}
