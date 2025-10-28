@@ -20,6 +20,7 @@ struct PlanCost final {
 struct CostEstimate final {
     PlanCost cost{};
     double output_rows = 0.0;
+    std::size_t recommended_batch_size = 0U;
 };
 
 class CostModel final {

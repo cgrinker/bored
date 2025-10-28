@@ -47,8 +47,8 @@ TEST_CASE("explain_plan renders hierarchy with properties and snapshot")
 
     const auto rendered = explain_plan(plan, options);
 
-    CHECK_THAT(rendered, ContainsSubstring("Projection [output=[order_id, customer_id], ordering=[order_id]]"));
-    CHECK_THAT(rendered, ContainsSubstring("\n  - SeqScan [cardinality=512, relation=public.orders, output=[order_id, customer_id], partitioning=[order_id, customer_id], visibility=required, snapshot={read_lsn=128, xmin=7, xmax=21, in_progress_count=2}]"));
+    CHECK_THAT(rendered, ContainsSubstring("Projection [output=[order_id, customer_id], ordering=[order_id], batch=128]"));
+    CHECK_THAT(rendered, ContainsSubstring("\n  - SeqScan [cardinality=512, relation=public.orders, output=[order_id, customer_id], partitioning=[order_id, customer_id], visibility=required, snapshot={read_lsn=128, xmin=7, xmax=21, in_progress_count=2}, batch=128]"));
 }
 
 TEST_CASE("explain_plan can omit properties")
@@ -61,6 +61,33 @@ TEST_CASE("explain_plan can omit properties")
 
     const auto rendered = explain_plan(plan, options);
     CHECK(rendered == "SeqScan");
+}
+
+TEST_CASE("explain_plan renders join strategy hint")
+{
+    PhysicalProperties left_props{};
+    left_props.expected_cardinality = 1024U;
+    left_props.output_columns = {"left_key"};
+    left_props.expected_batch_size = 256U;
+
+    PhysicalProperties right_props{};
+    right_props.expected_cardinality = 1024U;
+    right_props.output_columns = {"right_key"};
+    right_props.expected_batch_size = 256U;
+
+    auto left = PhysicalOperator::make(PhysicalOperatorType::SeqScan, {}, left_props);
+    auto right = PhysicalOperator::make(PhysicalOperatorType::SeqScan, {}, right_props);
+
+    PhysicalProperties join_props{};
+    join_props.expected_cardinality = 1024U;
+    join_props.expected_batch_size = 128U;
+    join_props.executor_strategy = "hash(build=left, probe=right)";
+
+    auto join = PhysicalOperator::make(PhysicalOperatorType::HashJoin, {left, right}, join_props);
+    PhysicalPlan plan{join};
+
+    const auto rendered = explain_plan(plan);
+    CHECK_THAT(rendered, ContainsSubstring("HashJoin [batch=128, strategy=hash(build=left, probe=right)]"));
 }
 
 }  // namespace bored::planner

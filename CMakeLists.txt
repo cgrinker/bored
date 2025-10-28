@@ -183,6 +183,7 @@ if(BORED_ENABLE_TESTS)
         tests/executor_nested_loop_join_tests.cpp
     tests/executor_hash_join_tests.cpp
     tests/executor_aggregation_tests.cpp
+    tests/executor_join_aggregate_integration_tests.cpp
         tests/executor_milestone1_tests.cpp
     )
 

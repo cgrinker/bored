@@ -17,6 +17,20 @@ namespace bored::planner {
 namespace {
 
 constexpr std::size_t kHashJoinThreshold = 500U;
+constexpr std::size_t kDefaultBatchSize = 128U;
+constexpr std::size_t kMaxBatchSize = 1024U;
+
+std::size_t default_batch_size(std::size_t cardinality) noexcept
+{
+    if (cardinality == 0U) {
+        return kDefaultBatchSize;
+    }
+    const auto quarter = cardinality / 4U;
+    if (quarter == 0U) {
+        return 1U;
+    }
+    return std::clamp<std::size_t>(quarter, 1U, kMaxBatchSize);
+}
 
 void append_unique(std::vector<std::string>& target, const std::vector<std::string>& values)
 {
@@ -63,9 +77,12 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
         return PhysicalOperator::make(PhysicalOperatorType::NoOp);
     }
 
+    const auto* cost_model = context.cost_model();
+
     std::vector<PhysicalOperatorPtr> lowered_children;
-    lowered_children.reserve(logical->children().size());
-    for (const auto& child : logical->children()) {
+    const auto& logical_children = logical->children();
+    lowered_children.reserve(logical_children.size());
+    for (const auto& child : logical_children) {
         lowered_children.push_back(lower_placeholder(context, child));
     }
 
@@ -76,6 +93,15 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
     properties.preserves_order = logical->properties().preserves_order;
     properties.relation_name = logical->properties().relation_name;
     properties.output_columns = logical->properties().output_columns;
+    if (cost_model != nullptr) {
+        const auto estimate = cost_model->estimate_plan(logical);
+        if (properties.expected_cardinality == 0U && estimate.output_rows > 0.0) {
+            properties.expected_cardinality = static_cast<std::size_t>(std::max(1.0, estimate.output_rows));
+        }
+        if (estimate.recommended_batch_size != 0U) {
+            properties.expected_batch_size = estimate.recommended_batch_size;
+        }
+    }
     if (logical->type() == LogicalOperatorType::TableScan) {
         properties.requires_visibility_check = snapshot_requires_visibility(context.snapshot());
         if (properties.requires_visibility_check) {
@@ -106,12 +132,29 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
             properties.ordering_columns = lowered_children[0]->properties().ordering_columns;
         }
 
-        const auto left_cardinality = lowered_children[0]->properties().expected_cardinality;
-        const auto right_cardinality = lowered_children[1]->properties().expected_cardinality;
+        auto left_cardinality = lowered_children[0]->properties().expected_cardinality;
+        auto right_cardinality = lowered_children[1]->properties().expected_cardinality;
+        if (cost_model != nullptr) {
+            if (left_cardinality == 0U && !logical_children.empty()) {
+                const auto estimate = cost_model->estimate_plan(logical_children[0]);
+                if (estimate.output_rows > 0.0) {
+                    left_cardinality = static_cast<std::size_t>(std::max(1.0, estimate.output_rows));
+                }
+            }
+            if (right_cardinality == 0U && logical_children.size() >= 2U) {
+                const auto estimate = cost_model->estimate_plan(logical_children[1]);
+                if (estimate.output_rows > 0.0) {
+                    right_cardinality = static_cast<std::size_t>(std::max(1.0, estimate.output_rows));
+                }
+            }
+        }
+
         if (left_cardinality >= kHashJoinThreshold && right_cardinality >= kHashJoinThreshold) {
             operator_type = PhysicalOperatorType::HashJoin;
+            properties.executor_strategy = "hash(build=left, probe=right)";
         } else {
             operator_type = PhysicalOperatorType::NestedLoopJoin;
+            properties.executor_strategy = "nested-loop(probe=right)";
         }
     }
 
@@ -129,6 +172,9 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
     }
 
     properties.executor_operator_id = context.allocate_executor_operator_id();
+    if (properties.expected_batch_size == 0U) {
+        properties.expected_batch_size = default_batch_size(properties.expected_cardinality);
+    }
 
     return PhysicalOperator::make(operator_type, std::move(lowered_children), std::move(properties));
 }

@@ -99,6 +99,12 @@ std::string describe(const PhysicalOperatorPtr& node, const ExplainOptions& opti
     if (options.include_snapshot && props.snapshot.has_value()) {
         details.push_back("snapshot=" + format_snapshot(*props.snapshot));
     }
+    if (props.expected_batch_size != 0U) {
+        details.push_back("batch=" + std::to_string(props.expected_batch_size));
+    }
+    if (!props.executor_strategy.empty()) {
+        details.push_back("strategy=" + props.executor_strategy);
+    }
 
     if (details.empty()) {
         return description;

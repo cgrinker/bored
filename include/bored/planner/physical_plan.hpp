@@ -33,6 +33,8 @@ struct PhysicalProperties final {
     std::vector<std::string> partitioning_columns{};
     std::vector<std::string> output_columns{};
     std::uint64_t executor_operator_id = 0U;
+    std::size_t expected_batch_size = 0U;
+    std::string executor_strategy{};
 };
 
 class PhysicalOperator;

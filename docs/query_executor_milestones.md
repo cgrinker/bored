@@ -36,15 +36,17 @@
 - [x] Implement Nested Loop Join executor supporting parameterized probe inputs and basic predicate evaluation.
 - [x] Provide Hash Join skeleton with in-memory hash table, build/probe phases, and spill TODO markers.
 - [x] Add Aggregation executor (hash/group aggregate) with accumulator guards for overflow and null semantics.
-- [ ] Extend planner cost model/explain output to emit executor-specific metadata (batch sizes, join strategy hints).
-- [ ] Cover new operators with integration tests that compare against known-good query outputs and verify telemetry (join rows, aggregation groups).
+- [x] Extend planner cost model/explain output to emit executor-specific metadata (batch sizes, join strategy hints).
+- [x] Cover new operators with integration tests that compare against known-good query outputs and verify telemetry (join rows, aggregation groups).
 
 ### Milestone 2 Notes
 - Nested loop join reuses the iterator contract with optional probe rebinding callbacks so parameterized scans (e.g., index lookups) can react to the outer tuple prior to each probe.
 - Join output defaults to concatenating child columns, with projection hooks for downstream shape control; telemetry tracks comparisons, matches, and emitted rows.
 - Hash join materialises build-side tuple buffers and exposes projection hooks alongside telemetry for build/probe/match counts; spill integration remains TODO.
 - Aggregation executor groups by caller-provided keys, maintains per-group aggregate state via callback-defined accumulators, and reports input/group counts through executor telemetry.
-- Upcoming follow-ups: (1) propagate join/aggregate operator metadata into the planner explain pipeline, (2) add mixed join+aggregate integration scenarios, and (3) prototype aggregation spill/reclaim policies once the temp storage story is defined.
+- Explain output now surfaces per-operator batch heuristics (sourced from the cost model) and join strategy hints consumed by diagnostics tooling.
+- Added an integration pipeline that joins customer/order fixtures, rolls up counts, and asserts executor telemetry snapshots for both operators.
+- Remaining follow-ups: (1) calibrate cost-model batch heuristics against benchmark workloads, (2) exercise join+aggregate pipelines with filter/projection chains, and (3) prototype aggregation spill/reclaim policies once temporary storage is available.
 
 ## Milestone 3: DML & WAL Coordination (1 sprint)
 - [ ] Implement Insert executor that consumes child rows, allocates heap tuples, and emits WAL via `PageManager` hooks.

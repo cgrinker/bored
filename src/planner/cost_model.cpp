@@ -11,6 +11,17 @@ constexpr double kFilterCpuPerTuple = 0.0005;
 constexpr double kProjectionCpuPerTuple = 0.00025;
 constexpr double kJoinCpuPerPair = 0.00001;
 constexpr double kJoinIoPerInputTuple = 0.0025;
+constexpr double kDefaultBatchDivisor = 4.0;
+constexpr double kMaxBatchSize = 1024.0;
+
+std::size_t recommend_batch_size(double rows)
+{
+    if (rows <= 0.0) {
+        return 1U;
+    }
+    const auto recommended = std::clamp(rows / kDefaultBatchDivisor, 1.0, kMaxBatchSize);
+    return static_cast<std::size_t>(recommended);
+}
 
 CostEstimate combine_children(const CostEstimate& left, const CostEstimate& right)
 {
@@ -18,6 +29,7 @@ CostEstimate combine_children(const CostEstimate& left, const CostEstimate& righ
     combined.cost.io = left.cost.io + right.cost.io;
     combined.cost.cpu = left.cost.cpu + right.cost.cpu;
     combined.output_rows = left.output_rows + right.output_rows;
+    combined.recommended_batch_size = std::max(left.recommended_batch_size, right.recommended_batch_size);
     return combined;
 }
 
@@ -45,7 +57,11 @@ CostEstimate CostModel::estimate_node(const LogicalOperatorPtr& node) const
         PlanCost cost;
         cost.io = rows * kScanIoPerTuple;
         cost.cpu = rows * kScanCpuPerTuple;
-        return {cost, rows};
+        CostEstimate estimate{};
+        estimate.cost = cost;
+        estimate.output_rows = rows;
+        estimate.recommended_batch_size = recommend_batch_size(rows);
+        return estimate;
     }
     case LogicalOperatorType::Filter: {
         const auto& children = node->children();
@@ -58,6 +74,7 @@ CostEstimate CostModel::estimate_node(const LogicalOperatorPtr& node) const
 
         // Assume selectivity reduces rows by half for baseline costing.
         child_estimate.output_rows = std::max(1.0, child_estimate.output_rows * 0.5);
+        child_estimate.recommended_batch_size = recommend_batch_size(child_estimate.output_rows);
         return child_estimate;
     }
     case LogicalOperatorType::Projection: {
@@ -68,6 +85,7 @@ CostEstimate CostModel::estimate_node(const LogicalOperatorPtr& node) const
 
         auto child_estimate = estimate_node(children.front());
         child_estimate.cost.cpu += child_estimate.output_rows * kProjectionCpuPerTuple;
+        child_estimate.recommended_batch_size = recommend_batch_size(child_estimate.output_rows);
         return child_estimate;
     }
     case LogicalOperatorType::Join: {
@@ -93,6 +111,7 @@ CostEstimate CostModel::estimate_node(const LogicalOperatorPtr& node) const
         result.cost = cost;
         // Baseline join cardinality heuristic: minimum of inputs.
         result.output_rows = std::max(1.0, std::min(left_rows, right_rows));
+        result.recommended_batch_size = recommend_batch_size(result.output_rows);
         return result;
     }
     case LogicalOperatorType::Values:
@@ -105,6 +124,7 @@ CostEstimate CostModel::estimate_node(const LogicalOperatorPtr& node) const
 
         if (node->properties().estimated_cardinality > 0U) {
             aggregate.output_rows = static_cast<double>(node->properties().estimated_cardinality);
+            aggregate.recommended_batch_size = recommend_batch_size(aggregate.output_rows);
         }
 
         return aggregate;
