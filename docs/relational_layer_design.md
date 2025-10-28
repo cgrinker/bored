@@ -50,7 +50,7 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
      - Instrument page and tuple access with latching and locking APIs.
      - Extend retention manager coordination so obsolete snapshots retire safely.
 
-6. **Query Planner & Optimizer**
+6. **Query Planner & Optimizer** _(Milestones tracked in [query_planner_milestones.md](query_planner_milestones.md))_
    - **Responsibilities:** Transform logical plans into executable physical plans, applying rule-based and cost-based optimizations.
    - **Prerequisites:** AST/IR layer; catalog statistics; transaction manager for isolation-aware decisions.
    - **Key Tasks:**
