@@ -193,6 +193,12 @@ bored::planner::PlannerTelemetrySnapshot& accumulate(bored::planner::PlannerTele
 bored::executor::ExecutorTelemetrySnapshot& accumulate(bored::executor::ExecutorTelemetrySnapshot& target,
                                                         const bored::executor::ExecutorTelemetrySnapshot& source)
 {
+    auto accumulate_latency = [](auto& lhs, const auto& rhs) {
+        lhs.invocations += rhs.invocations;
+        lhs.total_duration_ns += rhs.total_duration_ns;
+        lhs.last_duration_ns = std::max(lhs.last_duration_ns, rhs.last_duration_ns);
+    };
+
     target.seq_scan_rows_read += source.seq_scan_rows_read;
     target.seq_scan_rows_visible += source.seq_scan_rows_visible;
     target.filter_rows_evaluated += source.filter_rows_evaluated;
@@ -219,6 +225,16 @@ bored::executor::ExecutorTelemetrySnapshot& accumulate(bored::executor::Executor
     target.delete_rows_succeeded += source.delete_rows_succeeded;
     target.delete_reclaimed_bytes += source.delete_reclaimed_bytes;
     target.delete_wal_bytes += source.delete_wal_bytes;
+
+    accumulate_latency(target.seq_scan_latency, source.seq_scan_latency);
+    accumulate_latency(target.filter_latency, source.filter_latency);
+    accumulate_latency(target.projection_latency, source.projection_latency);
+    accumulate_latency(target.nested_loop_latency, source.nested_loop_latency);
+    accumulate_latency(target.hash_join_latency, source.hash_join_latency);
+    accumulate_latency(target.aggregation_latency, source.aggregation_latency);
+    accumulate_latency(target.insert_latency, source.insert_latency);
+    accumulate_latency(target.update_latency, source.update_latency);
+    accumulate_latency(target.delete_latency, source.delete_latency);
     return target;
 }
 

@@ -63,6 +63,7 @@ add_library(${PROJECT_NAME}_lib
     src/executor/tuple_format.cpp
     src/executor/mvcc_visibility.cpp
     src/executor/executor_telemetry.cpp
+    src/executor/executor_telemetry_sampler.cpp
     src/executor/seq_scan_executor.cpp
     src/executor/filter_executor.cpp
     src/executor/projection_executor.cpp
@@ -254,6 +255,20 @@ if(BORED_ENABLE_BENCHMARKS)
     )
 
     target_compile_features(${PROJECT_NAME}_planner_benchmarks
+        PUBLIC
+            cxx_std_20
+    )
+
+    add_executable(${PROJECT_NAME}_executor_benchmarks
+        benchmarks/executor_benchmarks.cpp
+    )
+
+    target_link_libraries(${PROJECT_NAME}_executor_benchmarks
+        PRIVATE
+            ${PROJECT_NAME}_lib
+    )
+
+    target_compile_features(${PROJECT_NAME}_executor_benchmarks
         PUBLIC
             cxx_std_20
     )

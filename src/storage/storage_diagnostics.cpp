@@ -63,6 +63,17 @@ void append_latch_snapshot(std::string& out, const LatchTelemetrySnapshot& snaps
     out.push_back('}');
 }
 
+void append_operator_latency_snapshot(std::string& out,
+                                      const bored::executor::ExecutorTelemetrySnapshot::OperatorLatencySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "invocations", snapshot.invocations, first);
+    append_field(out, "total_duration_ns", snapshot.total_duration_ns, first);
+    append_field(out, "last_duration_ns", snapshot.last_duration_ns, first);
+    out.push_back('}');
+}
+
 void append_json_string(std::string& out, const std::string& value)
 {
     out.push_back('"');
@@ -343,6 +354,28 @@ void append_executor_snapshot(std::string& out, const bored::executor::ExecutorT
     append_field(out, "delete_rows_succeeded", snapshot.delete_rows_succeeded, first);
     append_field(out, "delete_reclaimed_bytes", snapshot.delete_reclaimed_bytes, first);
     append_field(out, "delete_wal_bytes", snapshot.delete_wal_bytes, first);
+
+    auto append_latency = [&](const char* name,
+                              const bored::executor::ExecutorTelemetrySnapshot::OperatorLatencySnapshot& latency) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('"');
+        out.append(name);
+        out.append("\":");
+        append_operator_latency_snapshot(out, latency);
+    };
+
+    append_latency("seq_scan_latency", snapshot.seq_scan_latency);
+    append_latency("filter_latency", snapshot.filter_latency);
+    append_latency("projection_latency", snapshot.projection_latency);
+    append_latency("nested_loop_latency", snapshot.nested_loop_latency);
+    append_latency("hash_join_latency", snapshot.hash_join_latency);
+    append_latency("aggregation_latency", snapshot.aggregation_latency);
+    append_latency("insert_latency", snapshot.insert_latency);
+    append_latency("update_latency", snapshot.update_latency);
+    append_latency("delete_latency", snapshot.delete_latency);
     out.push_back('}');
 }
 

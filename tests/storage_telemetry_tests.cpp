@@ -1,3 +1,4 @@
+#include "bored/executor/executor_telemetry_sampler.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 
 #include <catch2/catch_approx.hpp>
@@ -16,6 +17,7 @@ using Catch::Approx;
 namespace ddl = bored::ddl;
 namespace parser = bored::parser;
 namespace planner = bored::planner;
+namespace executor = bored::executor;
 
 namespace {
 
@@ -172,6 +174,56 @@ planner::PlannerTelemetrySnapshot make_planner_snapshot(std::uint64_t base)
     snapshot.last_chosen_cost = static_cast<double>((base + 6U) * 7U);
     snapshot.min_chosen_cost = static_cast<double>(base + 1U);
     snapshot.max_chosen_cost = static_cast<double>((base + 7U) * 5U);
+    return snapshot;
+}
+
+executor::ExecutorTelemetrySnapshot make_executor_snapshot(std::uint64_t seed)
+{
+    executor::ExecutorTelemetrySnapshot snapshot{};
+    snapshot.seq_scan_rows_read = seed + 1U;
+    snapshot.seq_scan_rows_visible = seed + 2U;
+    snapshot.filter_rows_evaluated = seed + 3U;
+    snapshot.filter_rows_passed = seed + 1U;
+    snapshot.projection_rows_emitted = seed + 4U;
+    snapshot.nested_loop_rows_compared = seed + 5U;
+    snapshot.nested_loop_rows_matched = seed + 2U;
+    snapshot.nested_loop_rows_emitted = seed + 2U;
+    snapshot.hash_join_build_rows = seed + 6U;
+    snapshot.hash_join_probe_rows = seed + 7U;
+    snapshot.hash_join_rows_matched = seed + 3U;
+    snapshot.aggregation_input_rows = seed + 8U;
+    snapshot.aggregation_groups_emitted = seed + 4U;
+    snapshot.insert_rows_attempted = seed + 5U;
+    snapshot.insert_rows_succeeded = seed + 5U;
+    snapshot.insert_payload_bytes = (seed + 1U) * 10U;
+    snapshot.insert_wal_bytes = (seed + 1U) * 12U;
+    snapshot.update_rows_attempted = seed + 6U;
+    snapshot.update_rows_succeeded = seed + 6U;
+    snapshot.update_new_payload_bytes = (seed + 2U) * 9U;
+    snapshot.update_old_payload_bytes = (seed + 3U) * 9U;
+    snapshot.update_wal_bytes = (seed + 4U) * 11U;
+    snapshot.delete_rows_attempted = seed + 7U;
+    snapshot.delete_rows_succeeded = seed + 7U;
+    snapshot.delete_reclaimed_bytes = (seed + 2U) * 7U;
+    snapshot.delete_wal_bytes = (seed + 3U) * 8U;
+
+    auto make_latency = [&](std::uint64_t base) {
+        executor::ExecutorTelemetrySnapshot::OperatorLatencySnapshot latency{};
+        latency.invocations = base + 1U;
+        latency.total_duration_ns = (base + 2U) * 10U;
+        latency.last_duration_ns = (base + 3U) * 5U;
+        return latency;
+    };
+
+    snapshot.seq_scan_latency = make_latency(seed);
+    snapshot.filter_latency = make_latency(seed + 10U);
+    snapshot.projection_latency = make_latency(seed + 20U);
+    snapshot.nested_loop_latency = make_latency(seed + 30U);
+    snapshot.hash_join_latency = make_latency(seed + 40U);
+    snapshot.aggregation_latency = make_latency(seed + 50U);
+    snapshot.insert_latency = make_latency(seed + 60U);
+    snapshot.update_latency = make_latency(seed + 70U);
+    snapshot.delete_latency = make_latency(seed + 80U);
     return snapshot;
 }
 
@@ -373,6 +425,64 @@ TEST_CASE("StorageTelemetryRegistry visits planner samplers")
     REQUIRE(std::find(ids.begin(), ids.end(), "planner_a") != ids.end());
     REQUIRE(std::find(ids.begin(), ids.end(), "planner_b") != ids.end());
     REQUIRE(snapshots.size() == 2U);
+}
+
+TEST_CASE("StorageTelemetryRegistry aggregates executor telemetry")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_executor("exec_a", [] { return make_executor_snapshot(2U); });
+    registry.register_executor("exec_b", [] { return make_executor_snapshot(5U); });
+
+    const auto total = registry.aggregate_executors();
+
+    REQUIRE(total.seq_scan_rows_read == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(total.seq_scan_rows_visible == ((2U + 2U) + (5U + 2U)));
+    REQUIRE(total.hash_join_rows_matched == ((2U + 3U) + (5U + 3U)));
+    REQUIRE(total.seq_scan_latency.invocations == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(total.seq_scan_latency.total_duration_ns == ((2U + 2U) * 10U + (5U + 2U) * 10U));
+    REQUIRE(total.seq_scan_latency.last_duration_ns == std::max((2U + 3U) * 5U, (5U + 3U) * 5U));
+}
+
+TEST_CASE("StorageTelemetryRegistry visits executor samplers")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_executor("exec_a", [] { return make_executor_snapshot(3U); });
+    registry.register_executor("exec_b", [] { return make_executor_snapshot(6U); });
+
+    std::vector<std::string> ids;
+    std::vector<executor::ExecutorTelemetrySnapshot> snapshots;
+
+    registry.visit_executors([&](const std::string& id, const executor::ExecutorTelemetrySnapshot& snapshot) {
+        ids.push_back(id);
+        snapshots.push_back(snapshot);
+    });
+
+    REQUIRE(ids.size() == 2U);
+    REQUIRE(std::find(ids.begin(), ids.end(), "exec_a") != ids.end());
+    REQUIRE(std::find(ids.begin(), ids.end(), "exec_b") != ids.end());
+    REQUIRE(!snapshots.empty());
+}
+
+TEST_CASE("ExecutorTelemetrySampler manages registry registration")
+{
+    StorageTelemetryRegistry registry;
+    executor::ExecutorTelemetry telemetry;
+
+    {
+        executor::ExecutorTelemetrySampler sampler{&registry, "exec_sampler", &telemetry};
+        telemetry.record_projection_row();
+        telemetry.record_seq_scan_row(true);
+
+        const auto snapshot = registry.aggregate_executors();
+        REQUIRE(snapshot.projection_rows_emitted == 1U);
+        REQUIRE(snapshot.seq_scan_rows_visible == 1U);
+        REQUIRE(snapshot.seq_scan_latency.invocations == 0U);  // latency recorded separately via scope
+        REQUIRE(sampler.registered());
+    }
+
+    const auto after = registry.aggregate_executors();
+    REQUIRE(after.projection_rows_emitted == 0U);
+    REQUIRE(after.seq_scan_rows_visible == 0U);
 }
 
 TEST_CASE("StorageTelemetryRegistry visits DDL samplers")

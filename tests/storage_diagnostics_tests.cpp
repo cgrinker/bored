@@ -188,6 +188,24 @@ executor::ExecutorTelemetrySnapshot make_executor(std::uint64_t seed)
     snapshot.delete_rows_succeeded = seed + 7U;
     snapshot.delete_reclaimed_bytes = (seed + 2U) * 7U;
     snapshot.delete_wal_bytes = (seed + 3U) * 8U;
+
+    auto make_latency = [&](std::uint64_t base) {
+        executor::ExecutorTelemetrySnapshot::OperatorLatencySnapshot latency{};
+        latency.invocations = base + 1U;
+        latency.total_duration_ns = (base + 2U) * 10U;
+        latency.last_duration_ns = (base + 3U) * 5U;
+        return latency;
+    };
+
+    snapshot.seq_scan_latency = make_latency(seed);
+    snapshot.filter_latency = make_latency(seed + 10U);
+    snapshot.projection_latency = make_latency(seed + 20U);
+    snapshot.nested_loop_latency = make_latency(seed + 30U);
+    snapshot.hash_join_latency = make_latency(seed + 40U);
+    snapshot.aggregation_latency = make_latency(seed + 50U);
+    snapshot.insert_latency = make_latency(seed + 60U);
+    snapshot.update_latency = make_latency(seed + 70U);
+    snapshot.delete_latency = make_latency(seed + 80U);
     return snapshot;
 }
 
@@ -265,6 +283,9 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.executors.total.hash_join_rows_matched == ((2U + 3U) + (5U + 3U)));
     REQUIRE(doc.executors.total.aggregation_input_rows == ((2U + 8U) + (5U + 8U)));
     REQUIRE(doc.executors.total.aggregation_groups_emitted == ((2U + 4U) + (5U + 4U)));
+    REQUIRE(doc.executors.total.seq_scan_latency.invocations == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(doc.executors.total.seq_scan_latency.total_duration_ns == ((2U + 2U) * 10U + (5U + 2U) * 10U));
+    REQUIRE(doc.executors.total.seq_scan_latency.last_duration_ns == std::max((2U + 3U) * 5U, (5U + 3U) * 5U));
     REQUIRE(doc.collected_at.time_since_epoch().count() != 0);
 
     REQUIRE(doc.page_managers.details.front().identifier == "pm_a");
@@ -280,6 +301,7 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.planner.details.back().identifier == "planner_b");
     REQUIRE(doc.executors.details.front().identifier == "exec_a");
     REQUIRE(doc.executors.details.back().identifier == "exec_b");
+    REQUIRE(doc.executors.details.front().snapshot.seq_scan_latency.invocations == (2U + 1U));
 }
 
 TEST_CASE("collect_storage_diagnostics honors detail options")

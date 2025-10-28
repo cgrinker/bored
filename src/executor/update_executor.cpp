@@ -34,6 +34,7 @@ void UpdateExecutor::open(ExecutorContext& context)
 
 bool UpdateExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 {
+    ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::Update};
     (void)buffer;
     ensure_child_available();
     if (!drained_) {

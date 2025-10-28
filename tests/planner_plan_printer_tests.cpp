@@ -24,6 +24,7 @@ TEST_CASE("explain_plan renders hierarchy with properties and snapshot")
     scan_props.output_columns = {"order_id", "customer_id"};
     scan_props.partitioning_columns = scan_props.output_columns;
     scan_props.requires_visibility_check = true;
+    scan_props.expected_batch_size = 128U;
 
     txn::Snapshot snapshot{};
     snapshot.read_lsn = 128U;
@@ -38,6 +39,7 @@ TEST_CASE("explain_plan renders hierarchy with properties and snapshot")
     projection_props.output_columns = scan_props.output_columns;
     projection_props.ordering_columns = {"order_id"};
     projection_props.preserves_order = true;
+    projection_props.expected_batch_size = 128U;
 
     auto projection = PhysicalOperator::make(PhysicalOperatorType::Projection, {scan}, projection_props);
     PhysicalPlan plan{projection};
@@ -87,7 +89,36 @@ TEST_CASE("explain_plan renders join strategy hint")
     PhysicalPlan plan{join};
 
     const auto rendered = explain_plan(plan);
-    CHECK_THAT(rendered, ContainsSubstring("HashJoin [batch=128, strategy=hash(build=left, probe=right)]"));
+    CHECK_THAT(rendered, ContainsSubstring("HashJoin [cardinality=1024, batch=128, strategy=hash(build=left, probe=right)]"));
+}
+
+TEST_CASE("explain_plan attaches runtime stats when provided")
+{
+    PhysicalProperties scan_props{};
+    scan_props.executor_operator_id = 2U;
+    auto scan = PhysicalOperator::make(PhysicalOperatorType::SeqScan, {}, scan_props);
+
+    PhysicalProperties filter_props{};
+    filter_props.executor_operator_id = 1U;
+    auto filter = PhysicalOperator::make(PhysicalOperatorType::Filter, {scan}, filter_props);
+    PhysicalPlan plan{filter};
+
+    ExplainRuntimeMap runtime{};
+    runtime.emplace(1U, ExplainRuntimeStats{.loops = 2U, .rows = 5U, .total_duration_ns = 100U, .last_duration_ns = 40U});
+    runtime.emplace(2U, ExplainRuntimeStats{.loops = 3U, .rows = 9U, .total_duration_ns = 160U, .last_duration_ns = 60U});
+
+    ExplainOptions options{};
+    options.runtime_stats = &runtime;
+
+    const auto rendered = explain_plan(plan, options);
+    CHECK_THAT(rendered, ContainsSubstring("Filter [runtime={loops=2, rows=5, total_ns=100, last_ns=40}]"));
+    CHECK_THAT(rendered, ContainsSubstring("\n  - SeqScan [runtime={loops=3, rows=9, total_ns=160, last_ns=60}]"));
+
+    ExplainOptions runtime_only{};
+    runtime_only.include_properties = false;
+    runtime_only.runtime_stats = &runtime;
+    const auto runtime_only_rendered = explain_plan(plan, runtime_only);
+    CHECK_THAT(runtime_only_rendered, ContainsSubstring("Filter [runtime={loops=2, rows=5, total_ns=100, last_ns=40}]"));
 }
 
 }  // namespace bored::planner

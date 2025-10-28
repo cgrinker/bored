@@ -7,7 +7,7 @@ The query planner turns relational logical plans into executable physical plans.
 - **Plan diagnostics** – The `planner::plan_query` result now includes `PlanDiagnostics`, exposing the chosen logical alternative, total rule attempts/applies, and costing counters. Capture these snapshots when logging slow or anomalous plans.
 - **Telemetry registration** – Planners register samplers with `StorageTelemetryRegistry::register_planner`. Ensure each running planner instance calls `register_planner` and `unregister_planner` during its lifecycle so aggregated snapshots appear in storage diagnostics and operator dashboards.
 - **Planner benchmarks** – Run `bored_planner_benchmarks` during deployments to verify latency budgets. Use `--json` for machine ingestion or `--baseline=<path>` plus `--tolerance=<fraction>` to enforce regression thresholds in CI.
-- **Explain printer** – Invoke `planner::explain_plan` on `PlannerResult::plan` to produce a textual tree. Toggle `ExplainOptions::include_properties` or `ExplainOptions::include_snapshot` when collecting evidence for support tickets.
+- **Explain printer** – Invoke `planner::explain_plan` on `PlannerResult::plan` to produce a textual tree. Toggle `ExplainOptions::include_properties` or `ExplainOptions::include_snapshot`, and attach per-operator telemetry via `ExplainOptions::runtime_stats` when analysing runtime behaviour.
 
 ## Observability Surfaces
 - **Storage diagnostics JSON** – `collect_storage_diagnostics` now emits a `planner` section mirroring the planner telemetry snapshot. Feed this JSON into your existing observability pipeline to chart rule attempts, successes, and costing cadence over time.

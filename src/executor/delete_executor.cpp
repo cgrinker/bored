@@ -34,6 +34,7 @@ void DeleteExecutor::open(ExecutorContext& context)
 
 bool DeleteExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 {
+    ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::Delete};
     (void)buffer;
     ensure_child_available();
     if (!drained_) {

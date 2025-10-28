@@ -31,6 +31,7 @@ void SequentialScanExecutor::open(ExecutorContext& context)
 
 bool SequentialScanExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 {
+    ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::SeqScan};
     if (!cursor_) {
         return false;
     }

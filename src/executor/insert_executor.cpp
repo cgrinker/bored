@@ -34,6 +34,7 @@ void InsertExecutor::open(ExecutorContext& context)
 
 bool InsertExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 {
+    ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::Insert};
     (void)buffer;
     ensure_child_available();
     if (!drained_) {

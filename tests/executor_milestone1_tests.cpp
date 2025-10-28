@@ -175,6 +175,7 @@ TEST_CASE("SequentialScanExecutor respects snapshot visibility")
     REQUIRE(snapshot_telemetry.seq_scan_rows_visible == expected.size());
     REQUIRE(snapshot_telemetry.filter_rows_evaluated == 0U);
     REQUIRE(snapshot_telemetry.projection_rows_emitted == 0U);
+    REQUIRE(snapshot_telemetry.seq_scan_latency.invocations >= expected.size());
 }
 
 TEST_CASE("FilterExecutor applies predicate to sequential scan output")
@@ -239,6 +240,7 @@ TEST_CASE("FilterExecutor applies predicate to sequential scan output")
     REQUIRE(snapshot_telemetry.seq_scan_rows_visible == 4U);
     REQUIRE(snapshot_telemetry.filter_rows_evaluated == 4U);
     REQUIRE(snapshot_telemetry.filter_rows_passed == expected.size());
+    REQUIRE(snapshot_telemetry.filter_latency.invocations >= expected.size());
 }
 
 TEST_CASE("ProjectionExecutor materialises derived columns")
@@ -313,6 +315,7 @@ TEST_CASE("ProjectionExecutor materialises derived columns")
     REQUIRE(snapshot_telemetry.filter_rows_evaluated == 2U);
     REQUIRE(snapshot_telemetry.filter_rows_passed == 1U);
     REQUIRE(snapshot_telemetry.projection_rows_emitted == 1U);
+    REQUIRE(snapshot_telemetry.projection_latency.invocations >= payloads.size());
 }
 
 }  // namespace

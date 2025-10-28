@@ -31,6 +31,7 @@ void ProjectionExecutor::open(ExecutorContext& context)
 
 bool ProjectionExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 {
+    ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::Projection};
     if (child_count() != 1U) {
         return false;
     }

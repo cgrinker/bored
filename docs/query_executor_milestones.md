@@ -69,11 +69,16 @@
 - Next steps: wire insert/update/delete executors into transaction manager commit/abort callbacks so staged WAL flushes at the right horizon, and extend tests to multi-page crash/recovery scenarios once undo walk plumbing is ready.
 
 ## Milestone 4: Execution Services & Diagnostics (0.5 sprint)
-- [ ] Introduce executor telemetry samplers (rows produced, latency per operator) and register with diagnostics JSON.
-- [ ] Provide tracing hooks so `explain_plan` can attach executor runtime stats post-execution.
-- [ ] Build micro-benchmark harness that exercises representative executor pipelines with configurable workloads.
+- [x] Introduce executor telemetry samplers (rows produced, latency per operator) and register with diagnostics JSON.
+- [x] Provide tracing hooks so `explain_plan` can attach executor runtime stats post-execution.
+- [x] Build micro-benchmark harness that exercises representative executor pipelines with configurable workloads.
 - [ ] Document troubleshooting steps in an operator addendum (extension of `planner_operator_guide.md`).
 - [ ] Review retention/checkpoint integration to ensure executor-managed temp resources are cleaned during recovery.
+
+### Milestone 4 Notes
+- Executor telemetry now publishes per-operator row counters and latency samples via `ExecutorTelemetrySampler`. Plans can register samplers with `StorageTelemetryRegistry`, and diagnostics JSON surfaces per-operator latency totals alongside existing row counters.
+- `planner::ExplainOptions::runtime_stats` accepts per-operator execution traces so rendered plans can embed runtime loops/rows/latency when available.
+- `bored_executor_benchmarks` drives scan, filter, projection, join, and aggregation pipelines with configurable table sizes, selectivity, and join match rates, reporting throughput in text or JSON.
 
 ## Milestone 5: Pipeline & Vectorization Exploration (stretch)
 - [ ] Prototype batch-oriented executor API that can wrap iterator operators without breaking compatibility.

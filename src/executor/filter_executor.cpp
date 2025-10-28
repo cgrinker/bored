@@ -31,6 +31,7 @@ void FilterExecutor::open(ExecutorContext& context)
 
 bool FilterExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 {
+    ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::Filter};
     if (child_count() != 1U) {
         return false;
     }

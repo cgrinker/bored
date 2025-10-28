@@ -2,6 +2,26 @@
 
 namespace bored::executor {
 
+ExecutorTelemetry::LatencyScope::LatencyScope(ExecutorTelemetry* telemetry, Operator op) noexcept
+    : telemetry_{telemetry}
+    , operator_{op}
+{
+    if (telemetry_ != nullptr) {
+        start_ = std::chrono::steady_clock::now();
+    }
+}
+
+ExecutorTelemetry::LatencyScope::~LatencyScope()
+{
+    if (telemetry_ == nullptr) {
+        return;
+    }
+    const auto end = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start_);
+    const auto duration_ns = elapsed.count() > 0 ? static_cast<std::uint64_t>(elapsed.count()) : 0ULL;
+    telemetry_->record_latency(operator_, duration_ns);
+}
+
 void ExecutorTelemetry::record_seq_scan_row(bool visible) noexcept
 {
     seq_scan_rows_read_.fetch_add(1U, std::memory_order_relaxed);
@@ -98,6 +118,18 @@ void ExecutorTelemetry::record_delete_success(std::size_t reclaimed_bytes, std::
     delete_wal_bytes_.fetch_add(static_cast<std::uint64_t>(wal_bytes), std::memory_order_relaxed);
 }
 
+void ExecutorTelemetry::record_latency(Operator op, std::uint64_t duration_ns) noexcept
+{
+    const auto index = static_cast<std::size_t>(op);
+    if (index >= latencies_.size()) {
+        return;
+    }
+    auto& counters = latencies_[index];
+    counters.invocations.fetch_add(1U, std::memory_order_relaxed);
+    counters.total_duration_ns.fetch_add(duration_ns, std::memory_order_relaxed);
+    counters.last_duration_ns.store(duration_ns, std::memory_order_relaxed);
+}
+
 ExecutorTelemetrySnapshot ExecutorTelemetry::snapshot() const noexcept
 {
     ExecutorTelemetrySnapshot snapshot{};
@@ -127,6 +159,29 @@ ExecutorTelemetrySnapshot ExecutorTelemetry::snapshot() const noexcept
     snapshot.delete_rows_succeeded = delete_rows_succeeded_.load(std::memory_order_relaxed);
     snapshot.delete_reclaimed_bytes = delete_reclaimed_bytes_.load(std::memory_order_relaxed);
     snapshot.delete_wal_bytes = delete_wal_bytes_.load(std::memory_order_relaxed);
+
+    const auto make_latency_snapshot = [&](Operator operator_kind) {
+        ExecutorTelemetrySnapshot::OperatorLatencySnapshot latency{};
+        const auto index = static_cast<std::size_t>(operator_kind);
+        if (index < latencies_.size()) {
+            const auto& counters = latencies_[index];
+            latency.invocations = counters.invocations.load(std::memory_order_relaxed);
+            latency.total_duration_ns = counters.total_duration_ns.load(std::memory_order_relaxed);
+            latency.last_duration_ns = counters.last_duration_ns.load(std::memory_order_relaxed);
+        }
+        return latency;
+    };
+
+    snapshot.seq_scan_latency = make_latency_snapshot(Operator::SeqScan);
+    snapshot.filter_latency = make_latency_snapshot(Operator::Filter);
+    snapshot.projection_latency = make_latency_snapshot(Operator::Projection);
+    snapshot.nested_loop_latency = make_latency_snapshot(Operator::NestedLoopJoin);
+    snapshot.hash_join_latency = make_latency_snapshot(Operator::HashJoin);
+    snapshot.aggregation_latency = make_latency_snapshot(Operator::Aggregation);
+    snapshot.insert_latency = make_latency_snapshot(Operator::Insert);
+    snapshot.update_latency = make_latency_snapshot(Operator::Update);
+    snapshot.delete_latency = make_latency_snapshot(Operator::Delete);
+
     return snapshot;
 }
 
@@ -158,6 +213,12 @@ void ExecutorTelemetry::reset() noexcept
     delete_rows_succeeded_.store(0U, std::memory_order_relaxed);
     delete_reclaimed_bytes_.store(0U, std::memory_order_relaxed);
     delete_wal_bytes_.store(0U, std::memory_order_relaxed);
+
+    for (auto& latency : latencies_) {
+        latency.invocations.store(0U, std::memory_order_relaxed);
+        latency.total_duration_ns.store(0U, std::memory_order_relaxed);
+        latency.last_duration_ns.store(0U, std::memory_order_relaxed);
+    }
 }
 
 }  // namespace bored::executor

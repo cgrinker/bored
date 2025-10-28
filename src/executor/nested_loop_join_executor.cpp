@@ -49,6 +49,7 @@ void NestedLoopJoinExecutor::open(ExecutorContext& context)
 
 bool NestedLoopJoinExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 {
+    ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::NestedLoopJoin};
     if (child_count() != 2U) {
         return false;
     }

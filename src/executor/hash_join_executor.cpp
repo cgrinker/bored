@@ -63,6 +63,7 @@ void HashJoinExecutor::open(ExecutorContext& context)
 
 bool HashJoinExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 {
+    ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::HashJoin};
     if (child_count() != 2U) {
         return false;
     }

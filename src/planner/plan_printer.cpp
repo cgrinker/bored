@@ -67,10 +67,53 @@ std::string format_snapshot(const txn::Snapshot& snapshot)
     return oss.str();
 }
 
+std::string format_runtime(const PhysicalProperties& props, const ExplainOptions& options)
+{
+    if (options.runtime_stats == nullptr || props.executor_operator_id == 0U) {
+        return {};
+    }
+
+    const auto& runtime_map = *options.runtime_stats;
+    const auto it = runtime_map.find(props.executor_operator_id);
+    if (it == runtime_map.end()) {
+        return {};
+    }
+
+    const auto& stats = it->second;
+    std::string detail{"runtime={"};
+    bool first = true;
+    const auto append_field = [&](const char* name, std::uint64_t value) {
+        if (!first) {
+            detail.append(", ");
+        }
+        first = false;
+        detail.append(name);
+        detail.push_back('=');
+        detail.append(std::to_string(value));
+    };
+
+    append_field("loops", stats.loops);
+    append_field("rows", stats.rows);
+    append_field("total_ns", stats.total_duration_ns);
+    append_field("last_ns", stats.last_duration_ns);
+    detail.push_back('}');
+    return detail;
+}
+
 std::string describe(const PhysicalOperatorPtr& node, const ExplainOptions& options)
 {
     std::string description = to_string(node->type());
     if (!options.include_properties) {
+        if (options.runtime_stats == nullptr) {
+            return description;
+        }
+        const auto runtime_detail = format_runtime(node->properties(), options);
+        if (runtime_detail.empty()) {
+            return description;
+        }
+        description += " [";
+        description += runtime_detail;
+        description += "]";
         return description;
     }
 
@@ -104,6 +147,11 @@ std::string describe(const PhysicalOperatorPtr& node, const ExplainOptions& opti
     }
     if (!props.executor_strategy.empty()) {
         details.push_back("strategy=" + props.executor_strategy);
+    }
+
+    const auto runtime_detail = format_runtime(props, options);
+    if (!runtime_detail.empty()) {
+        details.push_back(runtime_detail);
     }
 
     if (details.empty()) {

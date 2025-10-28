@@ -66,6 +66,7 @@ void AggregationExecutor::open(ExecutorContext& context)
 
 bool AggregationExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 {
+    ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::Aggregation};
     if (emission_index_ >= groups_.size()) {
         return false;
     }
