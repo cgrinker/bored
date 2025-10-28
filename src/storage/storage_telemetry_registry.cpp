@@ -215,6 +215,10 @@ bored::executor::ExecutorTelemetrySnapshot& accumulate(bored::executor::Executor
     target.update_new_payload_bytes += source.update_new_payload_bytes;
     target.update_old_payload_bytes += source.update_old_payload_bytes;
     target.update_wal_bytes += source.update_wal_bytes;
+    target.delete_rows_attempted += source.delete_rows_attempted;
+    target.delete_rows_succeeded += source.delete_rows_succeeded;
+    target.delete_reclaimed_bytes += source.delete_reclaimed_bytes;
+    target.delete_wal_bytes += source.delete_wal_bytes;
     return target;
 }
 

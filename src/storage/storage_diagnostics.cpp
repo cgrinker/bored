@@ -339,6 +339,10 @@ void append_executor_snapshot(std::string& out, const bored::executor::ExecutorT
     append_field(out, "update_new_payload_bytes", snapshot.update_new_payload_bytes, first);
     append_field(out, "update_old_payload_bytes", snapshot.update_old_payload_bytes, first);
     append_field(out, "update_wal_bytes", snapshot.update_wal_bytes, first);
+    append_field(out, "delete_rows_attempted", snapshot.delete_rows_attempted, first);
+    append_field(out, "delete_rows_succeeded", snapshot.delete_rows_succeeded, first);
+    append_field(out, "delete_reclaimed_bytes", snapshot.delete_reclaimed_bytes, first);
+    append_field(out, "delete_wal_bytes", snapshot.delete_wal_bytes, first);
     out.push_back('}');
 }
 

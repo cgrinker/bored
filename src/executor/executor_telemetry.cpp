@@ -86,6 +86,18 @@ void ExecutorTelemetry::record_update_success(std::size_t new_payload_bytes,
     update_wal_bytes_.fetch_add(static_cast<std::uint64_t>(wal_bytes), std::memory_order_relaxed);
 }
 
+void ExecutorTelemetry::record_delete_attempt() noexcept
+{
+    delete_rows_attempted_.fetch_add(1U, std::memory_order_relaxed);
+}
+
+void ExecutorTelemetry::record_delete_success(std::size_t reclaimed_bytes, std::size_t wal_bytes) noexcept
+{
+    delete_rows_succeeded_.fetch_add(1U, std::memory_order_relaxed);
+    delete_reclaimed_bytes_.fetch_add(static_cast<std::uint64_t>(reclaimed_bytes), std::memory_order_relaxed);
+    delete_wal_bytes_.fetch_add(static_cast<std::uint64_t>(wal_bytes), std::memory_order_relaxed);
+}
+
 ExecutorTelemetrySnapshot ExecutorTelemetry::snapshot() const noexcept
 {
     ExecutorTelemetrySnapshot snapshot{};
@@ -111,6 +123,10 @@ ExecutorTelemetrySnapshot ExecutorTelemetry::snapshot() const noexcept
     snapshot.update_new_payload_bytes = update_new_payload_bytes_.load(std::memory_order_relaxed);
     snapshot.update_old_payload_bytes = update_old_payload_bytes_.load(std::memory_order_relaxed);
     snapshot.update_wal_bytes = update_wal_bytes_.load(std::memory_order_relaxed);
+    snapshot.delete_rows_attempted = delete_rows_attempted_.load(std::memory_order_relaxed);
+    snapshot.delete_rows_succeeded = delete_rows_succeeded_.load(std::memory_order_relaxed);
+    snapshot.delete_reclaimed_bytes = delete_reclaimed_bytes_.load(std::memory_order_relaxed);
+    snapshot.delete_wal_bytes = delete_wal_bytes_.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -138,6 +154,10 @@ void ExecutorTelemetry::reset() noexcept
     update_new_payload_bytes_.store(0U, std::memory_order_relaxed);
     update_old_payload_bytes_.store(0U, std::memory_order_relaxed);
     update_wal_bytes_.store(0U, std::memory_order_relaxed);
+    delete_rows_attempted_.store(0U, std::memory_order_relaxed);
+    delete_rows_succeeded_.store(0U, std::memory_order_relaxed);
+    delete_reclaimed_bytes_.store(0U, std::memory_order_relaxed);
+    delete_wal_bytes_.store(0U, std::memory_order_relaxed);
 }
 
 }  // namespace bored::executor

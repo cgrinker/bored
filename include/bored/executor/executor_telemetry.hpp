@@ -29,6 +29,10 @@ struct ExecutorTelemetrySnapshot final {
     std::uint64_t update_new_payload_bytes = 0U;
     std::uint64_t update_old_payload_bytes = 0U;
     std::uint64_t update_wal_bytes = 0U;
+    std::uint64_t delete_rows_attempted = 0U;
+    std::uint64_t delete_rows_succeeded = 0U;
+    std::uint64_t delete_reclaimed_bytes = 0U;
+    std::uint64_t delete_wal_bytes = 0U;
 };
 
 class ExecutorTelemetry final {
@@ -48,6 +52,8 @@ public:
     void record_update_success(std::size_t new_payload_bytes,
                                std::size_t old_payload_bytes,
                                std::size_t wal_bytes) noexcept;
+    void record_delete_attempt() noexcept;
+    void record_delete_success(std::size_t reclaimed_bytes, std::size_t wal_bytes) noexcept;
 
     [[nodiscard]] ExecutorTelemetrySnapshot snapshot() const noexcept;
     void reset() noexcept;
@@ -75,6 +81,10 @@ private:
     std::atomic<std::uint64_t> update_new_payload_bytes_{0U};
     std::atomic<std::uint64_t> update_old_payload_bytes_{0U};
     std::atomic<std::uint64_t> update_wal_bytes_{0U};
+    std::atomic<std::uint64_t> delete_rows_attempted_{0U};
+    std::atomic<std::uint64_t> delete_rows_succeeded_{0U};
+    std::atomic<std::uint64_t> delete_reclaimed_bytes_{0U};
+    std::atomic<std::uint64_t> delete_wal_bytes_{0U};
 };
 
 }  // namespace bored::executor

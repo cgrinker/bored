@@ -184,6 +184,10 @@ executor::ExecutorTelemetrySnapshot make_executor(std::uint64_t seed)
     snapshot.update_new_payload_bytes = (seed + 2U) * 9U;
     snapshot.update_old_payload_bytes = (seed + 3U) * 9U;
     snapshot.update_wal_bytes = (seed + 4U) * 11U;
+    snapshot.delete_rows_attempted = seed + 7U;
+    snapshot.delete_rows_succeeded = seed + 7U;
+    snapshot.delete_reclaimed_bytes = (seed + 2U) * 7U;
+    snapshot.delete_wal_bytes = (seed + 3U) * 8U;
     return snapshot;
 }
 
