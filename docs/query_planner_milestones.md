@@ -23,8 +23,10 @@
 	- Registry now maintains per-rule priorities, pattern matching, and category toggles surfaced through planner options.
 - [x] Implement mandatory logical simplifications (predicate pushdown, projection pruning, constant folding stubs).
 	- Projection pruning eliminates identity projections; filter pushdown swaps identity projections ahead of filters; constant folding stub wired for future expression folding.
-- [ ] Add join reordering primitives for associative/commutative inner joins (left-deep search baseline).
-- [ ] Provide memo-style plan exploration stubs (grouping equivalent expressions) with hooks for future costing.
+- [x] Add join reordering primitives for associative/commutative inner joins (left-deep search baseline).
+	- Join commutativity and associativity rules now enumerate left-deep alternatives and register them with the memo for later costing.
+- [x] Provide memo-style plan exploration stubs (grouping equivalent expressions) with hooks for future costing.
+	- Added `Memo`/`MemoGroup` scaffolding so rules can insert grouped logical expressions ahead of cost selection logic.
 - [x] Extend unit tests with rule application traces and failure diagnostics when no rules fire.
 	- Added planner-rule suites that assert trace capture, disabled-rule behavior, and planner-level diagnostics when tracing is enabled.
 
