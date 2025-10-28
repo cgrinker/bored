@@ -73,10 +73,15 @@ TEST_CASE("plan_query applies projection pruning alternative when tracing enable
     PlannerResult result = plan_query(context, plan);
     REQUIRE(result.plan.root());
     CHECK(result.plan.root()->type() == PhysicalOperatorType::SeqScan);
-    REQUIRE(result.diagnostics.size() == 5U);
+    REQUIRE(result.diagnostics.size() == 10U);
     CHECK(result.diagnostics[0] == "ProjectionPruning:applied");
     CHECK(result.diagnostics[1] == "FilterPushdown:skipped");
     CHECK(result.diagnostics[2] == "JoinCommutativity:skipped");
     CHECK(result.diagnostics[3] == "JoinAssociativity:skipped");
     CHECK(result.diagnostics[4] == "ConstantFolding:skipped");
+    CHECK(result.diagnostics[5] == "ProjectionPruning:skipped");
+    CHECK(result.diagnostics[6] == "FilterPushdown:skipped");
+    CHECK(result.diagnostics[7] == "JoinCommutativity:skipped");
+    CHECK(result.diagnostics[8] == "JoinAssociativity:skipped");
+    CHECK(result.diagnostics[9] == "ConstantFolding:skipped");
 }
