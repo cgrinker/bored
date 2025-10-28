@@ -61,7 +61,8 @@
 	- Implemented `planner::explain_plan` with configurable property emission and Catch2 coverage for snapshot-aware output.
 - [x] Benchmark planner latency across representative workloads; set baseline thresholds for regression detection.
 	- Added `bored_planner_benchmarks` harness covering select, join, and update workloads with optional baseline regression checks and JSON summaries.
-- [ ] Finish documentation (operator guide addendum, troubleshooting checklist).
+- [x] Finish documentation (operator guide addendum, troubleshooting checklist).
+	- Authored `planner_operator_guide.md` covering diagnostics workflows and a troubleshooting checklist for operators.
 
 ## Appendix: Planner Extension Guidelines
 - Keep new logical or physical operators in dedicated translation units under `src/planner/` with mirrored headers in `include/bored/planner/`.
