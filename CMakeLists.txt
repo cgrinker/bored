@@ -219,6 +219,20 @@ if(BORED_ENABLE_BENCHMARKS)
             cxx_std_20
     )
 
+    add_executable(${PROJECT_NAME}_planner_benchmarks
+        benchmarks/planner_benchmarks.cpp
+    )
+
+    target_link_libraries(${PROJECT_NAME}_planner_benchmarks
+        PRIVATE
+            ${PROJECT_NAME}_lib
+    )
+
+    target_compile_features(${PROJECT_NAME}_planner_benchmarks
+        PUBLIC
+            cxx_std_20
+    )
+
     if(BORED_ENABLE_PARSER)
         add_executable(${PROJECT_NAME}_parser_benchmarks
             benchmarks/parser_benchmarks.cpp

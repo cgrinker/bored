@@ -59,7 +59,8 @@
 - [x] Integrate planner telemetry with `StorageTelemetryRegistry` / diagnostics JSON surfaces.
 - [x] Add explain-style pretty printer for physical plans.
 	- Implemented `planner::explain_plan` with configurable property emission and Catch2 coverage for snapshot-aware output.
-- [ ] Benchmark planner latency across representative workloads; set baseline thresholds for regression detection.
+- [x] Benchmark planner latency across representative workloads; set baseline thresholds for regression detection.
+	- Added `bored_planner_benchmarks` harness covering select, join, and update workloads with optional baseline regression checks and JSON summaries.
 - [ ] Finish documentation (operator guide addendum, troubleshooting checklist).
 
 ## Appendix: Planner Extension Guidelines
