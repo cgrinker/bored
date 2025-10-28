@@ -160,6 +160,7 @@ if(BORED_ENABLE_TESTS)
         tests/planner_statistics_catalog_tests.cpp
         tests/planner_cost_model_tests.cpp
     tests/planner_rule_tests.cpp
+        tests/planner_integration_tests.cpp
     tests/transaction_manager_tests.cpp
     tests/wal_commit_pipeline_tests.cpp
     )

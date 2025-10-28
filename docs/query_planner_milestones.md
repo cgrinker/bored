@@ -51,7 +51,8 @@
 	- Planner lowering now attaches MVCC snapshots to table scans when required, ensuring executors can enforce visibility and lock semantics without re-querying context.
 - [x] Ensure DML statements (INSERT/UPDATE/DELETE) request the correct physical write operators with WAL prerequisites.
 	- Planner lowering now maps DML logical nodes to physical Insert/Update/Delete operators, attaching MVCC snapshots for update/delete and preserving relation metadata for WAL staging.
-- [ ] Expand integration tests to run planner + executor smoke tests using Catch2.
+- [x] Expand integration tests to run planner + executor smoke tests using Catch2.
+	- Added planner integration smoke tests that traverse physical plans with an executor stub, validating hash join pipelines and update snapshots end-to-end.
 
 ## Milestone 4: Diagnostics, Telemetry & Hardening (0.5 sprint)
 - [ ] Expose planner decisions through `planner::PlanDiagnostics` (chosen plan tree, alternative costs, rule traces).
