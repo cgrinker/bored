@@ -47,7 +47,8 @@
 	- Planner lowerer now produces concrete physical operators with relation metadata, scan visibility flags, and respects memo-selected join ordering; hash join lowering currently selects hash vs. nested-loop joins via cardinality heuristics while aggregation stubs remain TODO pending logical operators.
 - [x] Emit physical plan properties (output schema, ordering, partitioning) for executor validation.
 	- Physical plans now annotate ordering and partitioning columns, propagating metadata from scans through projections and joins for downstream executor validation.
-- [ ] Wire transaction snapshot awareness into scan primitives (visibility filters, lock modes).
+- [x] Wire transaction snapshot awareness into scan primitives (visibility filters, lock modes).
+	- Planner lowering now attaches MVCC snapshots to table scans when required, ensuring executors can enforce visibility and lock semantics without re-querying context.
 - [ ] Ensure DML statements (INSERT/UPDATE/DELETE) request the correct physical write operators with WAL prerequisites.
 - [ ] Expand integration tests to run planner + executor smoke tests using Catch2.
 

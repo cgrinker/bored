@@ -112,6 +112,7 @@ TEST_CASE("plan_query lowers logical scan to placeholder physical plan")
     CHECK(root->properties().output_columns.size() == 2U);
     CHECK(root->properties().relation_name.empty());
     CHECK_FALSE(root->properties().requires_visibility_check);
+    CHECK_FALSE(root->properties().snapshot.has_value());
     CHECK(root->properties().ordering_columns.empty());
     CHECK(root->properties().partitioning_columns == root->properties().output_columns);
     CHECK(result.rules_attempted > 0U);
@@ -274,6 +275,12 @@ TEST_CASE("plan_query propagates relation metadata and snapshot requirements to 
     CHECK(physical_props.requires_visibility_check);
     CHECK(physical_props.partitioning_columns == std::vector<std::string>{"order_id", "customer_id"});
     CHECK(physical_props.ordering_columns.empty());
+    REQUIRE(physical_props.snapshot.has_value());
+    const auto& snapshot_value = *physical_props.snapshot;
+    CHECK(snapshot_value.read_lsn == 42U);
+    CHECK(snapshot_value.xmin == 1U);
+    CHECK(snapshot_value.xmax == 10U);
+    CHECK(snapshot_value.in_progress.empty());
 }
 
 TEST_CASE("plan_query selects hash join when both inputs exceed threshold")

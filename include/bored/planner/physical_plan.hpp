@@ -1,7 +1,10 @@
 #pragma once
 
+#include "bored/txn/transaction_types.hpp"
+
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,6 +24,7 @@ struct PhysicalProperties final {
     std::size_t expected_cardinality = 0U;
     bool preserves_order = false;
     bool requires_visibility_check = false;
+    std::optional<txn::Snapshot> snapshot{};
     std::string relation_name{};
     std::vector<std::string> ordering_columns{};
     std::vector<std::string> partitioning_columns{};

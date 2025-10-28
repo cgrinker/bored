@@ -71,6 +71,9 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
     properties.output_columns = logical->properties().output_columns;
     if (logical->type() == LogicalOperatorType::TableScan) {
         properties.requires_visibility_check = snapshot_requires_visibility(context.snapshot());
+        if (properties.requires_visibility_check) {
+            properties.snapshot = context.snapshot();
+        }
         append_unique(properties.partitioning_columns, properties.output_columns);
     }
 
