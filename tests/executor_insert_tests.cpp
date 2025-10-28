@@ -107,6 +107,11 @@ private:
 
 class PageManagerInsertTarget final : public InsertExecutor::Target {
 public:
+    struct InsertOutcome final {
+        PageManager::TupleInsertResult result{};
+        std::uint64_t row_id = 0U;
+    };
+
     PageManagerInsertTarget(PageManager* manager, std::span<std::byte> page_span, std::uint64_t starting_row_id)
         : manager_{manager}
         , page_span_{page_span}
@@ -130,12 +135,13 @@ public:
         header.created_transaction_id = context.transaction_id();
 
         PageManager::TupleInsertResult result{};
-        auto ec = manager_->insert_tuple(page_span_, column.data, next_row_id_++, result, header);
+        const auto row_id = next_row_id_++;
+        auto ec = manager_->insert_tuple(page_span_, column.data, row_id, result, header);
         if (ec) {
             return ec;
         }
 
-        results_.push_back(result);
+        results_.push_back(InsertOutcome{result, row_id});
         out_stats.payload_bytes = column.data.size();
         out_stats.wal_bytes = result.wal.written_bytes;
         return {};
@@ -146,13 +152,13 @@ public:
         return manager_->flush_wal();
     }
 
-    const std::vector<PageManager::TupleInsertResult>& results() const noexcept { return results_; }
+    const std::vector<InsertOutcome>& outcomes() const noexcept { return results_; }
 
 private:
     PageManager* manager_ = nullptr;
     std::span<std::byte> page_span_{};
     std::uint64_t next_row_id_ = 0U;
-    std::vector<PageManager::TupleInsertResult> results_{};
+    std::vector<InsertOutcome> results_{};
 };
 
 }  // namespace
@@ -201,18 +207,19 @@ TEST_CASE("InsertExecutor writes tuples via PageManager")
 
     executor.close(context);
 
-    const auto& results = target.results();
-    REQUIRE(results.size() == rows.size());
+    const auto& outcomes = target.outcomes();
+    REQUIRE(outcomes.size() == rows.size());
 
     auto page_const = std::span<const std::byte>(page_buffer.data(), page_buffer.size());
-    for (std::size_t index = 0; index < results.size(); ++index) {
-        const auto slot_index = results[index].slot.index;
+    for (std::size_t index = 0; index < outcomes.size(); ++index) {
+        const auto slot_index = outcomes[index].result.slot.index;
         auto storage = bored::storage::read_tuple_storage(page_const, slot_index);
         REQUIRE(storage.size() == tuple_storage_length(rows[index].size()));
 
         TupleHeader stored_header{};
         std::memcpy(&stored_header, storage.data(), tuple_header_size());
         REQUIRE(stored_header.created_transaction_id == context.transaction_id());
+        REQUIRE(outcomes[index].row_id == 10'000U + index);
 
         auto payload = storage.subspan(tuple_header_size());
         REQUIRE(payload_to_string(payload) == rows[index]);

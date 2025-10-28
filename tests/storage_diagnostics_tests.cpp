@@ -175,6 +175,15 @@ executor::ExecutorTelemetrySnapshot make_executor(std::uint64_t seed)
     snapshot.hash_join_rows_matched = seed + 3U;
     snapshot.aggregation_input_rows = seed + 8U;
     snapshot.aggregation_groups_emitted = seed + 4U;
+    snapshot.insert_rows_attempted = seed + 5U;
+    snapshot.insert_rows_succeeded = seed + 5U;
+    snapshot.insert_payload_bytes = (seed + 1U) * 10U;
+    snapshot.insert_wal_bytes = (seed + 1U) * 12U;
+    snapshot.update_rows_attempted = seed + 6U;
+    snapshot.update_rows_succeeded = seed + 6U;
+    snapshot.update_new_payload_bytes = (seed + 2U) * 9U;
+    snapshot.update_old_payload_bytes = (seed + 3U) * 9U;
+    snapshot.update_wal_bytes = (seed + 4U) * 11U;
     return snapshot;
 }
 

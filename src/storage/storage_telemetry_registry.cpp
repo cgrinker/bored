@@ -206,6 +206,15 @@ bored::executor::ExecutorTelemetrySnapshot& accumulate(bored::executor::Executor
     target.hash_join_rows_matched += source.hash_join_rows_matched;
     target.aggregation_input_rows += source.aggregation_input_rows;
     target.aggregation_groups_emitted += source.aggregation_groups_emitted;
+    target.insert_rows_attempted += source.insert_rows_attempted;
+    target.insert_rows_succeeded += source.insert_rows_succeeded;
+    target.insert_payload_bytes += source.insert_payload_bytes;
+    target.insert_wal_bytes += source.insert_wal_bytes;
+    target.update_rows_attempted += source.update_rows_attempted;
+    target.update_rows_succeeded += source.update_rows_succeeded;
+    target.update_new_payload_bytes += source.update_new_payload_bytes;
+    target.update_old_payload_bytes += source.update_old_payload_bytes;
+    target.update_wal_bytes += source.update_wal_bytes;
     return target;
 }
 

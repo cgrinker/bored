@@ -50,7 +50,7 @@
 
 ## Milestone 3: DML & WAL Coordination (1 sprint)
 - [x] Implement Insert executor that consumes child rows, allocates heap tuples, and emits WAL via `PageManager` hooks.
-- [ ] Implement Update executor handling before-image capture, overflow modifications, and commit visibility updates.
+- [x] Implement Update executor handling before-image capture, overflow modifications, and commit visibility updates.
 - [ ] Implement Delete executor that coordinates lock/undo logging and free space reclamation.
 - [ ] Wire executors into transaction manager callbacks to ensure commit/abort flows flush staged writes.
 - [ ] Add regression tests covering crash-recovery of DML operations and verifying WAL segments via existing readers.
@@ -60,7 +60,11 @@
 - Executor telemetry now tracks insert attempts/successes plus payload and WAL byte counters so diagnostics can surface DML impact.
 - New unit coverage exercises end-to-end insert flows against a single-page heap, verifying tuple materialisation, WAL emission, and telemetry snapshots.
 - Latest validation: `cmake --build build-macos --target bored_tests` followed by `./build-macos/bored_tests "InsertExecutor writes tuples via PageManager"`.
-- Next steps: design update/delete executors with undo logging hooks, ensure mutation targets coordinate with transaction abort callbacks, and extend tests to crash/recovery scenarios once undo walk plumbing is ready.
+- Update executor captures before-images via `PageManager` pin hooks, routes WAL undo payloads through `WalUndoWalker`, and extends telemetry with update attempt/success counters.
+- Update executor now drains row id/slot index/new payload tuples, pins `PageManager` slots for before-image accounting, tracks update telemetry (attempt/success, payload bytes, WAL bytes), and flushes WAL on close.
+- Latest validation: `./build-macos/bored_tests "UpdateExecutor applies updates via PageManager"`.
+- Delete executor design will lean on `WalRetentionManager` to keep post-commit segments available, request tuple pins from `PageManager` for immediate reclamation, and maintain telemetry for rows tombstoned versus reclaimed.
+- Next steps: implement delete executor with undo logging hooks, ensure mutation targets coordinate with transaction abort callbacks, and extend tests to crash/recovery scenarios once undo walk plumbing is ready.
 
 ## Milestone 4: Execution Services & Diagnostics (0.5 sprint)
 - [ ] Introduce executor telemetry samplers (rows produced, latency per operator) and register with diagnostics JSON.

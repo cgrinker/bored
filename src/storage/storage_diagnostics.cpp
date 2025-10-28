@@ -330,6 +330,15 @@ void append_executor_snapshot(std::string& out, const bored::executor::ExecutorT
     append_field(out, "hash_join_rows_matched", snapshot.hash_join_rows_matched, first);
     append_field(out, "aggregation_input_rows", snapshot.aggregation_input_rows, first);
     append_field(out, "aggregation_groups_emitted", snapshot.aggregation_groups_emitted, first);
+    append_field(out, "insert_rows_attempted", snapshot.insert_rows_attempted, first);
+    append_field(out, "insert_rows_succeeded", snapshot.insert_rows_succeeded, first);
+    append_field(out, "insert_payload_bytes", snapshot.insert_payload_bytes, first);
+    append_field(out, "insert_wal_bytes", snapshot.insert_wal_bytes, first);
+    append_field(out, "update_rows_attempted", snapshot.update_rows_attempted, first);
+    append_field(out, "update_rows_succeeded", snapshot.update_rows_succeeded, first);
+    append_field(out, "update_new_payload_bytes", snapshot.update_new_payload_bytes, first);
+    append_field(out, "update_old_payload_bytes", snapshot.update_old_payload_bytes, first);
+    append_field(out, "update_wal_bytes", snapshot.update_wal_bytes, first);
     out.push_back('}');
 }
 

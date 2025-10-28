@@ -70,6 +70,7 @@ add_library(${PROJECT_NAME}_lib
     src/executor/hash_join_executor.cpp
     src/executor/aggregation_executor.cpp
     src/executor/insert_executor.cpp
+    src/executor/update_executor.cpp
     src/planner/rule.cpp
     src/planner/rules/join_rules.cpp
     src/planner/rules/predicate_pushdown_rule.cpp
@@ -185,6 +186,7 @@ if(BORED_ENABLE_TESTS)
     tests/executor_hash_join_tests.cpp
     tests/executor_aggregation_tests.cpp
     tests/executor_insert_tests.cpp
+    tests/executor_update_tests.cpp
     tests/executor_join_aggregate_integration_tests.cpp
         tests/executor_milestone1_tests.cpp
     )

@@ -71,6 +71,21 @@ void ExecutorTelemetry::record_insert_success(std::size_t payload_bytes, std::si
     insert_wal_bytes_.fetch_add(static_cast<std::uint64_t>(wal_bytes), std::memory_order_relaxed);
 }
 
+void ExecutorTelemetry::record_update_attempt() noexcept
+{
+    update_rows_attempted_.fetch_add(1U, std::memory_order_relaxed);
+}
+
+void ExecutorTelemetry::record_update_success(std::size_t new_payload_bytes,
+                                              std::size_t old_payload_bytes,
+                                              std::size_t wal_bytes) noexcept
+{
+    update_rows_succeeded_.fetch_add(1U, std::memory_order_relaxed);
+    update_new_payload_bytes_.fetch_add(static_cast<std::uint64_t>(new_payload_bytes), std::memory_order_relaxed);
+    update_old_payload_bytes_.fetch_add(static_cast<std::uint64_t>(old_payload_bytes), std::memory_order_relaxed);
+    update_wal_bytes_.fetch_add(static_cast<std::uint64_t>(wal_bytes), std::memory_order_relaxed);
+}
+
 ExecutorTelemetrySnapshot ExecutorTelemetry::snapshot() const noexcept
 {
     ExecutorTelemetrySnapshot snapshot{};
@@ -91,6 +106,11 @@ ExecutorTelemetrySnapshot ExecutorTelemetry::snapshot() const noexcept
     snapshot.insert_rows_succeeded = insert_rows_succeeded_.load(std::memory_order_relaxed);
     snapshot.insert_payload_bytes = insert_payload_bytes_.load(std::memory_order_relaxed);
     snapshot.insert_wal_bytes = insert_wal_bytes_.load(std::memory_order_relaxed);
+    snapshot.update_rows_attempted = update_rows_attempted_.load(std::memory_order_relaxed);
+    snapshot.update_rows_succeeded = update_rows_succeeded_.load(std::memory_order_relaxed);
+    snapshot.update_new_payload_bytes = update_new_payload_bytes_.load(std::memory_order_relaxed);
+    snapshot.update_old_payload_bytes = update_old_payload_bytes_.load(std::memory_order_relaxed);
+    snapshot.update_wal_bytes = update_wal_bytes_.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -113,6 +133,11 @@ void ExecutorTelemetry::reset() noexcept
     insert_rows_succeeded_.store(0U, std::memory_order_relaxed);
     insert_payload_bytes_.store(0U, std::memory_order_relaxed);
     insert_wal_bytes_.store(0U, std::memory_order_relaxed);
+    update_rows_attempted_.store(0U, std::memory_order_relaxed);
+    update_rows_succeeded_.store(0U, std::memory_order_relaxed);
+    update_new_payload_bytes_.store(0U, std::memory_order_relaxed);
+    update_old_payload_bytes_.store(0U, std::memory_order_relaxed);
+    update_wal_bytes_.store(0U, std::memory_order_relaxed);
 }
 
 }  // namespace bored::executor
