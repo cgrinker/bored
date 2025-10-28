@@ -23,6 +23,8 @@ class TempResourceRegistry;
 enum class TempResourcePurgeReason : std::uint8_t;
 
 class WalTelemetryRegistry;
+class StorageTelemetryRegistry;
+struct TempCleanupTelemetrySnapshot;
 
 struct WalWriterTelemetrySnapshot final {
     std::uint64_t append_calls = 0U;
@@ -62,6 +64,8 @@ struct WalWriterConfig final {
     bool flush_on_commit = true;
     WalTelemetryRegistry* telemetry_registry = nullptr;
     std::string telemetry_identifier{};
+    StorageTelemetryRegistry* storage_telemetry_registry = nullptr;
+    std::string temp_cleanup_telemetry_identifier{};
     WalRetentionConfig retention{};
     std::shared_ptr<WalDurabilityHorizon> durability_horizon{};
     TempResourceRegistry* temp_resource_registry = nullptr;
@@ -140,6 +144,7 @@ private:
                                                          WalStagedAppend* stage);
 
     [[nodiscard]] std::filesystem::path make_segment_path(std::uint64_t segment_id) const;
+    [[nodiscard]] TempCleanupTelemetrySnapshot temp_cleanup_snapshot() const;
 
     std::shared_ptr<AsyncIo> io_{};
     WalWriterConfig config_{};
@@ -168,6 +173,8 @@ private:
     mutable std::mutex telemetry_mutex_{};
     WalTelemetryRegistry* telemetry_registry_ = nullptr;
     std::string telemetry_identifier_{};
+    StorageTelemetryRegistry* storage_telemetry_registry_ = nullptr;
+    std::string temp_cleanup_telemetry_identifier_{};
 
     std::unique_ptr<WalRetentionManager> retention_manager_{};
     std::shared_ptr<WalDurabilityHorizon> durability_horizon_{};

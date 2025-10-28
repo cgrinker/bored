@@ -2,6 +2,7 @@
 
 #include "bored/storage/free_space_map.hpp"
 #include "bored/storage/page_operations.hpp"
+#include "bored/storage/temp_resource_registry.hpp"
 #include "bored/storage/wal_apply_helpers.hpp"
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_undo_walker.hpp"
@@ -316,7 +317,7 @@ std::error_code WalReplayer::apply_undo(const WalRecoveryPlan& plan)
             }
         }
         last_undo_type_.reset();
-        return {};
+        return run_temp_cleanup(plan);
     }
 
     WalUndoWalker walker{plan};
@@ -348,7 +349,7 @@ std::error_code WalReplayer::apply_undo(const WalRecoveryPlan& plan)
     }
 
     last_undo_type_.reset();
-    return {};
+    return run_temp_cleanup(plan);
 }
 
 std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
@@ -542,6 +543,16 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
 std::optional<WalRecordType> WalReplayer::last_undo_type() const noexcept
 {
     return last_undo_type_;
+}
+
+std::error_code WalReplayer::run_temp_cleanup(const WalRecoveryPlan& plan) const
+{
+    if (plan.temp_resource_registry == nullptr) {
+        return {};
+    }
+
+    TempResourcePurgeStats stats{};
+    return plan.temp_resource_registry->purge(TempResourcePurgeReason::Recovery, &stats);
 }
 
 }  // namespace bored::storage

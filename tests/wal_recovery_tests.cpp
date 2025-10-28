@@ -1,4 +1,5 @@
 #include "bored/storage/wal_recovery.hpp"
+#include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_undo_walker.hpp"
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/async_io.hpp"
@@ -29,6 +30,8 @@ using bored::storage::WalRecoveryDriver;
 using bored::storage::WalRecoveryPlan;
 using bored::storage::WalRecoveredTransactionState;
 using bored::storage::WalRecoveredTransaction;
+using bored::storage::WalReplayContext;
+using bored::storage::WalReplayer;
 using bored::storage::FreeSpaceMap;
 using bored::storage::PageManager;
 using bored::storage::PageType;
@@ -341,7 +344,7 @@ TEST_CASE("WalRecoveryDriver flags in-flight transactions")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
-TEST_CASE("WalRecoveryDriver purges executor temp resources after recovery plan")
+TEST_CASE("WalReplayer purges executor temp resources after recovery")
 {
     auto wal_dir = make_temp_dir("bored_wal_recovery_cleanup_");
     auto io = make_async_io();
@@ -378,6 +381,14 @@ TEST_CASE("WalRecoveryDriver purges executor temp resources after recovery plan"
     WalRecoveryDriver driver{wal_dir, "wal", ".seg", &registry};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
+
+    REQUIRE(plan.temp_resource_registry == &registry);
+    REQUIRE(std::filesystem::exists(spill_file));
+
+    WalReplayContext replay_context{};
+    WalReplayer replayer{replay_context};
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
 
     CHECK_FALSE(std::filesystem::exists(spill_file));
 

@@ -105,6 +105,17 @@ WalRetentionTelemetrySnapshot make_retention_snapshot(std::uint64_t base)
     return snapshot;
 }
 
+TempCleanupTelemetrySnapshot make_temp_cleanup_snapshot(std::uint64_t base)
+{
+    TempCleanupTelemetrySnapshot snapshot{};
+    snapshot.invocations = base + 1U;
+    snapshot.failures = base;
+    snapshot.removed_entries = (base + 2U) * 3U;
+    snapshot.total_duration_ns = (base + 3U) * 25U;
+    snapshot.last_duration_ns = (base + 4U) * 5U;
+    return snapshot;
+}
+
 CatalogTelemetrySnapshot make_catalog_snapshot(std::uint64_t base)
 {
     CatalogTelemetrySnapshot snapshot{};
@@ -303,6 +314,21 @@ TEST_CASE("StorageTelemetryRegistry aggregates WAL retention samplers")
     REQUIRE(total.archived_segments == ((3U + 5U) + (7U + 5U)));
     REQUIRE(total.total_duration_ns == ((3U + 6U) * 50U + (7U + 6U) * 50U));
     REQUIRE(total.last_duration_ns == ((7U + 7U) * 5U));
+}
+
+TEST_CASE("StorageTelemetryRegistry aggregates temp cleanup samplers")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_temp_cleanup("cleanup_a", [] { return make_temp_cleanup_snapshot(2U); });
+    registry.register_temp_cleanup("cleanup_b", [] { return make_temp_cleanup_snapshot(5U); });
+
+    const auto total = registry.aggregate_temp_cleanup();
+
+    REQUIRE(total.invocations == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(total.failures == (2U + 5U));
+    REQUIRE(total.removed_entries == (((2U + 2U) * 3U) + ((5U + 2U) * 3U)));
+    REQUIRE(total.total_duration_ns == ((2U + 3U) * 25U + (5U + 3U) * 25U));
+    REQUIRE(total.last_duration_ns == std::max((2U + 4U) * 5U, (5U + 4U) * 5U));
 }
 
 TEST_CASE("StorageTelemetryRegistry aggregates catalog telemetry")
@@ -511,6 +537,7 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     registry.register_page_manager("pm", [] { return make_page_snapshot(1U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint_snapshot(1U); });
     registry.register_wal_retention("ret", [] { return make_retention_snapshot(1U); });
+    registry.register_temp_cleanup("cleanup", [] { return make_temp_cleanup_snapshot(2U); });
     registry.register_catalog("cat", [] { return make_catalog_snapshot(2U); });
     registry.register_ddl("ddl", [] { return make_ddl_snapshot(3U); });
     registry.register_parser("parser", [] { return make_parser_snapshot(4U); });
@@ -519,6 +546,7 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     registry.unregister_page_manager("pm");
     registry.unregister_checkpoint_scheduler("ckpt");
     registry.unregister_wal_retention("ret");
+    registry.unregister_temp_cleanup("cleanup");
     registry.unregister_catalog("cat");
     registry.unregister_ddl("ddl");
     registry.unregister_parser("parser");
@@ -527,6 +555,7 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     auto pm_total = registry.aggregate_page_managers();
     auto ckpt_total = registry.aggregate_checkpoint_schedulers();
     auto ret_total = registry.aggregate_wal_retention();
+    auto cleanup_total = registry.aggregate_temp_cleanup();
     auto cat_total = registry.aggregate_catalog();
     auto ddl_total = registry.aggregate_ddl();
     auto parser_total = registry.aggregate_parser();
@@ -535,6 +564,7 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     REQUIRE(pm_total.initialize.attempts == 0U);
     REQUIRE(ckpt_total.invocations == 0U);
     REQUIRE(ret_total.invocations == 0U);
+    REQUIRE(cleanup_total.invocations == 0U);
     REQUIRE(cat_total.cache_hits == 0U);
     REQUIRE(std::all_of(ddl_total.verbs.begin(), ddl_total.verbs.end(), [](const auto& verb) {
         return verb.attempts == 0U && verb.successes == 0U && verb.failures == 0U && verb.total_duration_ns == 0U && verb.last_duration_ns == 0U;

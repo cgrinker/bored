@@ -79,6 +79,16 @@ WalRetentionTelemetrySnapshot& accumulate(WalRetentionTelemetrySnapshot& target,
     return target;
 }
 
+TempCleanupTelemetrySnapshot& accumulate(TempCleanupTelemetrySnapshot& target, const TempCleanupTelemetrySnapshot& source)
+{
+    target.invocations += source.invocations;
+    target.failures += source.failures;
+    target.removed_entries += source.removed_entries;
+    target.total_duration_ns += source.total_duration_ns;
+    target.last_duration_ns = std::max(target.last_duration_ns, source.last_duration_ns);
+    return target;
+}
+
 DurabilityTelemetrySnapshot& accumulate(DurabilityTelemetrySnapshot& target, const DurabilityTelemetrySnapshot& source)
 {
     target.last_commit_lsn = std::max(target.last_commit_lsn, source.last_commit_lsn);
@@ -394,6 +404,57 @@ void StorageTelemetryRegistry::visit_wal_retention(const WalRetentionVisitor& vi
         std::lock_guard guard(mutex_);
         entries.reserve(wal_retention_samplers_.size());
         for (const auto& [identifier, sampler] : wal_retention_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_temp_cleanup(std::string identifier, TempCleanupSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    temp_cleanup_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_temp_cleanup(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    temp_cleanup_samplers_.erase(identifier);
+}
+
+TempCleanupTelemetrySnapshot StorageTelemetryRegistry::aggregate_temp_cleanup() const
+{
+    std::vector<TempCleanupSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(temp_cleanup_samplers_.size());
+        for (const auto& [_, sampler] : temp_cleanup_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<TempCleanupTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_temp_cleanup(const TempCleanupVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, TempCleanupSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(temp_cleanup_samplers_.size());
+        for (const auto& [identifier, sampler] : temp_cleanup_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }

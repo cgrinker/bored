@@ -76,6 +76,14 @@ struct WalRetentionTelemetrySnapshot final {
     std::uint64_t last_duration_ns = 0U;
 };
 
+struct TempCleanupTelemetrySnapshot final {
+    std::uint64_t invocations = 0U;
+    std::uint64_t failures = 0U;
+    std::uint64_t removed_entries = 0U;
+    std::uint64_t total_duration_ns = 0U;
+    std::uint64_t last_duration_ns = 0U;
+};
+
 struct DurabilityTelemetrySnapshot final {
     std::uint64_t last_commit_lsn = 0U;
     std::uint64_t oldest_active_commit_lsn = 0U;
@@ -121,6 +129,9 @@ public:
     using WalRetentionSampler = std::function<WalRetentionTelemetrySnapshot()>;
     using WalRetentionVisitor = std::function<void(const std::string&, const WalRetentionTelemetrySnapshot&)>;
 
+    using TempCleanupSampler = std::function<TempCleanupTelemetrySnapshot()>;
+    using TempCleanupVisitor = std::function<void(const std::string&, const TempCleanupTelemetrySnapshot&)>;
+
     using DurabilitySampler = std::function<DurabilityTelemetrySnapshot()>;
     using DurabilityVisitor = std::function<void(const std::string&, const DurabilityTelemetrySnapshot&)>;
 
@@ -159,6 +170,11 @@ public:
     void unregister_wal_retention(const std::string& identifier);
     WalRetentionTelemetrySnapshot aggregate_wal_retention() const;
     void visit_wal_retention(const WalRetentionVisitor& visitor) const;
+
+    void register_temp_cleanup(std::string identifier, TempCleanupSampler sampler);
+    void unregister_temp_cleanup(const std::string& identifier);
+    TempCleanupTelemetrySnapshot aggregate_temp_cleanup() const;
+    void visit_temp_cleanup(const TempCleanupVisitor& visitor) const;
 
     void register_durability_horizon(std::string identifier, DurabilitySampler sampler);
     void unregister_durability_horizon(const std::string& identifier);
@@ -205,6 +221,7 @@ private:
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
     std::unordered_map<std::string, CheckpointSampler> checkpoint_samplers_{};
     std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
+    std::unordered_map<std::string, TempCleanupSampler> temp_cleanup_samplers_{};
     std::unordered_map<std::string, DurabilitySampler> durability_samplers_{};
     std::unordered_map<std::string, VacuumSampler> vacuum_samplers_{};
     std::unordered_map<std::string, CatalogSampler> catalog_samplers_{};

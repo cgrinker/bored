@@ -15,6 +15,7 @@ struct StorageDiagnosticsOptions final {
     bool include_page_manager_details = true;
     bool include_checkpoint_details = true;
     bool include_retention_details = true;
+    bool include_temp_cleanup_details = true;
     bool include_durability_details = true;
     bool include_vacuum_details = true;
     bool include_catalog_details = true;
@@ -38,6 +39,11 @@ struct StorageDiagnosticsCheckpointEntry final {
 struct StorageDiagnosticsRetentionEntry final {
     std::string identifier;
     WalRetentionTelemetrySnapshot snapshot;
+};
+
+struct StorageDiagnosticsTempCleanupEntry final {
+    std::string identifier;
+    TempCleanupTelemetrySnapshot snapshot;
 };
 
 struct StorageDiagnosticsDurabilityEntry final {
@@ -95,6 +101,11 @@ struct StorageDiagnosticsRetentionSection final {
     std::vector<StorageDiagnosticsRetentionEntry> details{};
 };
 
+struct StorageDiagnosticsTempCleanupSection final {
+    TempCleanupTelemetrySnapshot total{};
+    std::vector<StorageDiagnosticsTempCleanupEntry> details{};
+};
+
 struct StorageDiagnosticsDurabilitySection final {
     DurabilityTelemetrySnapshot total{};
     std::vector<StorageDiagnosticsDurabilityEntry> details{};
@@ -140,6 +151,7 @@ struct StorageDiagnosticsDocument final {
     StorageDiagnosticsPageManagerSection page_managers{};
     StorageDiagnosticsCheckpointSection checkpoints{};
     StorageDiagnosticsRetentionSection retention{};
+    StorageDiagnosticsTempCleanupSection temp_cleanup{};
     StorageDiagnosticsDurabilitySection durability{};
     StorageDiagnosticsVacuumSection vacuum{};
     StorageDiagnosticsCatalogSection catalog{};

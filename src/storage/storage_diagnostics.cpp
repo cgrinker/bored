@@ -187,6 +187,18 @@ void append_retention_snapshot(std::string& out, const WalRetentionTelemetrySnap
     out.push_back('}');
 }
 
+void append_temp_cleanup_snapshot(std::string& out, const TempCleanupTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "invocations", snapshot.invocations, first);
+    append_field(out, "failures", snapshot.failures, first);
+    append_field(out, "removed_entries", snapshot.removed_entries, first);
+    append_field(out, "total_duration_ns", snapshot.total_duration_ns, first);
+    append_field(out, "last_duration_ns", snapshot.last_duration_ns, first);
+    out.push_back('}');
+}
+
 void append_durability_snapshot(std::string& out, const DurabilityTelemetrySnapshot& snapshot)
 {
     out.push_back('{');
@@ -448,6 +460,29 @@ void append_retention_section(std::string& out, const StorageDiagnosticsRetentio
     out.push_back('}');
 }
 
+void append_temp_cleanup_section(std::string& out, const StorageDiagnosticsTempCleanupSection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_temp_cleanup_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_temp_cleanup_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 void append_durability_section(std::string& out, const StorageDiagnosticsDurabilitySection& section)
 {
     out.push_back('{');
@@ -667,6 +702,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+    document.temp_cleanup.total = registry.aggregate_temp_cleanup();
+    if (options.include_temp_cleanup_details) {
+        registry.visit_temp_cleanup([&](const std::string& identifier, const TempCleanupTelemetrySnapshot& snapshot) {
+            document.temp_cleanup.details.push_back(StorageDiagnosticsTempCleanupEntry{identifier, snapshot});
+        });
+        std::sort(document.temp_cleanup.details.begin(), document.temp_cleanup.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+
     document.durability.total = registry.aggregate_durability_horizons();
     if (options.include_durability_details) {
         registry.visit_durability_horizons([&](const std::string& identifier, const DurabilityTelemetrySnapshot& snapshot) {
@@ -756,6 +800,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_checkpoint_section(out, document.checkpoints);
     out.append(",\"retention\":");
     append_retention_section(out, document.retention);
+    out.append(",\"temp_cleanup\":");
+    append_temp_cleanup_section(out, document.temp_cleanup);
     out.append(",\"durability\":");
     append_durability_section(out, document.durability);
     out.append(",\"vacuum\":");

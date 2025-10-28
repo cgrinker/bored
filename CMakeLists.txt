@@ -71,6 +71,7 @@ add_library(${PROJECT_NAME}_lib
     src/executor/nested_loop_join_executor.cpp
     src/executor/hash_join_executor.cpp
     src/executor/aggregation_executor.cpp
+    src/executor/executor_temp_resource_manager.cpp
     src/executor/insert_executor.cpp
     src/executor/update_executor.cpp
     src/executor/delete_executor.cpp
@@ -192,6 +193,8 @@ if(BORED_ENABLE_TESTS)
     tests/executor_delete_tests.cpp
     tests/executor_update_tests.cpp
     tests/executor_dml_recovery_tests.cpp
+    tests/executor_temp_resource_manager_tests.cpp
+    tests/executor_spill_recovery_integration_tests.cpp
     tests/executor_join_aggregate_integration_tests.cpp
         tests/executor_milestone1_tests.cpp
     )

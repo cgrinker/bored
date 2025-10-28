@@ -121,6 +121,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
     plan.undo.clear();
     plan.undo_spans.clear();
     plan.transactions.clear();
+    plan.temp_resource_registry = temp_resource_registry_;
     plan.truncated_tail = false;
     plan.truncated_segment_id = 0U;
     plan.truncated_lsn = 0U;
@@ -367,21 +368,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
         plan.transactions.push_back(entry.second->transaction);
     }
 
-    if (auto cleanup_ec = run_temp_cleanup(); cleanup_ec) {
-        return cleanup_ec;
-    }
-
     return {};
-}
-
-std::error_code WalRecoveryDriver::run_temp_cleanup() const
-{
-    if (!temp_resource_registry_) {
-        return {};
-    }
-
-    TempResourcePurgeStats stats{};
-    return temp_resource_registry_->purge(TempResourcePurgeReason::Recovery, &stats);
 }
 
 }  // namespace bored::storage

@@ -46,6 +46,7 @@ struct WalRecoveryPlan final {
     std::vector<WalRecoveryRecord> undo{};
     std::vector<WalUndoSpan> undo_spans{};
     std::vector<WalRecoveredTransaction> transactions{};
+    TempResourceRegistry* temp_resource_registry = nullptr;
     bool truncated_tail = false;
     std::uint64_t truncated_segment_id = 0U;
     std::uint64_t truncated_lsn = 0U;
@@ -64,8 +65,6 @@ public:
     [[nodiscard]] std::error_code build_plan(WalRecoveryPlan& plan) const;
 
 private:
-    [[nodiscard]] std::error_code run_temp_cleanup() const;
-
     WalReader reader_;
     TempResourceRegistry* temp_resource_registry_ = nullptr;
 };

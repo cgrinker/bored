@@ -4,6 +4,7 @@
 #include "bored/storage/temp_resource_registry.hpp"
 #include "bored/storage/wal_retention.hpp"
 #include "bored/storage/wal_telemetry_registry.hpp"
+#include "bored/storage/storage_telemetry_registry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -63,6 +64,14 @@ WalWriter::WalWriter(std::shared_ptr<AsyncIo> io, WalWriterConfig config)
         });
     }
 
+    storage_telemetry_registry_ = config_.storage_telemetry_registry;
+    temp_cleanup_telemetry_identifier_ = config_.temp_cleanup_telemetry_identifier;
+    if (storage_telemetry_registry_ && !temp_cleanup_telemetry_identifier_.empty()) {
+        storage_telemetry_registry_->register_temp_cleanup(temp_cleanup_telemetry_identifier_, [this] {
+            return this->temp_cleanup_snapshot();
+        });
+    }
+
     durability_horizon_ = config_.durability_horizon;
     temp_resource_registry_ = config_.temp_resource_registry;
 
@@ -82,6 +91,9 @@ WalWriter::~WalWriter()
     (void)close();
     if (telemetry_registry_ && !telemetry_identifier_.empty()) {
         telemetry_registry_->unregister_sampler(telemetry_identifier_);
+    }
+    if (storage_telemetry_registry_ && !temp_cleanup_telemetry_identifier_.empty()) {
+        storage_telemetry_registry_->unregister_temp_cleanup(temp_cleanup_telemetry_identifier_);
     }
 }
 
@@ -498,6 +510,18 @@ WalWriterTelemetrySnapshot WalWriter::telemetry_snapshot() const
 {
     std::lock_guard guard(telemetry_mutex_);
     return telemetry_;
+}
+
+TempCleanupTelemetrySnapshot WalWriter::temp_cleanup_snapshot() const
+{
+    std::lock_guard guard(telemetry_mutex_);
+    TempCleanupTelemetrySnapshot snapshot{};
+    snapshot.invocations = telemetry_.temp_cleanup_invocations;
+    snapshot.failures = telemetry_.temp_cleanup_failures;
+    snapshot.removed_entries = telemetry_.temp_cleanup_removed_entries;
+    snapshot.total_duration_ns = telemetry_.temp_cleanup_total_duration_ns;
+    snapshot.last_duration_ns = telemetry_.temp_cleanup_last_duration_ns;
+    return snapshot;
 }
 
 std::shared_ptr<WalDurabilityHorizon> WalWriter::durability_horizon() const noexcept

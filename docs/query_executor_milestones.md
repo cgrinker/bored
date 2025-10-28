@@ -83,14 +83,18 @@
 
 ## Milestone 4.5: Retention & Recovery Cleanup (0.5 sprint)
 - [x] Wire production `CheckpointScheduler` instances with a retention hook that invokes `WalWriter::apply_retention` and hands executor temp cleanup to a shared manager.
-- [ ] Implement an executor temp resource manager (spill directories, scratch segments) that registers with the retention hook and exposes crash-safe purge routines.
-- [ ] Extend crash recovery (`WalRecoveryDriver`/`WalReplayer`) to invoke the temp resource purge after redo/undo completes so orphaned artifacts are removed before restart.
-- [ ] Add integration tests that stage executor spill files, trigger checkpoints, and simulate crash recovery to verify deletion on resume.
-- [ ] Surface retention/cleanup telemetry (counts, duration, failure tally) through `StorageTelemetryRegistry` so diagnostics JSON reflects temp resource hygiene.
+- [x] Implement an executor temp resource manager (spill directories, scratch segments) that registers with the retention hook and exposes crash-safe purge routines.
+- [x] Extend crash recovery (`WalRecoveryDriver`/`WalReplayer`) to invoke the temp resource purge after redo/undo completes so orphaned artifacts are removed before restart.
+- [x] Add integration tests that stage executor spill files, trigger checkpoints, and simulate crash recovery to verify deletion on resume.
+- [x] Surface retention/cleanup telemetry (counts, duration, failure tally) through `StorageTelemetryRegistry` so diagnostics JSON reflects temp resource hygiene.
 
 ### Milestone 4.5 Notes
 - The retention hook currently exists only in tests; production wiring will ensure checkpoints consistently drive archival pruning and temp cleanup flows.
 - Temp resource purging should tolerate missing files/directories and log non-fatal errors so recovery continues while still surfacing diagnostics.
+- `ExecutorTempResourceManager` creates per-executor spill directories, registers scratch segments with the shared temp registry, and exposes a purge helper so checkpoints and crash recovery invoke the same cleanup path.
+- `WalReplayer::apply_undo` now finalises recovery by purging registered temp artifacts once redo/undo completes, ensuring restart surfaces start clean even after crash spills.
+- `tests/executor_spill_recovery_integration_tests.cpp` runs spill staging through checkpoint retention and crash recovery replay to confirm temp artifacts disappear both during steady-state checkpoints and restart.
+- `WalWriter` registers temp cleanup telemetry samplers with `StorageTelemetryRegistry`, and storage diagnostics JSON now emits aggregate and per-writer temp cleanup counters, durations, and failure tallies.
 - Integration coverage should include both clean shutdown and crash scenarios to confirm checkpoints scrub artifacts promptly and recovery catches any stragglers.
 
 ## Milestone 5: Pipeline & Vectorization Exploration (stretch)

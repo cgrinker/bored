@@ -45,6 +45,7 @@ public:
 private:
     [[nodiscard]] std::error_code apply_redo_record(const WalRecoveryRecord& record);
     [[nodiscard]] std::error_code apply_undo_record(const WalRecoveryRecord& record);
+    [[nodiscard]] std::error_code run_temp_cleanup(const WalRecoveryPlan& plan) const;
 
     WalReplayContext& context_;
     std::optional<WalRecordType> last_undo_type_{};
