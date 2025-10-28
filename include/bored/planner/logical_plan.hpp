@@ -23,6 +23,7 @@ enum class LogicalOperatorType {
 struct LogicalProperties final {
     std::size_t estimated_cardinality = 0U;
     bool preserves_order = false;
+    std::string relation_name{};
     std::vector<std::string> output_columns{};
 };
 

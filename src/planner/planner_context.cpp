@@ -19,6 +19,11 @@ const StatisticsCatalog* PlannerContext::statistics() const noexcept
     return config_.statistics;
 }
 
+const CostModel* PlannerContext::cost_model() const noexcept
+{
+    return config_.cost_model;
+}
+
 const txn::Snapshot& PlannerContext::snapshot() const noexcept
 {
     return config_.snapshot;

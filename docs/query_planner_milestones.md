@@ -34,6 +34,8 @@
 - [x] Define `StatisticsCatalog` API for accessing row counts, distinct counts, and histogram stubs.
 	- Introduced planner-level `StatisticsCatalog` with table/column stat records, planner context wiring, and Catch2 coverage for registration and lookup semantics.
 - [ ] Implement a baseline cost model (IO + CPU) for scans, joins, and aggregations.
+- [x] Implement a baseline cost model (IO + CPU) for scans, joins, and aggregations.
+	- Added `CostModel` with deterministic IO/CPU costing factors across scans, filters, projections, and joins plus unit coverage; aggregates defer to logical cardinality until operators exist.
 - [ ] Connect cost model to rule framework so cheapest alternative per group is selected.
 - [ ] Add telemetry counters for rule applications, costing invocations, and chosen plan costs.
 - [ ] Create regression tests that assert stable plan choices given frozen statistics fixtures.
