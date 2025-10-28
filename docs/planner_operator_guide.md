@@ -25,4 +25,12 @@ The query planner turns relational logical plans into executable physical plans.
 5. **Run benchmarks**: Execute `bored_planner_benchmarks --baseline=<file>` to detect performance regressions. Failures with the JSON baseline typically correlate with CPU-intensive rule loops or new cost weights.
 6. **Inspect configuration**: Verify `PlannerOptions` flags, ensuring rule tracing or experimental toggles match expectations, and confirm planner instances remain registered with `StorageTelemetryRegistry`.
 
+## Executor Troubleshooting Addendum
+- **Capture telemetry** – Pull `ExecutorTelemetrySnapshot` values via storage diagnostics or sampler registration. Focus on row counters, latency totals, and lagging operators to narrow the fault domain before diving into code.
+- **Render runtime explain** – Re-run workloads with `ExplainOptions::runtime_stats` to annotate each node with loops, rows, and latency. This highlights stalls such as filters rejecting too many rows or joins matching less than expected.
+- **Validate storage visibility** – When visibility anomalies surface, confirm `ExecutorContext` snapshots mirror the originating transaction. Reproduce with frozen-table fixtures so MVCC edge cases are isolated from live WAL churn.
+- **Exercise benchmarks** – Use `bored_executor_benchmarks --scenario=<name>` to reproduce regressions under controlled cardinalities. Tune `--rows`, `--filter-selectivity`, and `--join-match-rate` to mirror production traces and compare against previous median and p95 values.
+- **Inspect telemetry registry hooks** – Ensure plan construction installs `ExecutorTelemetrySampler` for every pipeline. Missing registrations prevent diagnostics dashboards from surfacing hotspots and often correlate with untracked regressions.
+- **Cross-check retention and WAL** – For write-heavy workloads, verify retention policies and WAL checkpoints are advancing. Stalled retention can surface as executor stalls due to full WAL directories or blocked commit pipelines.
+
 Documenting incidents using the steps above will keep the planner telemetry actionable and drastically reduce the time required to root-cause planning regressions.

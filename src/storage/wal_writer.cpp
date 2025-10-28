@@ -1,6 +1,7 @@
 #include "bored/storage/wal_writer.hpp"
 
 #include "bored/storage/checksum.hpp"
+#include "bored/storage/temp_resource_registry.hpp"
 #include "bored/storage/wal_retention.hpp"
 #include "bored/storage/wal_telemetry_registry.hpp"
 
@@ -63,6 +64,7 @@ WalWriter::WalWriter(std::shared_ptr<AsyncIo> io, WalWriterConfig config)
     }
 
     durability_horizon_ = config_.durability_horizon;
+    temp_resource_registry_ = config_.temp_resource_registry;
 
     const bool retention_enabled = config_.retention.retention_segments > 0U
         || config_.retention.retention_hours.count() > 0
@@ -455,7 +457,7 @@ std::error_code WalWriter::flush()
         return result.status;
     }
 
-    if (auto retention_ec = apply_retention(); retention_ec) {
+    if (auto retention_ec = apply_retention_internal(config_.retention, current_segment_id_, nullptr); retention_ec) {
         return retention_ec;
     }
 
@@ -511,6 +513,13 @@ std::error_code WalWriter::notify_commit()
     return flush();
 }
 
+std::error_code WalWriter::apply_retention(const WalRetentionConfig& config,
+                                           std::uint64_t last_segment_id,
+                                           WalRetentionStats* stats)
+{
+    return apply_retention_internal(config, last_segment_id, stats);
+}
+
 std::error_code WalWriter::maybe_flush_after_append()
 {
     const bool size_trigger = config_.size_flush_threshold > 0U
@@ -526,33 +535,84 @@ std::error_code WalWriter::maybe_flush_after_append()
     return flush();
 }
 
-std::error_code WalWriter::apply_retention()
+std::error_code WalWriter::apply_retention_internal(const WalRetentionConfig& config,
+                                                    std::uint64_t last_segment_id,
+                                                    WalRetentionStats* stats)
 {
-    if (!retention_manager_) {
+    WalRetentionStats local_stats{};
+    WalRetentionStats* stats_ptr = stats != nullptr ? stats : &local_stats;
+
+    const bool retention_enabled = config.retention_segments > 0U
+        || config.retention_hours.count() > 0
+        || !config.archive_path.empty();
+
+    if (retention_enabled && !retention_manager_) {
+        retention_manager_ = std::make_unique<WalRetentionManager>(config_.directory,
+                                                                   config_.file_prefix,
+                                                                   config_.file_extension,
+                                                                   durability_horizon_);
+    }
+
+    config_.retention = config;
+
+    std::error_code retention_error{};
+    if (retention_manager_) {
+        const auto retention_start = std::chrono::steady_clock::now();
+        retention_error = retention_manager_->apply(config, last_segment_id, stats_ptr);
+        const auto retention_end = std::chrono::steady_clock::now();
+        const auto retention_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(retention_end - retention_start).count();
+        const auto duration_ns = static_cast<std::uint64_t>(retention_ns >= 0 ? retention_ns : 0ULL);
+
+        {
+            std::lock_guard guard(telemetry_mutex_);
+            telemetry_.retention_invocations += 1U;
+            telemetry_.retention_scanned_segments += stats_ptr->scanned_segments;
+            telemetry_.retention_candidate_segments += stats_ptr->candidate_segments;
+            telemetry_.retention_pruned_segments += stats_ptr->pruned_segments;
+            telemetry_.retention_archived_segments += stats_ptr->archived_segments;
+            telemetry_.retention_total_duration_ns += duration_ns;
+            telemetry_.retention_last_duration_ns = duration_ns;
+            if (retention_error) {
+                telemetry_.retention_failures += 1U;
+            }
+        }
+    } else if (stats != nullptr) {
+        *stats = WalRetentionStats{};
+    }
+
+    std::error_code cleanup_error = run_temp_cleanup(TempResourcePurgeReason::Checkpoint);
+
+    if (!retention_error) {
+        return cleanup_error;
+    }
+    return retention_error;
+}
+
+std::error_code WalWriter::run_temp_cleanup(TempResourcePurgeReason reason)
+{
+    if (!temp_resource_registry_) {
         return {};
     }
-    const auto retention_start = std::chrono::steady_clock::now();
-    WalRetentionStats stats{};
-    auto ec = retention_manager_->apply(config_.retention, current_segment_id_, &stats);
-    const auto retention_end = std::chrono::steady_clock::now();
-    const auto retention_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(retention_end - retention_start).count();
-    const auto duration_ns = static_cast<std::uint64_t>(retention_ns >= 0 ? retention_ns : 0);
+
+    const auto cleanup_start = std::chrono::steady_clock::now();
+    TempResourcePurgeStats stats{};
+    auto cleanup_error = temp_resource_registry_->purge(reason, &stats);
+    const auto cleanup_end = std::chrono::steady_clock::now();
+    const auto cleanup_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(cleanup_end - cleanup_start).count();
+    const auto duration_ns = static_cast<std::uint64_t>(cleanup_ns >= 0 ? cleanup_ns : 0ULL);
 
     {
         std::lock_guard guard(telemetry_mutex_);
-        telemetry_.retention_invocations += 1U;
-        telemetry_.retention_scanned_segments += stats.scanned_segments;
-        telemetry_.retention_candidate_segments += stats.candidate_segments;
-        telemetry_.retention_pruned_segments += stats.pruned_segments;
-        telemetry_.retention_archived_segments += stats.archived_segments;
-        telemetry_.retention_total_duration_ns += duration_ns;
-        telemetry_.retention_last_duration_ns = duration_ns;
-        if (ec) {
-            telemetry_.retention_failures += 1U;
+        telemetry_.temp_cleanup_invocations += 1U;
+        telemetry_.temp_cleanup_removed_entries += stats.purged_entries;
+        telemetry_.temp_cleanup_total_duration_ns += duration_ns;
+        telemetry_.temp_cleanup_last_duration_ns = duration_ns;
+        if (cleanup_error) {
+            telemetry_.temp_cleanup_failures += 1U;
         }
     }
 
-    return ec;
+    return cleanup_error;
 }
 
 }  // namespace bored::storage

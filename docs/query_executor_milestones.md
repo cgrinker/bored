@@ -72,13 +72,26 @@
 - [x] Introduce executor telemetry samplers (rows produced, latency per operator) and register with diagnostics JSON.
 - [x] Provide tracing hooks so `explain_plan` can attach executor runtime stats post-execution.
 - [x] Build micro-benchmark harness that exercises representative executor pipelines with configurable workloads.
-- [ ] Document troubleshooting steps in an operator addendum (extension of `planner_operator_guide.md`).
+- [x] Document troubleshooting steps in an operator addendum (extension of `planner_operator_guide.md`).
 - [ ] Review retention/checkpoint integration to ensure executor-managed temp resources are cleaned during recovery.
 
 ### Milestone 4 Notes
 - Executor telemetry now publishes per-operator row counters and latency samples via `ExecutorTelemetrySampler`. Plans can register samplers with `StorageTelemetryRegistry`, and diagnostics JSON surfaces per-operator latency totals alongside existing row counters.
 - `planner::ExplainOptions::runtime_stats` accepts per-operator execution traces so rendered plans can embed runtime loops/rows/latency when available.
 - `bored_executor_benchmarks` drives scan, filter, projection, join, and aggregation pipelines with configurable table sizes, selectivity, and join match rates, reporting throughput in text or JSON.
+- The operator guide now includes an executor troubleshooting addendum covering telemetry capture, runtime explain traces, micro-benchmark workflows, and WAL retention checks.
+
+## Milestone 4.5: Retention & Recovery Cleanup (0.5 sprint)
+- [x] Wire production `CheckpointScheduler` instances with a retention hook that invokes `WalWriter::apply_retention` and hands executor temp cleanup to a shared manager.
+- [ ] Implement an executor temp resource manager (spill directories, scratch segments) that registers with the retention hook and exposes crash-safe purge routines.
+- [ ] Extend crash recovery (`WalRecoveryDriver`/`WalReplayer`) to invoke the temp resource purge after redo/undo completes so orphaned artifacts are removed before restart.
+- [ ] Add integration tests that stage executor spill files, trigger checkpoints, and simulate crash recovery to verify deletion on resume.
+- [ ] Surface retention/cleanup telemetry (counts, duration, failure tally) through `StorageTelemetryRegistry` so diagnostics JSON reflects temp resource hygiene.
+
+### Milestone 4.5 Notes
+- The retention hook currently exists only in tests; production wiring will ensure checkpoints consistently drive archival pruning and temp cleanup flows.
+- Temp resource purging should tolerate missing files/directories and log non-fatal errors so recovery continues while still surfacing diagnostics.
+- Integration coverage should include both clean shutdown and crash scenarios to confirm checkpoints scrub artifacts promptly and recovery catches any stragglers.
 
 ## Milestone 5: Pipeline & Vectorization Exploration (stretch)
 - [ ] Prototype batch-oriented executor API that can wrap iterator operators without breaking compatibility.

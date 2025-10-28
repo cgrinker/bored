@@ -12,6 +12,9 @@
 
 namespace bored::storage {
 
+class TempResourceRegistry;
+enum class TempResourcePurgeReason : std::uint8_t;
+
 struct WalRecoveryRecord final {
     WalRecordHeader header{};
     std::vector<std::byte> payload{};
@@ -55,12 +58,16 @@ class WalRecoveryDriver final {
 public:
     WalRecoveryDriver(std::filesystem::path directory,
                       std::string file_prefix = "wal",
-                      std::string file_extension = ".seg");
+                      std::string file_extension = ".seg",
+                      TempResourceRegistry* temp_resource_registry = nullptr);
 
     [[nodiscard]] std::error_code build_plan(WalRecoveryPlan& plan) const;
 
 private:
+    [[nodiscard]] std::error_code run_temp_cleanup() const;
+
     WalReader reader_;
+    TempResourceRegistry* temp_resource_registry_ = nullptr;
 };
 
 }  // namespace bored::storage

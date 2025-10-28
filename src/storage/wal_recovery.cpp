@@ -1,5 +1,6 @@
 #include "bored/storage/wal_recovery.hpp"
 
+#include "bored/storage/temp_resource_registry.hpp"
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_payloads.hpp"
 
@@ -107,8 +108,10 @@ std::uint64_t last_valid_lsn(std::uint64_t start_lsn, const std::vector<WalRecor
 
 WalRecoveryDriver::WalRecoveryDriver(std::filesystem::path directory,
                                      std::string file_prefix,
-                                     std::string file_extension)
+                                     std::string file_extension,
+                                     TempResourceRegistry* temp_resource_registry)
     : reader_{std::move(directory), std::move(file_prefix), std::move(file_extension)}
+    , temp_resource_registry_{temp_resource_registry}
 {
 }
 
@@ -364,7 +367,21 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
         plan.transactions.push_back(entry.second->transaction);
     }
 
+    if (auto cleanup_ec = run_temp_cleanup(); cleanup_ec) {
+        return cleanup_ec;
+    }
+
     return {};
+}
+
+std::error_code WalRecoveryDriver::run_temp_cleanup() const
+{
+    if (!temp_resource_registry_) {
+        return {};
+    }
+
+    TempResourcePurgeStats stats{};
+    return temp_resource_registry_->purge(TempResourcePurgeReason::Recovery, &stats);
 }
 
 }  // namespace bored::storage

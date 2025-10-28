@@ -4,6 +4,7 @@
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/page_manager.hpp"
 #include "bored/storage/free_space_map.hpp"
+#include "bored/storage/temp_resource_registry.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <span>
 #include <vector>
@@ -33,6 +35,7 @@ using bored::storage::PageType;
 using bored::storage::WalUndoWalker;
 using bored::storage::WalWriter;
 using bored::storage::WalWriterConfig;
+using bored::storage::TempResourceRegistry;
 
 namespace {
 
@@ -334,6 +337,49 @@ TEST_CASE("WalRecoveryDriver flags in-flight transactions")
     CHECK(txn.commit_lsn == 0U);
     CHECK(txn.first_lsn == append_result.lsn);
     CHECK(txn.last_lsn == append_result.lsn);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("WalRecoveryDriver purges executor temp resources after recovery plan")
+{
+    auto wal_dir = make_temp_dir("bored_wal_recovery_cleanup_");
+    auto io = make_async_io();
+
+    WalWriterConfig writer_config{};
+    writer_config.directory = wal_dir;
+    writer_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    writer_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    WalWriter writer{io, writer_config};
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::Abort;
+    descriptor.page_id = 123U;
+
+    WalAppendResult append{};
+    REQUIRE_FALSE(writer.append_record(descriptor, append));
+    REQUIRE_FALSE(writer.flush());
+    REQUIRE_FALSE(writer.close());
+    io->shutdown();
+
+    auto spill_dir = wal_dir / "spill";
+    std::filesystem::create_directories(spill_dir);
+    auto spill_file = spill_dir / "temp_executor_file.tmp";
+    {
+        std::ofstream stream(spill_file, std::ios::binary);
+        stream << "spill";
+    }
+    REQUIRE(std::filesystem::exists(spill_file));
+
+    TempResourceRegistry registry;
+    registry.register_directory(spill_dir);
+
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", &registry};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    CHECK_FALSE(std::filesystem::exists(spill_file));
 
     (void)std::filesystem::remove_all(wal_dir);
 }

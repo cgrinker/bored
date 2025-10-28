@@ -4,6 +4,7 @@
 #include "bored/storage/checkpoint_manager.hpp"
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_writer.hpp"
+#include "bored/storage/temp_resource_registry.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -15,6 +16,7 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <fstream>
 
 namespace {
 
@@ -197,6 +199,65 @@ TEST_CASE("CheckpointScheduler honors interval and lsn gap triggers")
     REQUIRE(telemetry.trigger_first == 1U);
     REQUIRE(telemetry.trigger_lsn_gap == 1U);
     REQUIRE(telemetry.last_checkpoint_id == scheduler.last_checkpoint_id());
+
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("CheckpointScheduler default retention hook invokes WalWriter retention")
+{
+    using namespace bored::storage;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_checkpoint_scheduler_default_");
+
+    TempResourceRegistry temp_registry;
+
+    WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * kWalBlockSize;
+    wal_config.buffer_size = 2U * kWalBlockSize;
+    wal_config.retention.retention_segments = 0U;
+    wal_config.temp_resource_registry = &temp_registry;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, wal_config);
+    auto checkpoint_manager = std::make_shared<CheckpointManager>(wal_writer);
+
+    CheckpointScheduler::Config scheduler_config{};
+    scheduler_config.min_interval = std::chrono::seconds(300);
+    scheduler_config.dirty_page_trigger = 0U;
+    scheduler_config.retention.retention_segments = 1U;
+
+    CheckpointScheduler scheduler{checkpoint_manager, scheduler_config};
+
+    auto spill_dir = wal_dir / "spill";
+    std::filesystem::create_directories(spill_dir);
+    auto spill_file = spill_dir / "executor.tmp";
+    {
+        std::ofstream stream(spill_file, std::ios::binary);
+        stream << "spill";
+    }
+    REQUIRE(std::filesystem::exists(spill_file));
+    temp_registry.register_directory(spill_dir);
+
+    const auto now = std::chrono::steady_clock::now();
+    std::optional<WalAppendResult> result;
+    auto provider = [&](CheckpointSnapshot& snapshot) -> std::error_code {
+        snapshot.redo_lsn = wal_writer->next_lsn();
+        snapshot.undo_lsn = wal_writer->next_lsn();
+        snapshot.dirty_pages.clear();
+        snapshot.active_transactions.clear();
+        return {};
+    };
+
+    REQUIRE_FALSE(scheduler.maybe_run(now, provider, true, result));
+    REQUIRE(result.has_value());
+    CHECK_FALSE(std::filesystem::exists(spill_file));
+
+    const auto telemetry = scheduler.retention_telemetry_snapshot();
+    REQUIRE(telemetry.invocations == 1U);
+    REQUIRE(telemetry.failures == 0U);
 
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();

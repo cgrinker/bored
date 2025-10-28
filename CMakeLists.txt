@@ -45,6 +45,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/wal_telemetry_registry.cpp
     src/storage/storage_telemetry_registry.cpp
     src/storage/storage_diagnostics.cpp
+    src/storage/temp_resource_registry.cpp
     src/storage/vacuum_scheduler.cpp
     src/storage/vacuum_background_loop.cpp
     src/storage/vacuum_worker.cpp

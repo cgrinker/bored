@@ -1,6 +1,7 @@
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/checksum.hpp"
+#include "bored/storage/temp_resource_registry.hpp"
 #include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/wal_telemetry_registry.hpp"
 
@@ -26,6 +27,7 @@ using bored::storage::WalRecordHeader;
 using bored::storage::WalRecordType;
 using bored::storage::WalSegmentHeader;
 using bored::storage::WalTelemetryRegistry;
+using bored::storage::TempResourceRegistry;
 using bored::storage::WalWriter;
 using bored::storage::WalWriterConfig;
 
@@ -585,6 +587,53 @@ TEST_CASE("WalWriter retention archives pruned segments when configured")
     auto archived0 = archive / segment0.filename();
     REQUIRE(std::filesystem::exists(archived0));
 
+    io->shutdown();
+    (void)std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("WalWriter purges temp resources during retention cleanup")
+{
+    auto io = make_async_io();
+    auto dir = make_temp_dir("bored_wal_temp_cleanup_");
+    auto spill_dir = dir / "spill";
+    std::filesystem::create_directories(spill_dir);
+    auto spill_file = spill_dir / "spill.tmp";
+    {
+        std::ofstream stream(spill_file, std::ios::binary);
+        stream << "spill";
+    }
+    REQUIRE(std::filesystem::exists(spill_file));
+
+    TempResourceRegistry registry;
+    registry.register_directory(spill_dir);
+
+    WalWriterConfig config{};
+    config.directory = dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.temp_resource_registry = &registry;
+
+    WalWriter writer{io, config};
+
+    std::array<std::byte, 16> payload{};
+    payload.fill(std::byte{0x1});
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::TupleInsert;
+    descriptor.page_id = 55U;
+    descriptor.payload = payload;
+
+    WalAppendResult result{};
+    REQUIRE_FALSE(writer.append_record(descriptor, result));
+    REQUIRE_FALSE(writer.flush());
+
+    auto telemetry = writer.telemetry_snapshot();
+    CHECK(telemetry.temp_cleanup_invocations >= 1U);
+    CHECK(telemetry.temp_cleanup_removed_entries >= 1U);
+
+    REQUIRE_FALSE(std::filesystem::exists(spill_file));
+
+    REQUIRE_FALSE(writer.close());
     io->shutdown();
     (void)std::filesystem::remove_all(dir);
 }

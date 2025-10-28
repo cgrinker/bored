@@ -45,6 +45,16 @@ CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> chec
         config_.lsn_gap_trigger = 4U * kWalBlockSize;
     }
 
+    if (!retention_hook_) {
+        retention_hook_ = [this](const WalRetentionConfig& config, std::uint64_t segment_id, WalRetentionStats* stats) -> std::error_code {
+            auto writer = this->wal_writer();
+            if (!writer) {
+                return std::make_error_code(std::errc::operation_not_permitted);
+            }
+            return writer->apply_retention(config, segment_id, stats);
+        };
+    }
+
     if (telemetry_registry_) {
         if (!telemetry_identifier_.empty()) {
             telemetry_registry_->register_checkpoint_scheduler(telemetry_identifier_, [this] {

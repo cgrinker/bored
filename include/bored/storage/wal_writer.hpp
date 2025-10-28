@@ -19,6 +19,9 @@
 
 namespace bored::storage {
 
+class TempResourceRegistry;
+enum class TempResourcePurgeReason : std::uint8_t;
+
 class WalTelemetryRegistry;
 
 struct WalWriterTelemetrySnapshot final {
@@ -39,6 +42,11 @@ struct WalWriterTelemetrySnapshot final {
     std::uint64_t retention_archived_segments = 0U;
     std::uint64_t retention_total_duration_ns = 0U;
     std::uint64_t retention_last_duration_ns = 0U;
+    std::uint64_t temp_cleanup_invocations = 0U;
+    std::uint64_t temp_cleanup_failures = 0U;
+    std::uint64_t temp_cleanup_removed_entries = 0U;
+    std::uint64_t temp_cleanup_total_duration_ns = 0U;
+    std::uint64_t temp_cleanup_last_duration_ns = 0U;
 };
 
 struct WalWriterConfig final {
@@ -56,6 +64,7 @@ struct WalWriterConfig final {
     std::string telemetry_identifier{};
     WalRetentionConfig retention{};
     std::shared_ptr<WalDurabilityHorizon> durability_horizon{};
+    TempResourceRegistry* temp_resource_registry = nullptr;
 };
 
 struct WalRecordDescriptor final {
@@ -105,6 +114,9 @@ public:
     [[nodiscard]] std::error_code flush();
     [[nodiscard]] std::error_code close();
     [[nodiscard]] std::error_code notify_commit();
+    [[nodiscard]] std::error_code apply_retention(const WalRetentionConfig& config,
+                                                  std::uint64_t last_segment_id,
+                                                  WalRetentionStats* stats);
 
     [[nodiscard]] bool is_closed() const noexcept;
     [[nodiscard]] std::uint64_t next_lsn() const noexcept;
@@ -119,7 +131,10 @@ private:
     [[nodiscard]] std::error_code flush_buffer();
     [[nodiscard]] std::error_code write_segment_header(bool dsync);
     [[nodiscard]] std::error_code maybe_flush_after_append();
-    [[nodiscard]] std::error_code apply_retention();
+    [[nodiscard]] std::error_code apply_retention_internal(const WalRetentionConfig& config,
+                                                           std::uint64_t last_segment_id,
+                                                           WalRetentionStats* stats);
+    [[nodiscard]] std::error_code run_temp_cleanup(TempResourcePurgeReason reason);
     [[nodiscard]] std::error_code append_record_internal(const WalRecordDescriptor& descriptor,
                                                          WalAppendResult& out_result,
                                                          WalStagedAppend* stage);
@@ -156,6 +171,7 @@ private:
 
     std::unique_ptr<WalRetentionManager> retention_manager_{};
     std::shared_ptr<WalDurabilityHorizon> durability_horizon_{};
+    TempResourceRegistry* temp_resource_registry_ = nullptr;
 };
 
 }  // namespace bored::storage
