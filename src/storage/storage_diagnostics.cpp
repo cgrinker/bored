@@ -322,6 +322,14 @@ void append_executor_snapshot(std::string& out, const bored::executor::ExecutorT
     append_field(out, "filter_rows_evaluated", snapshot.filter_rows_evaluated, first);
     append_field(out, "filter_rows_passed", snapshot.filter_rows_passed, first);
     append_field(out, "projection_rows_emitted", snapshot.projection_rows_emitted, first);
+    append_field(out, "nested_loop_rows_compared", snapshot.nested_loop_rows_compared, first);
+    append_field(out, "nested_loop_rows_matched", snapshot.nested_loop_rows_matched, first);
+    append_field(out, "nested_loop_rows_emitted", snapshot.nested_loop_rows_emitted, first);
+    append_field(out, "hash_join_build_rows", snapshot.hash_join_build_rows, first);
+    append_field(out, "hash_join_probe_rows", snapshot.hash_join_probe_rows, first);
+    append_field(out, "hash_join_rows_matched", snapshot.hash_join_rows_matched, first);
+    append_field(out, "aggregation_input_rows", snapshot.aggregation_input_rows, first);
+    append_field(out, "aggregation_groups_emitted", snapshot.aggregation_groups_emitted, first);
     out.push_back('}');
 }
 

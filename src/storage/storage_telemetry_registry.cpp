@@ -198,6 +198,14 @@ bored::executor::ExecutorTelemetrySnapshot& accumulate(bored::executor::Executor
     target.filter_rows_evaluated += source.filter_rows_evaluated;
     target.filter_rows_passed += source.filter_rows_passed;
     target.projection_rows_emitted += source.projection_rows_emitted;
+    target.nested_loop_rows_compared += source.nested_loop_rows_compared;
+    target.nested_loop_rows_matched += source.nested_loop_rows_matched;
+    target.nested_loop_rows_emitted += source.nested_loop_rows_emitted;
+    target.hash_join_build_rows += source.hash_join_build_rows;
+    target.hash_join_probe_rows += source.hash_join_probe_rows;
+    target.hash_join_rows_matched += source.hash_join_rows_matched;
+    target.aggregation_input_rows += source.aggregation_input_rows;
+    target.aggregation_groups_emitted += source.aggregation_groups_emitted;
     return target;
 }
 

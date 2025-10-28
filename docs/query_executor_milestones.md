@@ -33,11 +33,15 @@
 - Catch2 suites (`tests/executor_milestone1_tests.cpp`) exercise scan/filter/projection pipelines and confirm telemetry counters against expected row sets.
 
 ## Milestone 2: Join & Aggregation Operators (1–1.5 sprints)
-- [ ] Implement Nested Loop Join executor supporting parameterized probe inputs and basic predicate evaluation.
+- [x] Implement Nested Loop Join executor supporting parameterized probe inputs and basic predicate evaluation.
 - [ ] Provide Hash Join skeleton with in-memory hash table, build/probe phases, and spill TODO markers.
 - [ ] Add Aggregation executor (hash/group aggregate) with accumulator guards for overflow and null semantics.
 - [ ] Extend planner cost model/explain output to emit executor-specific metadata (batch sizes, join strategy hints).
 - [ ] Cover new operators with integration tests that compare against known-good query outputs and verify telemetry (join rows, aggregation groups).
+
+### Milestone 2 Notes
+- Nested loop join reuses the iterator contract with optional probe rebinding callbacks so parameterized scans (e.g., index lookups) can react to the outer tuple prior to each probe.
+- Join output defaults to concatenating child columns, with projection hooks for downstream shape control; telemetry tracks comparisons, matches, and emitted rows.
 
 ## Milestone 3: DML & WAL Coordination (1 sprint)
 - [ ] Implement Insert executor that consumes child rows, allocates heap tuples, and emits WAL via `PageManager` hooks.

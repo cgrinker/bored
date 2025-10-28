@@ -66,6 +66,7 @@ add_library(${PROJECT_NAME}_lib
     src/executor/seq_scan_executor.cpp
     src/executor/filter_executor.cpp
     src/executor/projection_executor.cpp
+    src/executor/nested_loop_join_executor.cpp
     src/planner/rule.cpp
     src/planner/rules/join_rules.cpp
     src/planner/rules/predicate_pushdown_rule.cpp
@@ -177,6 +178,7 @@ if(BORED_ENABLE_TESTS)
     tests/transaction_manager_tests.cpp
     tests/wal_commit_pipeline_tests.cpp
         tests/executor_scaffolding_tests.cpp
+        tests/executor_nested_loop_join_tests.cpp
         tests/executor_milestone1_tests.cpp
     )
 

@@ -167,6 +167,14 @@ executor::ExecutorTelemetrySnapshot make_executor(std::uint64_t seed)
     snapshot.filter_rows_evaluated = seed + 3U;
     snapshot.filter_rows_passed = seed + 1U;
     snapshot.projection_rows_emitted = seed + 4U;
+    snapshot.nested_loop_rows_compared = seed + 5U;
+    snapshot.nested_loop_rows_matched = seed + 2U;
+    snapshot.nested_loop_rows_emitted = seed + 2U;
+    snapshot.hash_join_build_rows = seed + 6U;
+    snapshot.hash_join_probe_rows = seed + 7U;
+    snapshot.hash_join_rows_matched = seed + 3U;
+    snapshot.aggregation_input_rows = seed + 8U;
+    snapshot.aggregation_groups_emitted = seed + 4U;
     return snapshot;
 }
 
@@ -236,6 +244,14 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.executors.total.filter_rows_evaluated == ((2U + 3U) + (5U + 3U)));
     REQUIRE(doc.executors.total.filter_rows_passed == ((2U + 1U) + (5U + 1U)));
     REQUIRE(doc.executors.total.projection_rows_emitted == ((2U + 4U) + (5U + 4U)));
+    REQUIRE(doc.executors.total.nested_loop_rows_compared == ((2U + 5U) + (5U + 5U)));
+    REQUIRE(doc.executors.total.nested_loop_rows_matched == ((2U + 2U) + (5U + 2U)));
+    REQUIRE(doc.executors.total.nested_loop_rows_emitted == ((2U + 2U) + (5U + 2U)));
+    REQUIRE(doc.executors.total.hash_join_build_rows == ((2U + 6U) + (5U + 6U)));
+    REQUIRE(doc.executors.total.hash_join_probe_rows == ((2U + 7U) + (5U + 7U)));
+    REQUIRE(doc.executors.total.hash_join_rows_matched == ((2U + 3U) + (5U + 3U)));
+    REQUIRE(doc.executors.total.aggregation_input_rows == ((2U + 8U) + (5U + 8U)));
+    REQUIRE(doc.executors.total.aggregation_groups_emitted == ((2U + 4U) + (5U + 4U)));
     REQUIRE(doc.collected_at.time_since_epoch().count() != 0);
 
     REQUIRE(doc.page_managers.details.front().identifier == "pm_a");
@@ -329,4 +345,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"executors\"") != std::string::npos);
     REQUIRE(json.find("\"pruned_segments\":9") != std::string::npos);
     REQUIRE(json.find("\"create_table\"") != std::string::npos);
+    REQUIRE(json.find("\"nested_loop_rows_compared\"") != std::string::npos);
+    REQUIRE(json.find("\"hash_join_build_rows\"") != std::string::npos);
+    REQUIRE(json.find("\"aggregation_groups_emitted\"") != std::string::npos);
 }
