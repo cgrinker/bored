@@ -49,11 +49,18 @@
 - Remaining follow-ups: (1) calibrate cost-model batch heuristics against benchmark workloads, (2) exercise join+aggregate pipelines with filter/projection chains, and (3) prototype aggregation spill/reclaim policies once temporary storage is available.
 
 ## Milestone 3: DML & WAL Coordination (1 sprint)
-- [ ] Implement Insert executor that consumes child rows, allocates heap tuples, and emits WAL via `PageManager` hooks.
+- [x] Implement Insert executor that consumes child rows, allocates heap tuples, and emits WAL via `PageManager` hooks.
 - [ ] Implement Update executor handling before-image capture, overflow modifications, and commit visibility updates.
 - [ ] Implement Delete executor that coordinates lock/undo logging and free space reclamation.
 - [ ] Wire executors into transaction manager callbacks to ensure commit/abort flows flush staged writes.
 - [ ] Add regression tests covering crash-recovery of DML operations and verifying WAL segments via existing readers.
+
+### Milestone 3 Notes
+- Insert executor drains child pipelines into a pluggable storage target that currently wraps `PageManager`, stamps tuple headers with the running transaction id, and flushes WAL as part of close semantics.
+- Executor telemetry now tracks insert attempts/successes plus payload and WAL byte counters so diagnostics can surface DML impact.
+- New unit coverage exercises end-to-end insert flows against a single-page heap, verifying tuple materialisation, WAL emission, and telemetry snapshots.
+- Latest validation: `cmake --build build-macos --target bored_tests` followed by `./build-macos/bored_tests "InsertExecutor writes tuples via PageManager"`.
+- Next steps: design update/delete executors with undo logging hooks, ensure mutation targets coordinate with transaction abort callbacks, and extend tests to crash/recovery scenarios once undo walk plumbing is ready.
 
 ## Milestone 4: Execution Services & Diagnostics (0.5 sprint)
 - [ ] Introduce executor telemetry samplers (rows produced, latency per operator) and register with diagnostics JSON.
