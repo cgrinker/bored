@@ -24,7 +24,10 @@ enum class WalRecordType : std::uint16_t {
     PageCompaction = 11,
     CatalogInsert = 12,
     CatalogDelete = 13,
-    CatalogUpdate = 14
+    CatalogUpdate = 14,
+    IndexSplit = 15,
+    IndexMerge = 16,
+    IndexBulkCheckpoint = 17
 };
 
 enum class WalRecordFlag : std::uint16_t {
@@ -74,7 +77,7 @@ constexpr bool is_valid_segment_header(const WalSegmentHeader& header)
 
 constexpr bool is_valid_record_header(const WalRecordHeader& header)
 {
-    return header.total_length >= sizeof(WalRecordHeader) && header.type <= static_cast<std::uint16_t>(WalRecordType::CatalogUpdate);
+    return header.total_length >= sizeof(WalRecordHeader) && header.type <= static_cast<std::uint16_t>(WalRecordType::IndexBulkCheckpoint);
 }
 
 static_assert(sizeof(WalSegmentHeader) == 32, "WalSegmentHeader expected to be 32 bytes");

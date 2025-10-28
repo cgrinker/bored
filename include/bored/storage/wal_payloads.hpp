@@ -6,6 +6,8 @@
 #include <span>
 #include <vector>
 
+#include "bored/storage/index_btree_page.hpp"
+
 namespace bored::storage {
 
 struct alignas(8) WalTupleMeta final {
@@ -160,6 +162,152 @@ struct WalCompactionView final {
     std::vector<WalCompactionEntry> entries{};
 };
 
+enum class WalIndexSplitFlag : std::uint16_t {
+    None = 0,
+    Leaf = 1U << 0,
+    Root = 1U << 1
+};
+
+constexpr WalIndexSplitFlag operator|(WalIndexSplitFlag lhs, WalIndexSplitFlag rhs)
+{
+    return static_cast<WalIndexSplitFlag>(static_cast<std::uint16_t>(lhs) | static_cast<std::uint16_t>(rhs));
+}
+
+constexpr WalIndexSplitFlag operator&(WalIndexSplitFlag lhs, WalIndexSplitFlag rhs)
+{
+    return static_cast<WalIndexSplitFlag>(static_cast<std::uint16_t>(lhs) & static_cast<std::uint16_t>(rhs));
+}
+
+constexpr bool any(WalIndexSplitFlag value)
+{
+    return static_cast<std::uint16_t>(value) != 0U;
+}
+
+enum class WalIndexMergeFlag : std::uint16_t {
+    None = 0,
+    Leaf = 1U << 0,
+    Root = 1U << 1
+};
+
+constexpr WalIndexMergeFlag operator|(WalIndexMergeFlag lhs, WalIndexMergeFlag rhs)
+{
+    return static_cast<WalIndexMergeFlag>(static_cast<std::uint16_t>(lhs) | static_cast<std::uint16_t>(rhs));
+}
+
+constexpr WalIndexMergeFlag operator&(WalIndexMergeFlag lhs, WalIndexMergeFlag rhs)
+{
+    return static_cast<WalIndexMergeFlag>(static_cast<std::uint16_t>(lhs) & static_cast<std::uint16_t>(rhs));
+}
+
+constexpr bool any(WalIndexMergeFlag value)
+{
+    return static_cast<std::uint16_t>(value) != 0U;
+}
+
+enum class WalIndexBulkBuildStage : std::uint32_t {
+    Unknown = 0,
+    ScanHeap = 1,
+    SortKeys = 2,
+    WriteLeaves = 3,
+    BuildUpperLevels = 4,
+    Finalise = 5
+};
+
+enum class WalIndexBulkCheckpointFlag : std::uint32_t {
+    None = 0,
+    Completed = 1U << 0
+};
+
+constexpr WalIndexBulkCheckpointFlag operator|(WalIndexBulkCheckpointFlag lhs, WalIndexBulkCheckpointFlag rhs)
+{
+    return static_cast<WalIndexBulkCheckpointFlag>(static_cast<std::uint32_t>(lhs) | static_cast<std::uint32_t>(rhs));
+}
+
+constexpr WalIndexBulkCheckpointFlag operator&(WalIndexBulkCheckpointFlag lhs, WalIndexBulkCheckpointFlag rhs)
+{
+    return static_cast<WalIndexBulkCheckpointFlag>(static_cast<std::uint32_t>(lhs) & static_cast<std::uint32_t>(rhs));
+}
+
+constexpr bool any(WalIndexBulkCheckpointFlag value)
+{
+    return static_cast<std::uint32_t>(value) != 0U;
+}
+
+struct alignas(8) WalIndexSplitHeader final {
+    std::uint64_t index_id = 0U;
+    std::uint32_t left_page_id = 0U;
+    std::uint32_t right_page_id = 0U;
+    std::uint32_t parent_page_id = 0U;
+    std::uint32_t right_sibling_page_id = 0U;
+    std::uint16_t level = 0U;
+    std::uint16_t flags = static_cast<std::uint16_t>(WalIndexSplitFlag::None);
+    std::uint16_t parent_insert_slot = 0U;
+    std::uint16_t reserved0 = 0U;
+    std::uint32_t pivot_key_length = 0U;
+    std::uint32_t left_slot_count = 0U;
+    std::uint32_t right_slot_count = 0U;
+    std::uint32_t left_payload_length = 0U;
+    std::uint32_t right_payload_length = 0U;
+};
+
+struct WalIndexSplitView final {
+    WalIndexSplitHeader header{};
+    std::span<const IndexBtreeSlotEntry> left_slots{};
+    std::span<const std::byte> left_payload{};
+    std::span<const IndexBtreeSlotEntry> right_slots{};
+    std::span<const std::byte> right_payload{};
+    std::span<const std::byte> pivot_key{};
+};
+
+struct alignas(8) WalIndexMergeHeader final {
+    std::uint64_t index_id = 0U;
+    std::uint32_t surviving_page_id = 0U;
+    std::uint32_t removed_page_id = 0U;
+    std::uint32_t parent_page_id = 0U;
+    std::uint32_t new_right_sibling_page_id = 0U;
+    std::uint16_t level = 0U;
+    std::uint16_t flags = static_cast<std::uint16_t>(WalIndexMergeFlag::None);
+    std::uint16_t parent_remove_slot = 0U;
+    std::uint16_t reserved0 = 0U;
+    std::uint32_t separator_key_length = 0U;
+    std::uint32_t slot_count = 0U;
+    std::uint32_t payload_length = 0U;
+    std::uint32_t reserved1 = 0U;
+};
+
+struct WalIndexMergeView final {
+    WalIndexMergeHeader header{};
+    std::span<const IndexBtreeSlotEntry> slots{};
+    std::span<const std::byte> payload{};
+    std::span<const std::byte> separator_key{};
+};
+
+struct alignas(8) WalIndexBulkCheckpointHeader final {
+    std::uint64_t index_id = 0U;
+    std::uint64_t build_id = 0U;
+    std::uint64_t processed_tuple_count = 0U;
+    std::uint64_t last_heap_row_id = 0U;
+    std::uint32_t stage = static_cast<std::uint32_t>(WalIndexBulkBuildStage::Unknown);
+    std::uint32_t run_count = 0U;
+    std::uint32_t pending_leaf_count = 0U;
+    std::uint32_t pending_internal_count = 0U;
+    std::uint32_t flags = static_cast<std::uint32_t>(WalIndexBulkCheckpointFlag::None);
+    std::uint32_t reserved = 0U;
+};
+
+struct alignas(8) WalIndexBulkRunEntry final {
+    std::uint32_t page_id = 0U;
+    std::uint32_t level = 0U;
+    std::uint32_t slot_count = 0U;
+    std::uint32_t payload_length = 0U;
+    std::uint64_t high_row_id = 0U;
+};
+
+struct WalIndexBulkCheckpointView final {
+    WalIndexBulkCheckpointHeader header{};
+    std::vector<WalIndexBulkRunEntry> pending_runs{};
+};
+
 constexpr std::size_t wal_tuple_insert_payload_size(std::uint16_t tuple_length)
 {
     return sizeof(WalTupleMeta) + tuple_length;
@@ -194,6 +342,18 @@ std::size_t wal_checkpoint_payload_size(std::size_t dirty_page_count, std::size_
 
 std::size_t wal_compaction_payload_size(std::size_t entry_count);
 
+std::size_t wal_index_split_payload_size(std::size_t left_slot_count,
+                                         std::size_t left_payload_length,
+                                         std::size_t right_slot_count,
+                                         std::size_t right_payload_length,
+                                         std::size_t pivot_key_length);
+
+std::size_t wal_index_merge_payload_size(std::size_t slot_count,
+                                         std::size_t payload_length,
+                                         std::size_t separator_key_length);
+
+std::size_t wal_index_bulk_checkpoint_payload_size(std::size_t run_count);
+
 bool encode_wal_tuple_insert(std::span<std::byte> buffer,
                              const WalTupleMeta& meta,
                              std::span<const std::byte> tuple_data);
@@ -225,6 +385,12 @@ std::optional<WalCheckpointView> decode_wal_checkpoint(std::span<const std::byte
 
 std::optional<WalCompactionView> decode_wal_compaction(std::span<const std::byte> buffer);
 
+std::optional<WalIndexSplitView> decode_wal_index_split(std::span<const std::byte> buffer);
+
+std::optional<WalIndexMergeView> decode_wal_index_merge(std::span<const std::byte> buffer);
+
+std::optional<WalIndexBulkCheckpointView> decode_wal_index_bulk_checkpoint(std::span<const std::byte> buffer);
+
 std::optional<WalCommitHeader> decode_wal_commit(std::span<const std::byte> buffer);
 
 std::span<const std::byte> wal_tuple_payload(std::span<const std::byte> buffer, const WalTupleMeta& meta);
@@ -250,6 +416,24 @@ bool encode_wal_compaction(std::span<std::byte> buffer,
                            const WalCompactionHeader& header,
                            std::span<const WalCompactionEntry> entries);
 
+bool encode_wal_index_split(std::span<std::byte> buffer,
+                            const WalIndexSplitHeader& header,
+                            std::span<const IndexBtreeSlotEntry> left_slots,
+                            std::span<const std::byte> left_payload,
+                            std::span<const IndexBtreeSlotEntry> right_slots,
+                            std::span<const std::byte> right_payload,
+                            std::span<const std::byte> pivot_key);
+
+bool encode_wal_index_merge(std::span<std::byte> buffer,
+                            const WalIndexMergeHeader& header,
+                            std::span<const IndexBtreeSlotEntry> slots,
+                            std::span<const std::byte> payload,
+                            std::span<const std::byte> separator_key);
+
+bool encode_wal_index_bulk_checkpoint(std::span<std::byte> buffer,
+                                      const WalIndexBulkCheckpointHeader& header,
+                                      std::span<const WalIndexBulkRunEntry> pending_runs);
+
 std::span<const std::byte> wal_overflow_chunk_payload(std::span<const std::byte> buffer,
                                                       const WalOverflowChunkMeta& meta);
 
@@ -274,5 +458,13 @@ static_assert(sizeof(WalCompactionHeader) == 32, "WalCompactionHeader expected t
 static_assert(alignof(WalCompactionHeader) == 8, "WalCompactionHeader requires 8-byte alignment");
 static_assert(sizeof(WalCompactionEntry) == 24, "WalCompactionEntry expected to be 24 bytes");
 static_assert(alignof(WalCompactionEntry) == 8, "WalCompactionEntry requires 8-byte alignment");
+static_assert(sizeof(WalIndexSplitHeader) == 56, "WalIndexSplitHeader expected to be 56 bytes");
+static_assert(alignof(WalIndexSplitHeader) == 8, "WalIndexSplitHeader requires 8-byte alignment");
+static_assert(sizeof(WalIndexMergeHeader) == 48, "WalIndexMergeHeader expected to be 48 bytes");
+static_assert(alignof(WalIndexMergeHeader) == 8, "WalIndexMergeHeader requires 8-byte alignment");
+static_assert(sizeof(WalIndexBulkCheckpointHeader) == 56, "WalIndexBulkCheckpointHeader expected to be 56 bytes");
+static_assert(alignof(WalIndexBulkCheckpointHeader) == 8, "WalIndexBulkCheckpointHeader requires 8-byte alignment");
+static_assert(sizeof(WalIndexBulkRunEntry) == 24, "WalIndexBulkRunEntry expected to be 24 bytes");
+static_assert(alignof(WalIndexBulkRunEntry) == 8, "WalIndexBulkRunEntry requires 8-byte alignment");
 
 }  // namespace bored::storage

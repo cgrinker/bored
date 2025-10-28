@@ -35,6 +35,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/page_manager.cpp
     src/storage/lock_manager.cpp
     src/storage/free_space_map_persistence.cpp
+    src/storage/index_comparator_registry.cpp
     src/storage/wal_apply_helpers.cpp
     src/storage/wal_writer.cpp
     src/storage/wal_reader.cpp
@@ -43,6 +44,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/wal_replayer.cpp
     src/storage/wal_retention.cpp
     src/storage/wal_telemetry_registry.cpp
+    src/storage/storage_runtime.cpp
     src/storage/storage_telemetry_registry.cpp
     src/storage/storage_diagnostics.cpp
     src/storage/temp_resource_registry.cpp
@@ -150,6 +152,8 @@ if(BORED_ENABLE_TESTS)
         tests/async_io_tests.cpp
         tests/async_io_ioring_tests.cpp
         tests/catalog_bootstrap_tests.cpp
+    tests/index_comparator_tests.cpp
+        tests/index_wal_payload_tests.cpp
         tests/catalog_ddl_tests.cpp
         tests/catalog_cache_tests.cpp
     tests/catalog_mutator_tests.cpp
@@ -173,6 +177,7 @@ if(BORED_ENABLE_TESTS)
         tests/lock_manager_tests.cpp
         tests/storage_telemetry_tests.cpp
         tests/storage_diagnostics_tests.cpp
+    tests/storage_runtime_tests.cpp
         tests/vacuum_scheduler_tests.cpp
     tests/vacuum_background_loop_tests.cpp
         tests/vacuum_worker_tests.cpp

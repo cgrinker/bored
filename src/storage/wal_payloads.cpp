@@ -229,6 +229,35 @@ std::size_t wal_compaction_payload_size(std::size_t entry_count)
     return sizeof(WalCompactionHeader) + (entry_count * sizeof(WalCompactionEntry));
 }
 
+std::size_t wal_index_split_payload_size(std::size_t left_slot_count,
+                                         std::size_t left_payload_length,
+                                         std::size_t right_slot_count,
+                                         std::size_t right_payload_length,
+                                         std::size_t pivot_key_length)
+{
+    return sizeof(WalIndexSplitHeader)
+        + (left_slot_count * sizeof(IndexBtreeSlotEntry))
+        + (right_slot_count * sizeof(IndexBtreeSlotEntry))
+        + left_payload_length
+        + right_payload_length
+        + pivot_key_length;
+}
+
+std::size_t wal_index_merge_payload_size(std::size_t slot_count,
+                                         std::size_t payload_length,
+                                         std::size_t separator_key_length)
+{
+    return sizeof(WalIndexMergeHeader)
+        + (slot_count * sizeof(IndexBtreeSlotEntry))
+        + payload_length
+        + separator_key_length;
+}
+
+std::size_t wal_index_bulk_checkpoint_payload_size(std::size_t run_count)
+{
+    return sizeof(WalIndexBulkCheckpointHeader) + (run_count * sizeof(WalIndexBulkRunEntry));
+}
+
 bool encode_wal_overflow_truncate(std::span<std::byte> buffer,
                                   const WalOverflowTruncateMeta& meta,
                                   std::span<const WalOverflowChunkMeta> chunk_metas,
@@ -344,6 +373,158 @@ bool encode_wal_compaction(std::span<std::byte> buffer,
     return true;
 }
 
+bool encode_wal_index_split(std::span<std::byte> buffer,
+                            const WalIndexSplitHeader& header,
+                            std::span<const IndexBtreeSlotEntry> left_slots,
+                            std::span<const std::byte> left_payload,
+                            std::span<const IndexBtreeSlotEntry> right_slots,
+                            std::span<const std::byte> right_payload,
+                            std::span<const std::byte> pivot_key)
+{
+    if (left_slots.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    if (right_slots.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    if (left_payload.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    if (right_payload.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    if (pivot_key.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+
+    WalIndexSplitHeader local_header = header;
+    local_header.left_slot_count = static_cast<std::uint32_t>(left_slots.size());
+    local_header.right_slot_count = static_cast<std::uint32_t>(right_slots.size());
+    local_header.left_payload_length = static_cast<std::uint32_t>(left_payload.size());
+    local_header.right_payload_length = static_cast<std::uint32_t>(right_payload.size());
+    local_header.pivot_key_length = static_cast<std::uint32_t>(pivot_key.size());
+
+    const auto required = wal_index_split_payload_size(left_slots.size(),
+                                                       left_payload.size(),
+                                                       right_slots.size(),
+                                                       right_payload.size(),
+                                                       pivot_key.size());
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &local_header, sizeof(WalIndexSplitHeader));
+
+    std::size_t offset = sizeof(WalIndexSplitHeader);
+
+    if (!left_slots.empty()) {
+        const auto bytes = left_slots.size() * sizeof(IndexBtreeSlotEntry);
+        std::memcpy(buffer.data() + offset, left_slots.data(), bytes);
+        offset += bytes;
+    }
+
+    if (!right_slots.empty()) {
+        const auto bytes = right_slots.size() * sizeof(IndexBtreeSlotEntry);
+        std::memcpy(buffer.data() + offset, right_slots.data(), bytes);
+        offset += bytes;
+    }
+
+    if (!left_payload.empty()) {
+        std::memcpy(buffer.data() + offset, left_payload.data(), left_payload.size());
+        offset += left_payload.size();
+    }
+
+    if (!right_payload.empty()) {
+        std::memcpy(buffer.data() + offset, right_payload.data(), right_payload.size());
+        offset += right_payload.size();
+    }
+
+    if (!pivot_key.empty()) {
+        std::memcpy(buffer.data() + offset, pivot_key.data(), pivot_key.size());
+        offset += pivot_key.size();
+    }
+
+    (void)offset;
+    return true;
+}
+
+bool encode_wal_index_merge(std::span<std::byte> buffer,
+                            const WalIndexMergeHeader& header,
+                            std::span<const IndexBtreeSlotEntry> slots,
+                            std::span<const std::byte> payload,
+                            std::span<const std::byte> separator_key)
+{
+    if (slots.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    if (payload.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    if (separator_key.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+
+    WalIndexMergeHeader local_header = header;
+    local_header.slot_count = static_cast<std::uint32_t>(slots.size());
+    local_header.payload_length = static_cast<std::uint32_t>(payload.size());
+    local_header.separator_key_length = static_cast<std::uint32_t>(separator_key.size());
+
+    const auto required = wal_index_merge_payload_size(slots.size(), payload.size(), separator_key.size());
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &local_header, sizeof(WalIndexMergeHeader));
+
+    std::size_t offset = sizeof(WalIndexMergeHeader);
+
+    if (!slots.empty()) {
+        const auto bytes = slots.size() * sizeof(IndexBtreeSlotEntry);
+        std::memcpy(buffer.data() + offset, slots.data(), bytes);
+        offset += bytes;
+    }
+
+    if (!payload.empty()) {
+        std::memcpy(buffer.data() + offset, payload.data(), payload.size());
+        offset += payload.size();
+    }
+
+    if (!separator_key.empty()) {
+        std::memcpy(buffer.data() + offset, separator_key.data(), separator_key.size());
+        offset += separator_key.size();
+    }
+
+    (void)offset;
+    return true;
+}
+
+bool encode_wal_index_bulk_checkpoint(std::span<std::byte> buffer,
+                                      const WalIndexBulkCheckpointHeader& header,
+                                      std::span<const WalIndexBulkRunEntry> pending_runs)
+{
+    if (pending_runs.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+
+    WalIndexBulkCheckpointHeader local_header = header;
+    local_header.run_count = static_cast<std::uint32_t>(pending_runs.size());
+
+    const auto required = wal_index_bulk_checkpoint_payload_size(pending_runs.size());
+    if (!fits(buffer, required)) {
+        return false;
+    }
+
+    std::memcpy(buffer.data(), &local_header, sizeof(WalIndexBulkCheckpointHeader));
+
+    if (!pending_runs.empty()) {
+        std::memcpy(buffer.data() + sizeof(WalIndexBulkCheckpointHeader),
+                    pending_runs.data(),
+                    pending_runs.size() * sizeof(WalIndexBulkRunEntry));
+    }
+
+    return true;
+}
+
 std::optional<WalOverflowChunkMeta> decode_wal_overflow_chunk_meta(std::span<const std::byte> buffer)
 {
     if (!fits(buffer, sizeof(WalOverflowChunkMeta))) {
@@ -450,6 +631,129 @@ std::optional<WalCompactionView> decode_wal_compaction(std::span<const std::byte
     if (!view.entries.empty()) {
         std::memcpy(view.entries.data(), buffer.data() + sizeof(WalCompactionHeader), entry_bytes);
     }
+    return view;
+}
+
+std::optional<WalIndexSplitView> decode_wal_index_split(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalIndexSplitHeader))) {
+        return std::nullopt;
+    }
+
+    WalIndexSplitHeader header{};
+    std::memcpy(&header, buffer.data(), sizeof(WalIndexSplitHeader));
+
+    const auto required = wal_index_split_payload_size(header.left_slot_count,
+                                                       header.left_payload_length,
+                                                       header.right_slot_count,
+                                                       header.right_payload_length,
+                                                       header.pivot_key_length);
+    if (!fits(buffer, required)) {
+        return std::nullopt;
+    }
+
+    std::size_t offset = sizeof(WalIndexSplitHeader);
+
+    const auto left_slot_bytes = static_cast<std::size_t>(header.left_slot_count) * sizeof(IndexBtreeSlotEntry);
+    const auto left_slot_ptr = reinterpret_cast<const IndexBtreeSlotEntry*>(buffer.data() + offset);
+    auto left_slots = std::span<const IndexBtreeSlotEntry>(left_slot_ptr, header.left_slot_count);
+    offset += left_slot_bytes;
+
+    const auto right_slot_bytes = static_cast<std::size_t>(header.right_slot_count) * sizeof(IndexBtreeSlotEntry);
+    const auto right_slot_ptr = reinterpret_cast<const IndexBtreeSlotEntry*>(buffer.data() + offset);
+    auto right_slots = std::span<const IndexBtreeSlotEntry>(right_slot_ptr, header.right_slot_count);
+    offset += right_slot_bytes;
+
+    const auto left_payload_length = static_cast<std::size_t>(header.left_payload_length);
+    auto left_payload = buffer.subspan(offset, left_payload_length);
+    offset += left_payload_length;
+
+    const auto right_payload_length = static_cast<std::size_t>(header.right_payload_length);
+    auto right_payload = buffer.subspan(offset, right_payload_length);
+    offset += right_payload_length;
+
+    const auto pivot_key_length = static_cast<std::size_t>(header.pivot_key_length);
+    auto pivot_key = buffer.subspan(offset, pivot_key_length);
+    offset += pivot_key_length;
+
+    (void)offset;
+
+    WalIndexSplitView view{};
+    view.header = header;
+    view.left_slots = left_slots;
+    view.left_payload = left_payload;
+    view.right_slots = right_slots;
+    view.right_payload = right_payload;
+    view.pivot_key = pivot_key;
+    return view;
+}
+
+std::optional<WalIndexMergeView> decode_wal_index_merge(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalIndexMergeHeader))) {
+        return std::nullopt;
+    }
+
+    WalIndexMergeHeader header{};
+    std::memcpy(&header, buffer.data(), sizeof(WalIndexMergeHeader));
+
+    const auto required = wal_index_merge_payload_size(header.slot_count,
+                                                       header.payload_length,
+                                                       header.separator_key_length);
+    if (!fits(buffer, required)) {
+        return std::nullopt;
+    }
+
+    std::size_t offset = sizeof(WalIndexMergeHeader);
+
+    const auto slot_bytes = static_cast<std::size_t>(header.slot_count) * sizeof(IndexBtreeSlotEntry);
+    const auto slot_ptr = reinterpret_cast<const IndexBtreeSlotEntry*>(buffer.data() + offset);
+    auto slots = std::span<const IndexBtreeSlotEntry>(slot_ptr, header.slot_count);
+    offset += slot_bytes;
+
+    const auto payload_length = static_cast<std::size_t>(header.payload_length);
+    auto payload = buffer.subspan(offset, payload_length);
+    offset += payload_length;
+
+    const auto separator_key_length = static_cast<std::size_t>(header.separator_key_length);
+    auto separator_key = buffer.subspan(offset, separator_key_length);
+    offset += separator_key_length;
+
+    (void)offset;
+
+    WalIndexMergeView view{};
+    view.header = header;
+    view.slots = slots;
+    view.payload = payload;
+    view.separator_key = separator_key;
+    return view;
+}
+
+std::optional<WalIndexBulkCheckpointView> decode_wal_index_bulk_checkpoint(std::span<const std::byte> buffer)
+{
+    if (!fits(buffer, sizeof(WalIndexBulkCheckpointHeader))) {
+        return std::nullopt;
+    }
+
+    WalIndexBulkCheckpointHeader header{};
+    std::memcpy(&header, buffer.data(), sizeof(WalIndexBulkCheckpointHeader));
+
+    const auto required = wal_index_bulk_checkpoint_payload_size(header.run_count);
+    if (!fits(buffer, required)) {
+        return std::nullopt;
+    }
+
+    WalIndexBulkCheckpointView view{};
+    view.header = header;
+
+    if (header.run_count != 0U) {
+        const auto run_bytes = static_cast<std::size_t>(header.run_count) * sizeof(WalIndexBulkRunEntry);
+        view.pending_runs.resize(header.run_count);
+        std::memcpy(view.pending_runs.data(),
+                    buffer.data() + sizeof(WalIndexBulkCheckpointHeader),
+                    run_bytes);
+    }
+
     return view;
 }
 
