@@ -62,6 +62,38 @@ This document captures the first pass at the on-disk layout for the experimental
 - **Recovery replay:** `WalReplayer` hydrates page images from `WalRecoveryPlan` redo entries, applies tuple inserts/updates/deletes idempotently, and prepares the buffer cache for crash restart simulations while refreshing free-space hints.
 - **Page manager integration:** `PageManager` plans tuple inserts/deletes/updates, emits the corresponding WAL records first, then applies the in-memory mutation so LSNs stay chained, free-space tracking stays coherent, and page headers capture the latest LSN. Large tuples now spill across overflow pages with stub tuples, per-chunk WAL records, and page flags that guide recovery; replay refreshes `HasOverflow` automatically during redo/undo.
 
+## Operational Guidance
+
+### Diagnostics Entry Points
+
+- **Telemetry snapshots:** Call `storage::collect_storage_diagnostics()` (see `storage_diagnostics.hpp`) to obtain a JSON blob containing WAL writer throughput, checkpoint cadence, retention pruning counts, vacuum activity, and transaction horizon gauges. Surface this through an HTTP endpoint or CLI command; consumers should treat missing fields as component-disabled rather than failure.
+- **Point-in-time probes:** The `bored_tests` harness exercises `WalRecoveryDriver`, `WalReplayer`, and `WalUndoWalker` end-to-end. Re-run `ctest -R wal_.*` during incident response to validate replay primitives after code or configuration changes.
+- **Log sampling:** Set `WalWriterConfig::telemetry_identifier` plus `WalWriterConfig::telemetry_registry` to register append/fail counters automatically. Pair this with `StorageTelemetryRegistry::snapshot()` to feed dashboards tracking write latency spikes and retention lag.
+- **Filesystem health:** When retention stalls, invoke `WalRetentionManager::collect_metrics()` (exposed through the diagnostics collector) to inspect archived segment counts, prune durations, and oldest-active transaction ids that are blocking reclamation.
+
+### Tuning Knobs
+
+- **WAL durability:** Adjust `WalWriterConfig::buffer_size`, `size_flush_threshold`, and `time_flush_threshold` to balance commit latency vs. throughput. Use telemetry snapshots to confirm `durable_commit_lsn` keeps pace with peak workloads before tightening thresholds.
+- **Retention policy:** Configure `WalRetentionConfig::retention_segments` for size-based pruning and `retention_hours` for time-based fallbacks. Operators running change-data-capture tooling should widen both windows until downstream lag consistently stays within their SLA. Archive staging paths are controlled via `archive_path` and can be rotated with daily cron jobs.
+- **Checkpoint cadence:** `CheckpointSchedulerConfig::dirty_page_limit`, `lsn_gap_limit`, and `tick_interval` govern checkpoint frequency. When recovery time objectives (RTO) shrink, lower the LSN gap or tick interval while monitoring `checkpoint_scheduler_tests` derived metrics for increased flush pressure.
+- **Vacuum pressure:** Tweak `VacuumWorkerConfig::batch_limit` and `VacuumBackgroundLoopConfig::tick_interval` when fragment counts remain high. Larger batches reduce amortised latch overhead, while shorter ticks favour latency-sensitive workloads at the cost of extra WAL churn.
+- **Crash drills:** Schedule nightly invocations of the crash-replay harness (mirroring `tests/transaction_crash_recovery_integration_tests.cpp`) against production WAL archives. Combine with `WalRecoveryDriver::build_plan()` logging to catch truncated segments or mis-matched transaction horizons before they impact actual restart scenarios.
+
+### Common Runbooks
+
+1. **Investigate retention backlog:**
+  1. Capture `storage_diagnostics` output and look for `oldest_active_transaction_id` covers that exceed SLA.
+  2. If backlog stems from stalled checkpoints, increase the scheduler's `lsn_gap_limit` or request a forced checkpoint through the operator tooling.
+  3. If backlog stems from long-running transactions, use the transaction operator guide to engage the owning sessions.
+2. **Mitigate WAL flush latency spikes:**
+  1. Inspect `WalWriter` telemetry for `flush_duration_ns` outliers.
+  2. Temporarily raise `buffer_size` and `size_flush_threshold` to absorb bursty workloads, then monitor `durable_commit_lsn` lag.
+  3. If macOS full-fsync is enabled, evaluate disabling `AsyncIoConfig::use_full_fsync` during low-risk windows to validate whether the platform layer is the bottleneck.
+3. **Validate crash readiness:**
+  1. Snapshot the active data directory and WAL segment set.
+  2. Run the replay harness offline; the final fragment/tuple assertions must match the latest durable state.
+  3. Archive the diagnostics artefacts alongside the drill ticket for regression tracking.
+
 ### Redo/Undo State Flow
 
 ```mermaid

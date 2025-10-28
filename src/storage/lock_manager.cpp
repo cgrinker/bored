@@ -1,5 +1,7 @@
 #include "bored/storage/lock_manager.hpp"
 
+#include "bored/txn/transaction_manager.hpp"
+
 namespace bored::storage {
 
 namespace {
@@ -39,6 +41,31 @@ std::error_code LockManager::acquire(std::uint32_t page_id, PageLatchMode mode)
     default:
         return std::make_error_code(std::errc::invalid_argument);
     }
+}
+
+std::error_code LockManager::acquire(std::uint32_t page_id, PageLatchMode mode, txn::TransactionContext* txn)
+{
+    auto ec = acquire(page_id, mode);
+    if (ec || txn == nullptr) {
+        return ec;
+    }
+
+    auto state = txn->state();
+    if (state != txn::TransactionState::Active && state != txn::TransactionState::Preparing) {
+        release(page_id, mode);
+        return std::make_error_code(std::errc::operation_not_permitted);
+    }
+
+    try {
+        txn->on_abort([this, page_id, mode]() {
+            this->release(page_id, mode);
+        });
+    } catch (...) {
+        release(page_id, mode);
+        throw;
+    }
+
+    return {};
 }
 
 void LockManager::release(std::uint32_t page_id, PageLatchMode mode)

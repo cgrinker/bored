@@ -1,5 +1,7 @@
 #include "bored/storage/lock_manager.hpp"
 
+#include "bored/txn/transaction_manager.hpp"
+
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/free_space_map.hpp"
 #include "bored/storage/page_manager.hpp"
@@ -65,6 +67,33 @@ TEST_CASE("LockManager allows concurrent shared holders")
 
     release_promise.set_value();
     shared_holder.join();
+}
+
+TEST_CASE("LockManager releases transactional locks on abort")
+{
+    using namespace bored::storage;
+
+    bored::txn::TransactionIdAllocatorStub allocator{10U};
+    bored::txn::TransactionManager txn_manager{allocator};
+
+    LockManager manager{};
+    auto txn = txn_manager.begin();
+    REQUIRE(txn.state() == bored::txn::TransactionState::Active);
+
+    REQUIRE_FALSE(manager.acquire(99U, PageLatchMode::Exclusive, &txn));
+
+    auto contention = std::async(std::launch::async, [&manager]() {
+        return manager.acquire(99U, PageLatchMode::Shared);
+    });
+
+    auto contention_status = contention.get();
+    REQUIRE(contention_status == std::make_error_code(std::errc::resource_unavailable_try_again));
+
+    txn_manager.abort(txn);
+
+    auto retry = manager.acquire(99U, PageLatchMode::Shared);
+    REQUIRE_FALSE(retry);
+    manager.release(99U, PageLatchMode::Shared);
 }
 
 TEST_CASE("LockManager rejects conflicting shared when exclusive held")

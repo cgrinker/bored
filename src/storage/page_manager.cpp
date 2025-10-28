@@ -297,8 +297,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
         return std::make_error_code(std::errc::value_too_large);
     }
 
-    const auto overflow_flag_bits = static_cast<std::uint16_t>(TupleFlag::HasOverflow);
-    tuple_header.flags &= static_cast<std::uint16_t>(~overflow_flag_bits);
+    clear_flag(tuple_header, TupleFlag::HasOverflow);
 
     const auto page_const = as_const_span(page);
     const auto& header = page_header(page_const);
@@ -347,7 +346,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
             return ec;
         }
 
-        auto slot = append_tuple(page, tuple_header, payload, wal_result.lsn, fsm_);
+    auto slot = append_tuple(page, tuple_header, payload, wal_result.lsn, fsm_);
         if (!slot) {
             return std::make_error_code(std::errc::io_error);
         }
@@ -441,7 +440,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     stub_header.inline_length = static_cast<std::uint32_t>(inline_length);
     stub_header.chunk_count = static_cast<std::uint16_t>(chunk_count);
 
-    tuple_header.flags |= overflow_flag_bits;
+    set_flag(tuple_header, TupleFlag::HasOverflow);
 
     const auto stub_size = overflow_tuple_header_size() + inline_length;
     std::vector<std::byte> stub_bytes(stub_size);
@@ -869,8 +868,7 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     }
     auto tuple_header = *current_header;
 
-    const auto overflow_flag_bits = static_cast<std::uint16_t>(TupleFlag::HasOverflow);
-    tuple_header.flags &= static_cast<std::uint16_t>(~overflow_flag_bits);
+    clear_flag(tuple_header, TupleFlag::HasOverflow);
 
     if (new_payload.size() > std::numeric_limits<std::uint16_t>::max()) {
         return std::make_error_code(std::errc::value_too_large);
@@ -985,7 +983,7 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     }
 
     if (is_overflow_tuple(new_payload)) {
-        tuple_header.flags |= overflow_flag_bits;
+        set_flag(tuple_header, TupleFlag::HasOverflow);
     }
 
     WalTupleUpdateMeta meta{};

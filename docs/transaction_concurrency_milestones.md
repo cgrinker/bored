@@ -46,11 +46,17 @@
 - [x] Wire catalog mutator/transaction to register undo callbacks with `TransactionManager` and ensure staged catalog tuples roll back on abort.
 	- [x] `CatalogTransaction` attaches undo/on_abort hooks when provided a shared `TransactionContext`, and dispatcher/parser/handler harnesses now forward the manager when configured.
 	- [x] Production catalog entry points (CLI, bootstrapper, and background maintenance) now inherit shared `TransactionManager` contexts from the dispatcher, which binds them into `CatalogTransaction` instances even when factories provide allocator-only configs.
-- [ ] Extend `WalRecoveryDriver` to rebuild in-flight transactions, reapply commits, and rollback incomplete operations.
-- [ ] Integrate lock manager acquisitions with transaction contexts so abort releases held latches/locks automatically.
-- [ ] Add end-to-end abort tests covering storage and catalog rollback with lock cleanup, updating docs to describe the sequence.
-- [ ] Capture integration tests that crash/restart during commit/abort windows and verify MVCC invariants.
-- [ ] Document operational guidance (diagnostics, tuning knobs) in `docs/storage.md` and new transaction operator guide.
+- [x] Extend `WalRecoveryDriver` to rebuild in-flight transactions, reapply commits, and rollback incomplete operations.
+	- Recovery plans now surface commit payloads, active/aborted transaction state, and undo spans with new tests covering committed, aborted, and in-flight WAL tails.
+- [x] Integrate lock manager acquisitions with transaction contexts so abort releases held latches/locks automatically.
+	- `LockManager::acquire` now accepts a `TransactionContext` so abort callbacks unwind held page latches; coverage added to lock manager tests.
+- [x] Add end-to-end abort tests covering storage and catalog rollback with lock cleanup, updating docs to describe the sequence.
+	- Added `tests/transaction_abort_integration_tests.cpp`, which stages catalog metadata and heap tuple inserts under a shared `TransactionManager`, then aborts to confirm WAL-driven undo restores the page, catalog staging clears, and lock manager releases the held page latch.
+- [x] Capture integration tests that crash/restart during commit/abort windows and verify MVCC invariants.
+	- Added `tests/transaction_crash_recovery_integration_tests.cpp`, which replays a committed WAL stream onto a cold page while undoing an aborting writer flushed to disk to confirm MVCC tuple headers and fragments line up after recovery.
+- [x] Document operational guidance (diagnostics, tuning knobs) in `docs/storage.md` and new transaction operator guide.
+	- Added an "Operational Guidance" section to `docs/storage.md` detailing diagnostics entry points, tuning knobs, and operator runbooks.
+	- Authored `docs/transaction_operator_guide.md` covering transaction telemetry, daily procedures, tuning levers, and incident playbooks for crash drills, abort storms, and retention backlog mitigation.
 
 ## Deliverables & Exit Criteria
 - Transaction manager APIs landed with MVCC semantics validated by unit and crash-recovery integration tests.

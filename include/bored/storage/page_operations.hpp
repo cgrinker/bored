@@ -69,6 +69,41 @@ constexpr std::size_t tuple_header_size()
     return sizeof(TupleHeader);
 }
 
+constexpr std::uint16_t to_value(TupleFlag flag) noexcept
+{
+    return static_cast<std::uint16_t>(flag);
+}
+
+constexpr bool has_flag(std::uint16_t flags, TupleFlag flag) noexcept
+{
+    return (flags & to_value(flag)) != 0U;
+}
+
+constexpr bool has_flag(const TupleHeader& header, TupleFlag flag) noexcept
+{
+    return has_flag(header.flags, flag);
+}
+
+constexpr void set_flag(std::uint16_t& flags, TupleFlag flag) noexcept
+{
+    flags |= to_value(flag);
+}
+
+constexpr void set_flag(TupleHeader& header, TupleFlag flag) noexcept
+{
+    set_flag(header.flags, flag);
+}
+
+constexpr void clear_flag(std::uint16_t& flags, TupleFlag flag) noexcept
+{
+    flags &= static_cast<std::uint16_t>(~to_value(flag));
+}
+
+constexpr void clear_flag(TupleHeader& header, TupleFlag flag) noexcept
+{
+    clear_flag(header.flags, flag);
+}
+
 constexpr std::size_t tuple_storage_length(std::size_t payload_length)
 {
     return tuple_header_size() + payload_length;

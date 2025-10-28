@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -14,6 +15,21 @@ namespace bored::storage {
 struct WalRecoveryRecord final {
     WalRecordHeader header{};
     std::vector<std::byte> payload{};
+};
+
+enum class WalRecoveredTransactionState : std::uint8_t {
+    InFlight,
+    Committed,
+    Aborted
+};
+
+struct WalRecoveredTransaction final {
+    std::uint64_t transaction_id = 0U;
+    std::uint64_t first_lsn = 0U;
+    std::uint64_t last_lsn = 0U;
+    std::uint64_t commit_lsn = 0U;
+    WalRecoveredTransactionState state = WalRecoveredTransactionState::InFlight;
+    std::optional<WalRecoveryRecord> commit_record{};
 };
 
 struct WalUndoSpan final {
@@ -26,6 +42,7 @@ struct WalRecoveryPlan final {
     std::vector<WalRecoveryRecord> redo{};
     std::vector<WalRecoveryRecord> undo{};
     std::vector<WalUndoSpan> undo_spans{};
+    std::vector<WalRecoveredTransaction> transactions{};
     bool truncated_tail = false;
     std::uint64_t truncated_segment_id = 0U;
     std::uint64_t truncated_lsn = 0U;

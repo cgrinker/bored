@@ -25,6 +25,8 @@ using bored::storage::WalRecordDescriptor;
 using bored::storage::WalRecordType;
 using bored::storage::WalRecoveryDriver;
 using bored::storage::WalRecoveryPlan;
+using bored::storage::WalRecoveredTransactionState;
+using bored::storage::WalRecoveredTransaction;
 using bored::storage::FreeSpaceMap;
 using bored::storage::PageManager;
 using bored::storage::PageType;
@@ -137,6 +139,31 @@ TEST_CASE("WalRecoveryDriver builds redo and undo plan")
     REQUIRE(plan.redo[0].header.lsn == tx1_a.lsn);
     REQUIRE(plan.redo[1].header.lsn == tx1_b.lsn);
     REQUIRE(plan.undo[0].header.lsn == tx2_a.lsn);
+
+    REQUIRE(plan.transactions.size() == 2U);
+
+    auto find_transaction = [&](std::uint64_t id) -> const bored::storage::WalRecoveredTransaction* {
+        const auto it = std::find_if(plan.transactions.begin(), plan.transactions.end(), [&](const auto& txn) {
+            return txn.transaction_id == id;
+        });
+        return it != plan.transactions.end() ? &(*it) : nullptr;
+    };
+
+    const auto* committed_tx = find_transaction(1001U);
+    REQUIRE(committed_tx != nullptr);
+    CHECK(committed_tx->state == WalRecoveredTransactionState::Committed);
+    CHECK(committed_tx->commit_lsn == commit_header.commit_lsn);
+    REQUIRE(committed_tx->commit_record.has_value());
+    CHECK(committed_tx->commit_record->header.type == static_cast<std::uint16_t>(WalRecordType::Commit));
+    CHECK(committed_tx->commit_record->header.lsn == tx1_commit.lsn);
+    CHECK(committed_tx->first_lsn == tx1_a.lsn);
+    CHECK(committed_tx->last_lsn == tx1_commit.lsn);
+
+    const auto* aborted_tx = find_transaction(2002U);
+    REQUIRE(aborted_tx != nullptr);
+    CHECK(aborted_tx->state == WalRecoveredTransactionState::Aborted);
+    CHECK_FALSE(aborted_tx->commit_record.has_value());
+    CHECK(aborted_tx->commit_lsn == 0U);
 
     (void)std::filesystem::remove_all(wal_dir);
 }
@@ -255,6 +282,58 @@ TEST_CASE("WalRecoveryDriver marks truncated tail")
     REQUIRE(plan.redo.size() == 1U);
     REQUIRE(plan.redo[0].header.lsn == tx_commit.lsn);
     REQUIRE(plan.undo.empty());
+
+    REQUIRE(plan.transactions.size() == 1U);
+    const auto& committed_tx = plan.transactions.front();
+    CHECK(committed_tx.transaction_id == commit_header.transaction_id);
+    CHECK(committed_tx.state == WalRecoveredTransactionState::Committed);
+    CHECK(committed_tx.commit_lsn == commit_header.commit_lsn);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("WalRecoveryDriver flags in-flight transactions")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_recovery_inflight_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 2U * bored::storage::kWalBlockSize;
+    config.buffer_size = bored::storage::kWalBlockSize;
+    config.size_flush_threshold = bored::storage::kWalBlockSize;
+
+    WalWriter writer{io, config};
+
+    std::array<std::byte, 64> payload{};
+    payload.fill(std::byte{0x55});
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::TupleInsert;
+    descriptor.page_id = 31337U;
+    descriptor.payload = payload;
+
+    WalAppendResult append_result{};
+    REQUIRE_FALSE(writer.append_record(descriptor, append_result));
+
+    REQUIRE_FALSE(writer.close());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    REQUIRE(plan.redo.empty());
+    REQUIRE(plan.undo.size() == 1U);
+    REQUIRE(plan.transactions.size() == 1U);
+
+    const auto& txn = plan.transactions.front();
+    CHECK(txn.transaction_id == descriptor.page_id);
+    CHECK(txn.state == WalRecoveredTransactionState::InFlight);
+    CHECK_FALSE(txn.commit_record.has_value());
+    CHECK(txn.commit_lsn == 0U);
+    CHECK(txn.first_lsn == append_result.lsn);
+    CHECK(txn.last_lsn == append_result.lsn);
 
     (void)std::filesystem::remove_all(wal_dir);
 }

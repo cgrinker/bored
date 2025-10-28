@@ -9,6 +9,10 @@
 #include <thread>
 #include <unordered_map>
 
+namespace bored::txn {
+class TransactionContext;
+}
+
 namespace bored::storage {
 
 class LockManager final {
@@ -26,6 +30,7 @@ public:
     LockManager& operator=(LockManager&&) = delete;
 
     [[nodiscard]] std::error_code acquire(std::uint32_t page_id, PageLatchMode mode);
+    [[nodiscard]] std::error_code acquire(std::uint32_t page_id, PageLatchMode mode, txn::TransactionContext* txn);
     void release(std::uint32_t page_id, PageLatchMode mode);
 
     [[nodiscard]] PageLatchCallbacks page_latch_callbacks();

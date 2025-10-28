@@ -20,6 +20,7 @@ using bored::storage::SlotPointer;
 using bored::storage::WalRecordHeader;
 using bored::storage::WalRecordType;
 using bored::storage::WalSegmentHeader;
+using bored::storage::TupleFlag;
 using bored::storage::TupleHeader;
 using bored::storage::tuple_header_size;
 using bored::storage::tuple_storage_length;
@@ -84,6 +85,25 @@ TEST_CASE("Page flags tracking works")
 
     REQUIRE(bored::storage::has_flag(header, PageFlag::Dirty));
     REQUIRE_FALSE(bored::storage::has_flag(header, PageFlag::HasOverflow));
+}
+
+TEST_CASE("Tuple flags helper tracks bits")
+{
+    TupleHeader header{};
+    REQUIRE_FALSE(bored::storage::has_flag(header, TupleFlag::HasOverflow));
+
+    bored::storage::set_flag(header, TupleFlag::HasOverflow);
+    REQUIRE(bored::storage::has_flag(header, TupleFlag::HasOverflow));
+
+    bored::storage::clear_flag(header, TupleFlag::HasOverflow);
+    REQUIRE_FALSE(bored::storage::has_flag(header, TupleFlag::HasOverflow));
+
+    std::uint16_t flags = 0U;
+    bored::storage::set_flag(flags, TupleFlag::HasOverflow);
+    REQUIRE(bored::storage::has_flag(flags, TupleFlag::HasOverflow));
+
+    bored::storage::clear_flag(flags, TupleFlag::HasOverflow);
+    REQUIRE_FALSE(bored::storage::has_flag(flags, TupleFlag::HasOverflow));
 }
 
 TEST_CASE("Page lifecycle supports inserts and deletes")
