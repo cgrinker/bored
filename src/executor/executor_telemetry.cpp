@@ -41,11 +41,11 @@ void ExecutorTelemetry::record_hash_join_build_row() noexcept
     hash_join_build_rows_.fetch_add(1U, std::memory_order_relaxed);
 }
 
-void ExecutorTelemetry::record_hash_join_probe(bool matched) noexcept
+void ExecutorTelemetry::record_hash_join_probe(std::size_t match_count) noexcept
 {
     hash_join_probe_rows_.fetch_add(1U, std::memory_order_relaxed);
-    if (matched) {
-        hash_join_rows_matched_.fetch_add(1U, std::memory_order_relaxed);
+    if (match_count != 0U) {
+        hash_join_rows_matched_.fetch_add(match_count, std::memory_order_relaxed);
     }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
 namespace bored::executor {
@@ -29,7 +30,7 @@ public:
     void record_nested_loop_compare(bool matched) noexcept;
     void record_nested_loop_emit() noexcept;
     void record_hash_join_build_row() noexcept;
-    void record_hash_join_probe(bool matched) noexcept;
+    void record_hash_join_probe(std::size_t match_count) noexcept;
     void record_aggregation_input_row() noexcept;
     void record_aggregation_group_emitted() noexcept;
 
