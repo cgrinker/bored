@@ -13,9 +13,13 @@ public:
 
     [[nodiscard]] std::size_t capacity() const noexcept;
     [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] std::span<const std::byte> span() const noexcept;
+    [[nodiscard]] const std::byte* data() const noexcept;
+    [[nodiscard]] std::byte* data() noexcept;
 
     std::span<std::byte> allocate(std::size_t size, std::size_t alignment = alignof(std::max_align_t));
     std::span<std::byte> write(std::span<const std::byte> data, std::size_t alignment = alignof(std::max_align_t));
+    void resize(std::size_t new_size);
 
     void reset() noexcept;
 

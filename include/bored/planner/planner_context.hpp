@@ -41,9 +41,11 @@ public:
     [[nodiscard]] const txn::Snapshot& snapshot() const noexcept;
     [[nodiscard]] const PlannerOptions& options() const noexcept;
     [[nodiscard]] PlannerTelemetry* telemetry() const noexcept;
+    [[nodiscard]] std::uint64_t allocate_executor_operator_id() const noexcept;
 
 private:
     PlannerContextConfig config_{};
+    mutable std::uint64_t next_executor_operator_id_ = 1U;
 };
 
 }  // namespace bored::planner

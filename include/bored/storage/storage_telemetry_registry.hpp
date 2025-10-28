@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/ddl/ddl_telemetry.hpp"
+#include "bored/executor/executor_telemetry.hpp"
 #include "bored/parser/parser_telemetry.hpp"
 #include "bored/planner/planner_telemetry.hpp"
 #include "bored/txn/transaction_telemetry.hpp"
@@ -141,6 +142,9 @@ public:
     using PlannerSampler = std::function<bored::planner::PlannerTelemetrySnapshot()>;
     using PlannerVisitor = std::function<void(const std::string&, const bored::planner::PlannerTelemetrySnapshot&)>;
 
+    using ExecutorSampler = std::function<bored::executor::ExecutorTelemetrySnapshot()>;
+    using ExecutorVisitor = std::function<void(const std::string&, const bored::executor::ExecutorTelemetrySnapshot&)>;
+
     void register_page_manager(std::string identifier, PageManagerSampler sampler);
     void unregister_page_manager(const std::string& identifier);
     PageManagerTelemetrySnapshot aggregate_page_managers() const;
@@ -191,6 +195,11 @@ public:
     bored::planner::PlannerTelemetrySnapshot aggregate_planner() const;
     void visit_planner(const PlannerVisitor& visitor) const;
 
+    void register_executor(std::string identifier, ExecutorSampler sampler);
+    void unregister_executor(const std::string& identifier);
+    bored::executor::ExecutorTelemetrySnapshot aggregate_executors() const;
+    void visit_executors(const ExecutorVisitor& visitor) const;
+
 private:
     mutable std::mutex mutex_{};
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
@@ -203,6 +212,7 @@ private:
     std::unordered_map<std::string, ParserSampler> parser_samplers_{};
     std::unordered_map<std::string, TransactionSampler> transaction_samplers_{};
     std::unordered_map<std::string, PlannerSampler> planner_samplers_{};
+    std::unordered_map<std::string, ExecutorSampler> executor_samplers_{};
 };
 
 }  // namespace bored::storage

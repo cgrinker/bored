@@ -27,6 +27,11 @@ const bored::planner::StatisticsCatalog* ExecutorContext::statistics() const noe
     return config_.statistics;
 }
 
+txn::TransactionId ExecutorContext::transaction_id() const noexcept
+{
+    return config_.transaction_id;
+}
+
 const txn::Snapshot& ExecutorContext::snapshot() const noexcept
 {
     return config_.snapshot;
@@ -35,6 +40,11 @@ const txn::Snapshot& ExecutorContext::snapshot() const noexcept
 std::pmr::memory_resource* ExecutorContext::scratch_resource() const noexcept
 {
     return config_.scratch;
+}
+
+void ExecutorContext::set_transaction_id(txn::TransactionId transaction_id) noexcept
+{
+    config_.transaction_id = transaction_id;
 }
 
 void ExecutorContext::set_snapshot(txn::Snapshot snapshot) noexcept

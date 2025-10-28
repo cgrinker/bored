@@ -6,18 +6,31 @@
 - Provide sufficient instrumentation (telemetry, diagnostics, explain integration) so operators can trace execution behaviour and performance.
 
 ## Milestone 0: Execution Framework Scaffolding (0.5 sprint)
-- [ ] Define `ExecutorContext` carrying transaction snapshot, catalog/cardinality helpers, and operator scratch allocators.
-- [ ] Specify the executor interface (`open()`, `next()`, `close()`) and base `ExecutorNode` abstraction.
-- [ ] Implement runtime tuple/materialization buffer utilities shared across operators.
-- [ ] Add Catch2 scaffolding tests that exercise a stub executor tree and validate lifecycle semantics.
-- [ ] Document extension points and conventions (state ownership, spill behaviour) in this milestone doc.
+- [x] Define `ExecutorContext` carrying transaction snapshot, catalog/cardinality helpers, and operator scratch allocators.
+- [x] Specify the executor interface (`open()`, `next()`, `close()`) and base `ExecutorNode` abstraction.
+- [x] Implement runtime tuple/materialization buffer utilities shared across operators.
+- [x] Add Catch2 scaffolding tests that exercise a stub executor tree and validate lifecycle semantics.
+- [x] Document extension points and conventions (state ownership, spill behaviour) in this milestone doc.
+
+### Milestone 0 Notes
+- `ExecutorContext` centralises access to the active transaction snapshot, catalog hooks, and a default polymorphic allocator. Operators can request a custom scratch resource via the constructor to feed pipeline-local arenas.
+- `ExecutorNode` establishes the lifecycle contract (open/next/close) and provides helpers for child traversal. Derived executors own their children and must forward lifecycle calls in order, ensuring downstream cleanup even when a node reports end-of-stream or throws.
+- `TupleBuffer` offers aligned storage for tuple materialisation. Callers reset the buffer between batches; out-of-line payloads (e.g., overflow tuples) remain the caller's responsibility.
+- Tests in `tests/executor_scaffolding_tests.cpp` validate context propagation, child call ordering, and tuple buffer resizing so later operators inherit stable semantics.
 
 ## Milestone 1: Read Operator Foundations (1 sprint)
-- [ ] Implement Sequential Scan executor that reads via `PageManager`/`StorageReader`, respecting MVCC visibility.
-- [ ] Introduce Projection and Filter executors that compose atop child iterators and reuse expression evaluation helpers.
-- [ ] Add telemetry counters for rows scanned/filtered/projected and integrate with `StorageTelemetryRegistry`.
-- [ ] Expand planner lowering to annotate physical plans with executor operator IDs and provide construction hooks.
-- [ ] Create integration tests using frozen table fixtures to validate result sets and diagnostics output.
+- [x] Implement Sequential Scan executor that reads via `PageManager`/`StorageReader`, respecting MVCC visibility.
+- [x] Introduce Projection and Filter executors that compose atop child iterators and reuse expression evaluation helpers.
+- [x] Add telemetry counters for rows scanned/filtered/projected and integrate with `StorageTelemetryRegistry`.
+- [x] Expand planner lowering to annotate physical plans with executor operator IDs and provide construction hooks.
+- [x] Create integration tests using frozen table fixtures to validate result sets and diagnostics output.
+
+### Milestone 1 Notes
+- Added a `StorageReader` abstraction with frozen-table cursors for unit validation while the real page-backed reader is under construction.
+- Sequential scan now enforces MVCC visibility using snapshot metadata from `ExecutorContext`, feeding projection/filter operators built on the iterator contract.
+- Per-operator telemetry (scan/filter/projection) flows into `StorageTelemetryRegistry` and surfaces through storage diagnostics JSON.
+- Planner physical nodes allocate stable executor operator identifiers so execution plans can materialize concrete operator trees.
+- Catch2 suites (`tests/executor_milestone1_tests.cpp`) exercise scan/filter/projection pipelines and confirm telemetry counters against expected row sets.
 
 ## Milestone 2: Join & Aggregation Operators (1–1.5 sprints)
 - [ ] Implement Nested Loop Join executor supporting parameterized probe inputs and basic predicate evaluation.

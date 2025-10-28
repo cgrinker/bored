@@ -95,6 +95,9 @@ TEST_CASE("ExecutorContext provides accessors")
     CHECK(context.snapshot().read_lsn == 4096U);
     CHECK(context.scratch_resource() == &scratch_resource);
 
+    context.set_transaction_id(777U);
+    CHECK(context.transaction_id() == 777U);
+
     Snapshot updated{};
     updated.read_lsn = 8192U;
     context.set_snapshot(updated);

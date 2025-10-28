@@ -28,6 +28,21 @@ std::size_t TupleBuffer::size() const noexcept
     return write_offset_;
 }
 
+std::span<const std::byte> TupleBuffer::span() const noexcept
+{
+    return {storage_.data(), write_offset_};
+}
+
+const std::byte* TupleBuffer::data() const noexcept
+{
+    return storage_.data();
+}
+
+std::byte* TupleBuffer::data() noexcept
+{
+    return storage_.data();
+}
+
 std::span<std::byte> TupleBuffer::allocate(std::size_t size, std::size_t alignment)
 {
     if (size == 0U) {
@@ -51,6 +66,12 @@ std::span<std::byte> TupleBuffer::write(std::span<const std::byte> data, std::si
     auto destination = allocate(data.size(), alignment);
     std::copy(data.begin(), data.end(), destination.begin());
     return destination;
+}
+
+void TupleBuffer::resize(std::size_t new_size)
+{
+    ensure_capacity(new_size);
+    write_offset_ = new_size;
 }
 
 void TupleBuffer::reset() noexcept

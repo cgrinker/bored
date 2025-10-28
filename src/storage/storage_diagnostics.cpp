@@ -313,6 +313,18 @@ void append_planner_snapshot(std::string& out, const bored::planner::PlannerTele
     out.push_back('}');
 }
 
+void append_executor_snapshot(std::string& out, const bored::executor::ExecutorTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "seq_scan_rows_read", snapshot.seq_scan_rows_read, first);
+    append_field(out, "seq_scan_rows_visible", snapshot.seq_scan_rows_visible, first);
+    append_field(out, "filter_rows_evaluated", snapshot.filter_rows_evaluated, first);
+    append_field(out, "filter_rows_passed", snapshot.filter_rows_passed, first);
+    append_field(out, "projection_rows_emitted", snapshot.projection_rows_emitted, first);
+    out.push_back('}');
+}
+
 void append_page_manager_section(std::string& out, const StorageDiagnosticsPageManagerSection& section)
 {
     out.push_back('{');
@@ -543,6 +555,29 @@ void append_planner_section(std::string& out, const StorageDiagnosticsPlannerSec
     out.push_back('}');
 }
 
+void append_executor_section(std::string& out, const StorageDiagnosticsExecutorSection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_executor_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_executor_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 }  // namespace
 
 StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryRegistry& registry,
@@ -632,6 +667,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+    document.executors.total = registry.aggregate_executors();
+    if (options.include_executor_details) {
+        registry.visit_executors([&](const std::string& identifier, const bored::executor::ExecutorTelemetrySnapshot& snapshot) {
+            document.executors.details.push_back(StorageDiagnosticsExecutorEntry{identifier, snapshot});
+        });
+        std::sort(document.executors.details.begin(), document.executors.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+
     document.ddl.total = registry.aggregate_ddl();
     if (options.include_ddl_details) {
         registry.visit_ddl([&](const std::string& identifier, const ddl::DdlTelemetrySnapshot& snapshot) {
@@ -672,6 +716,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_ddl_section(out, document.ddl);
     out.append(",\"planner\":");
     append_planner_section(out, document.planner);
+    out.append(",\"executors\":");
+    append_executor_section(out, document.executors);
     out.push_back('}');
     return out;
 }

@@ -128,6 +128,8 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
         operator_type = PhysicalOperatorType::Delete;
     }
 
+    properties.executor_operator_id = context.allocate_executor_operator_id();
+
     return PhysicalOperator::make(operator_type, std::move(lowered_children), std::move(properties));
 }
 

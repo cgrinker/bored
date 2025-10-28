@@ -13,6 +13,7 @@ namespace ddl = bored::ddl;
 namespace parser = bored::parser;
 namespace txn = bored::txn;
 namespace planner = bored::planner;
+namespace executor = bored::executor;
 
 namespace {
 
@@ -158,6 +159,17 @@ planner::PlannerTelemetrySnapshot make_planner(std::uint64_t seed)
     return snapshot;
 }
 
+executor::ExecutorTelemetrySnapshot make_executor(std::uint64_t seed)
+{
+    executor::ExecutorTelemetrySnapshot snapshot{};
+    snapshot.seq_scan_rows_read = seed + 1U;
+    snapshot.seq_scan_rows_visible = seed + 2U;
+    snapshot.filter_rows_evaluated = seed + 3U;
+    snapshot.filter_rows_passed = seed + 1U;
+    snapshot.projection_rows_emitted = seed + 4U;
+    return snapshot;
+}
+
 }  // namespace
 
 TEST_CASE("collect_storage_diagnostics aggregates totals and details")
@@ -180,6 +192,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     registry.register_transaction("txn_b", [] { return make_transaction(4U); });
     registry.register_planner("planner_a", [] { return make_planner(2U); });
     registry.register_planner("planner_b", [] { return make_planner(5U); });
+    registry.register_executor("exec_a", [] { return make_executor(2U); });
+    registry.register_executor("exec_b", [] { return make_executor(5U); });
 
     const StorageDiagnosticsOptions options{};
     const auto doc = collect_storage_diagnostics(registry, options);
@@ -216,6 +230,12 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.planner.total.rules_attempted == ((2U + 2U) + (5U + 2U)));
     REQUIRE(doc.planner.total.min_chosen_cost == Approx(static_cast<double>(2U + 1U)));
     REQUIRE(doc.planner.total.max_chosen_cost == Approx(static_cast<double>((5U + 7U) * 3U)));
+    REQUIRE(doc.executors.details.size() == 2U);
+    REQUIRE(doc.executors.total.seq_scan_rows_read == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(doc.executors.total.seq_scan_rows_visible == ((2U + 2U) + (5U + 2U)));
+    REQUIRE(doc.executors.total.filter_rows_evaluated == ((2U + 3U) + (5U + 3U)));
+    REQUIRE(doc.executors.total.filter_rows_passed == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(doc.executors.total.projection_rows_emitted == ((2U + 4U) + (5U + 4U)));
     REQUIRE(doc.collected_at.time_since_epoch().count() != 0);
 
     REQUIRE(doc.page_managers.details.front().identifier == "pm_a");
@@ -229,6 +249,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.durability.details.front().identifier == "dur_a");
     REQUIRE(doc.planner.details.front().identifier == "planner_a");
     REQUIRE(doc.planner.details.back().identifier == "planner_b");
+    REQUIRE(doc.executors.details.front().identifier == "exec_a");
+    REQUIRE(doc.executors.details.back().identifier == "exec_b");
 }
 
 TEST_CASE("collect_storage_diagnostics honors detail options")
@@ -244,6 +266,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     registry.register_parser("parser", [] { return make_parser(4U); });
     registry.register_transaction("txn", [] { return make_transaction(5U); });
     registry.register_planner("planner", [] { return make_planner(3U); });
+    registry.register_executor("exec", [] { return make_executor(4U); });
 
     StorageDiagnosticsOptions options{};
     options.include_page_manager_details = false;
@@ -256,6 +279,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     options.include_parser_details = false;
     options.include_transaction_details = false;
     options.include_planner_details = false;
+    options.include_executor_details = false;
 
     const auto doc = collect_storage_diagnostics(registry, options);
 
@@ -269,6 +293,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     REQUIRE(doc.parser.details.empty());
     REQUIRE(doc.transactions.details.empty());
     REQUIRE(doc.planner.details.empty());
+    REQUIRE(doc.executors.details.empty());
 }
 
 TEST_CASE("storage_diagnostics_to_json serialises expected fields")
@@ -284,6 +309,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     registry.register_parser("parser", [] { return make_parser(6U); });
     registry.register_transaction("txn", [] { return make_transaction(7U); });
     registry.register_planner("planner", [] { return make_planner(4U); });
+    registry.register_executor("exec", [] { return make_executor(6U); });
 
     const auto doc = collect_storage_diagnostics(registry);
     const auto json = storage_diagnostics_to_json(doc);
@@ -300,6 +326,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"parser\"") != std::string::npos);
     REQUIRE(json.find("\"ddl\"") != std::string::npos);
     REQUIRE(json.find("\"planner\"") != std::string::npos);
+    REQUIRE(json.find("\"executors\"") != std::string::npos);
     REQUIRE(json.find("\"pruned_segments\":9") != std::string::npos);
     REQUIRE(json.find("\"create_table\"") != std::string::npos);
 }

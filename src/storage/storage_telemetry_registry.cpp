@@ -190,6 +190,17 @@ bored::planner::PlannerTelemetrySnapshot& accumulate(bored::planner::PlannerTele
     return target;
 }
 
+bored::executor::ExecutorTelemetrySnapshot& accumulate(bored::executor::ExecutorTelemetrySnapshot& target,
+                                                        const bored::executor::ExecutorTelemetrySnapshot& source)
+{
+    target.seq_scan_rows_read += source.seq_scan_rows_read;
+    target.seq_scan_rows_visible += source.seq_scan_rows_visible;
+    target.filter_rows_evaluated += source.filter_rows_evaluated;
+    target.filter_rows_passed += source.filter_rows_passed;
+    target.projection_rows_emitted += source.projection_rows_emitted;
+    return target;
+}
+
 template <typename Snapshot>
 Snapshot aggregate_snapshots(const std::vector<std::function<Snapshot()>>& samplers)
 {
@@ -703,6 +714,57 @@ void StorageTelemetryRegistry::visit_planner(const PlannerVisitor& visitor) cons
         std::lock_guard guard(mutex_);
         entries.reserve(planner_samplers_.size());
         for (const auto& [identifier, sampler] : planner_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_executor(std::string identifier, ExecutorSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    executor_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_executor(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    executor_samplers_.erase(identifier);
+}
+
+bored::executor::ExecutorTelemetrySnapshot StorageTelemetryRegistry::aggregate_executors() const
+{
+    std::vector<ExecutorSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(executor_samplers_.size());
+        for (const auto& [_, sampler] : executor_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<bored::executor::ExecutorTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_executors(const ExecutorVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, ExecutorSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(executor_samplers_.size());
+        for (const auto& [identifier, sampler] : executor_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }
