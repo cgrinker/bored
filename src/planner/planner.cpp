@@ -15,6 +15,15 @@
 namespace bored::planner {
 namespace {
 
+void append_unique(std::vector<std::string>& target, const std::vector<std::string>& values)
+{
+    for (const auto& value : values) {
+        if (std::find(target.begin(), target.end(), value) == target.end()) {
+            target.push_back(value);
+        }
+    }
+}
+
 PhysicalOperatorType to_physical(LogicalOperatorType type) noexcept
 {
     switch (type) {
@@ -58,6 +67,30 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
     properties.output_columns = logical->properties().output_columns;
     if (logical->type() == LogicalOperatorType::TableScan) {
         properties.requires_visibility_check = snapshot_requires_visibility(context.snapshot());
+        append_unique(properties.partitioning_columns, properties.output_columns);
+    }
+
+    if (properties.preserves_order) {
+        properties.ordering_columns = properties.output_columns;
+    }
+
+    if (!lowered_children.empty()) {
+        const auto& first_child_props = lowered_children.front()->properties();
+        if (properties.ordering_columns.empty()) {
+            properties.ordering_columns = first_child_props.ordering_columns;
+        }
+        if (properties.partitioning_columns.empty()) {
+            properties.partitioning_columns = first_child_props.partitioning_columns;
+        }
+    }
+
+    if (logical->type() == LogicalOperatorType::Join && lowered_children.size() == 2U) {
+        properties.partitioning_columns.clear();
+        append_unique(properties.partitioning_columns, lowered_children[0]->properties().partitioning_columns);
+        append_unique(properties.partitioning_columns, lowered_children[1]->properties().partitioning_columns);
+        if (properties.ordering_columns.empty()) {
+            properties.ordering_columns = lowered_children[0]->properties().ordering_columns;
+        }
     }
 
     return PhysicalOperator::make(to_physical(logical->type()), std::move(lowered_children), std::move(properties));

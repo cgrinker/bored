@@ -110,6 +110,8 @@ TEST_CASE("plan_query lowers logical scan to placeholder physical plan")
     CHECK(root->properties().output_columns.size() == 2U);
     CHECK(root->properties().relation_name.empty());
     CHECK_FALSE(root->properties().requires_visibility_check);
+    CHECK(root->properties().ordering_columns.empty());
+    CHECK(root->properties().partitioning_columns == root->properties().output_columns);
     CHECK(result.rules_attempted > 0U);
     CHECK(result.rules_applied == 0U);
     CHECK(result.cost_evaluations == 0U);
@@ -156,6 +158,37 @@ TEST_CASE("plan_query applies projection pruning alternative when tracing enable
     CHECK(result.rules_applied == 1U);
     CHECK(result.cost_evaluations == 0U);
     CHECK(result.chosen_plan_cost == Approx(0.0));
+}
+
+TEST_CASE("plan_query preserves ordering metadata through projection")
+{
+    LogicalProperties scan_props{};
+    scan_props.estimated_cardinality = 5U;
+    scan_props.output_columns = {"id"};
+    scan_props.preserves_order = true;
+    auto scan = LogicalOperator::make(LogicalOperatorType::TableScan, {}, scan_props);
+
+    LogicalProperties projection_props = scan_props;
+    projection_props.preserves_order = true;
+    auto projection = LogicalOperator::make(LogicalOperatorType::Projection, {scan}, projection_props);
+
+    LogicalPlan plan{projection};
+    PlannerContext context{};
+
+    PlannerResult result = plan_query(context, plan);
+    auto root = result.plan.root();
+    REQUIRE(root);
+    const auto& physical_props = root->properties();
+    CHECK(physical_props.preserves_order);
+    CHECK(physical_props.ordering_columns == std::vector<std::string>{"id"});
+
+    if (root->type() == PhysicalOperatorType::Projection) {
+        REQUIRE(root->children().size() == 1U);
+        const auto& child_props = root->children().front()->properties();
+        CHECK(child_props.ordering_columns == std::vector<std::string>{"id"});
+    } else {
+        CHECK(root->type() == PhysicalOperatorType::SeqScan);
+    }
 }
 
 TEST_CASE("plan_query uses cost model to choose cheaper join alternative")
@@ -237,4 +270,6 @@ TEST_CASE("plan_query propagates relation metadata and snapshot requirements to 
     CHECK(physical_props.relation_name == "public.orders");
     CHECK(physical_props.output_columns == std::vector<std::string>{"order_id", "customer_id"});
     CHECK(physical_props.requires_visibility_check);
+    CHECK(physical_props.partitioning_columns == std::vector<std::string>{"order_id", "customer_id"});
+    CHECK(physical_props.ordering_columns.empty());
 }

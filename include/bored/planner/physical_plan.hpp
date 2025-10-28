@@ -22,6 +22,7 @@ struct PhysicalProperties final {
     bool preserves_order = false;
     bool requires_visibility_check = false;
     std::string relation_name{};
+    std::vector<std::string> ordering_columns{};
     std::vector<std::string> partitioning_columns{};
     std::vector<std::string> output_columns{};
 };
