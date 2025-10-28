@@ -106,8 +106,10 @@ TEST_CASE("planner integration selects hash join and preserves metadata")
     std::vector<std::string> sorted_partitioning = root_props.partitioning_columns;
     std::sort(sorted_partitioning.begin(), sorted_partitioning.end());
     CHECK(sorted_partitioning == std::vector<std::string>{"customer_id", "order_id"});
-    CHECK(result.rules_attempted > 0U);
-    CHECK(result.cost_evaluations >= 2U);
+    CHECK(result.plan_diagnostics.rules_attempted > 0U);
+    CHECK(result.plan_diagnostics.cost_evaluations >= 2U);
+    CHECK(result.plan_diagnostics.rule_trace.size() == result.plan_diagnostics.rules_attempted);
+    REQUIRE(result.plan_diagnostics.chosen_logical_plan);
 }
 
 TEST_CASE("planner integration executes update pipeline with snapshot")

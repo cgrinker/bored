@@ -1,5 +1,6 @@
 #include "bored/storage/storage_diagnostics.hpp"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -7,9 +8,11 @@
 #include <string>
 
 using namespace bored::storage;
+using Catch::Approx;
 namespace ddl = bored::ddl;
 namespace parser = bored::parser;
 namespace txn = bored::txn;
+namespace planner = bored::planner;
 
 namespace {
 
@@ -138,6 +141,23 @@ txn::TransactionTelemetrySnapshot make_transaction(std::uint64_t seed)
     return snapshot;
 }
 
+planner::PlannerTelemetrySnapshot make_planner(std::uint64_t seed)
+{
+    planner::PlannerTelemetrySnapshot snapshot{};
+    snapshot.plans_attempted = seed + 1U;
+    snapshot.plans_succeeded = seed;
+    snapshot.plans_failed = seed / 2U;
+    snapshot.rules_attempted = seed + 2U;
+    snapshot.rules_applied = seed + 1U;
+    snapshot.cost_evaluations = (seed + 3U) * 2U;
+    snapshot.alternatives_considered = seed + 4U;
+    snapshot.total_chosen_cost = static_cast<double>((seed + 5U) * 10U);
+    snapshot.last_chosen_cost = static_cast<double>((seed + 6U) * 5U);
+    snapshot.min_chosen_cost = static_cast<double>(seed + 1U);
+    snapshot.max_chosen_cost = static_cast<double>((seed + 7U) * 3U);
+    return snapshot;
+}
+
 }  // namespace
 
 TEST_CASE("collect_storage_diagnostics aggregates totals and details")
@@ -158,6 +178,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     registry.register_parser("parser_b", [] { return make_parser(5U); });
     registry.register_transaction("txn_a", [] { return make_transaction(1U); });
     registry.register_transaction("txn_b", [] { return make_transaction(4U); });
+    registry.register_planner("planner_a", [] { return make_planner(2U); });
+    registry.register_planner("planner_b", [] { return make_planner(5U); });
 
     const StorageDiagnosticsOptions options{};
     const auto doc = collect_storage_diagnostics(registry, options);
@@ -188,6 +210,12 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.transactions.total.committed_transactions == ((1U + 2U) + (4U + 2U)));
     REQUIRE(doc.transactions.total.last_snapshot_xmin == std::min(1U + 3U, 4U + 3U));
     REQUIRE(doc.transactions.total.last_snapshot_xmax == std::max(1U + 7U, 4U + 7U));
+    REQUIRE(doc.planner.details.size() == 2U);
+    REQUIRE(doc.planner.total.plans_attempted == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(doc.planner.total.plans_succeeded == (2U + 5U));
+    REQUIRE(doc.planner.total.rules_attempted == ((2U + 2U) + (5U + 2U)));
+    REQUIRE(doc.planner.total.min_chosen_cost == Approx(static_cast<double>(2U + 1U)));
+    REQUIRE(doc.planner.total.max_chosen_cost == Approx(static_cast<double>((5U + 7U) * 3U)));
     REQUIRE(doc.collected_at.time_since_epoch().count() != 0);
 
     REQUIRE(doc.page_managers.details.front().identifier == "pm_a");
@@ -199,6 +227,8 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.transactions.details.front().identifier == "txn_a");
     REQUIRE(doc.transactions.details.back().identifier == "txn_b");
     REQUIRE(doc.durability.details.front().identifier == "dur_a");
+    REQUIRE(doc.planner.details.front().identifier == "planner_a");
+    REQUIRE(doc.planner.details.back().identifier == "planner_b");
 }
 
 TEST_CASE("collect_storage_diagnostics honors detail options")
@@ -213,6 +243,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     registry.register_ddl("ddl", [] { return make_ddl(3U); });
     registry.register_parser("parser", [] { return make_parser(4U); });
     registry.register_transaction("txn", [] { return make_transaction(5U); });
+    registry.register_planner("planner", [] { return make_planner(3U); });
 
     StorageDiagnosticsOptions options{};
     options.include_page_manager_details = false;
@@ -224,6 +255,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     options.include_ddl_details = false;
     options.include_parser_details = false;
     options.include_transaction_details = false;
+    options.include_planner_details = false;
 
     const auto doc = collect_storage_diagnostics(registry, options);
 
@@ -236,6 +268,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     REQUIRE(doc.ddl.details.empty());
     REQUIRE(doc.parser.details.empty());
     REQUIRE(doc.transactions.details.empty());
+    REQUIRE(doc.planner.details.empty());
 }
 
 TEST_CASE("storage_diagnostics_to_json serialises expected fields")
@@ -250,6 +283,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     registry.register_ddl("ddl", [] { return make_ddl(5U); });
     registry.register_parser("parser", [] { return make_parser(6U); });
     registry.register_transaction("txn", [] { return make_transaction(7U); });
+    registry.register_planner("planner", [] { return make_planner(4U); });
 
     const auto doc = collect_storage_diagnostics(registry);
     const auto json = storage_diagnostics_to_json(doc);
@@ -265,6 +299,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"transactions\"") != std::string::npos);
     REQUIRE(json.find("\"parser\"") != std::string::npos);
     REQUIRE(json.find("\"ddl\"") != std::string::npos);
+    REQUIRE(json.find("\"planner\"") != std::string::npos);
     REQUIRE(json.find("\"pruned_segments\":9") != std::string::npos);
     REQUIRE(json.find("\"create_table\"") != std::string::npos);
 }

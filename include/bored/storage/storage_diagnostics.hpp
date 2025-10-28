@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/ddl/ddl_telemetry.hpp"
+#include "bored/planner/planner_telemetry.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 
 #include <chrono>
@@ -19,6 +20,7 @@ struct StorageDiagnosticsOptions final {
     bool include_ddl_details = true;
     bool include_parser_details = true;
     bool include_transaction_details = true;
+    bool include_planner_details = true;
 };
 
 struct StorageDiagnosticsPageManagerEntry final {
@@ -66,6 +68,11 @@ struct StorageDiagnosticsTransactionEntry final {
     bored::txn::TransactionTelemetrySnapshot snapshot;
 };
 
+struct StorageDiagnosticsPlannerEntry final {
+    std::string identifier;
+    bored::planner::PlannerTelemetrySnapshot snapshot;
+};
+
 struct StorageDiagnosticsPageManagerSection final {
     PageManagerTelemetrySnapshot total{};
     std::vector<StorageDiagnosticsPageManagerEntry> details{};
@@ -111,6 +118,11 @@ struct StorageDiagnosticsTransactionSection final {
     std::vector<StorageDiagnosticsTransactionEntry> details{};
 };
 
+struct StorageDiagnosticsPlannerSection final {
+    bored::planner::PlannerTelemetrySnapshot total{};
+    std::vector<StorageDiagnosticsPlannerEntry> details{};
+};
+
 struct StorageDiagnosticsDocument final {
     std::chrono::system_clock::time_point collected_at{};
     StorageDiagnosticsPageManagerSection page_managers{};
@@ -122,6 +134,7 @@ struct StorageDiagnosticsDocument final {
     StorageDiagnosticsParserSection parser{};
     StorageDiagnosticsDdlSection ddl{};
     StorageDiagnosticsTransactionSection transactions{};
+    StorageDiagnosticsPlannerSection planner{};
 };
 
 StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryRegistry& registry,

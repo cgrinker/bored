@@ -115,10 +115,10 @@ TEST_CASE("plan_query lowers logical scan to placeholder physical plan")
     CHECK_FALSE(root->properties().snapshot.has_value());
     CHECK(root->properties().ordering_columns.empty());
     CHECK(root->properties().partitioning_columns == root->properties().output_columns);
-    CHECK(result.rules_attempted > 0U);
-    CHECK(result.rules_applied == 0U);
-    CHECK(result.cost_evaluations == 0U);
-    CHECK(result.chosen_plan_cost == Approx(0.0));
+    CHECK(result.plan_diagnostics.rules_attempted > 0U);
+    CHECK(result.plan_diagnostics.rules_applied == 0U);
+    CHECK(result.plan_diagnostics.cost_evaluations == 0U);
+    CHECK(result.plan_diagnostics.chosen_plan_cost == Approx(0.0));
 }
 
 TEST_CASE("plan_query captures diagnostics for empty logical plan")
@@ -157,10 +157,10 @@ TEST_CASE("plan_query applies projection pruning alternative when tracing enable
     CHECK(result.diagnostics[7] == "JoinCommutativity:skipped");
     CHECK(result.diagnostics[8] == "JoinAssociativity:skipped");
     CHECK(result.diagnostics[9] == "ConstantFolding:skipped");
-    CHECK(result.rules_attempted == 10U);
-    CHECK(result.rules_applied == 1U);
-    CHECK(result.cost_evaluations == 0U);
-    CHECK(result.chosen_plan_cost == Approx(0.0));
+    CHECK(result.plan_diagnostics.rules_attempted == 10U);
+    CHECK(result.plan_diagnostics.rules_applied == 1U);
+    CHECK(result.plan_diagnostics.cost_evaluations == 0U);
+    CHECK(result.plan_diagnostics.chosen_plan_cost == Approx(0.0));
 }
 
 TEST_CASE("plan_query preserves ordering metadata through projection")
@@ -238,10 +238,20 @@ TEST_CASE("plan_query uses cost model to choose cheaper join alternative")
     const auto original_cost = cost_model.estimate_plan(make_three_way_join_plan()).cost.total();
 
     CHECK(rotated_cost < original_cost);
-    CHECK(result.rules_attempted > 0U);
-    CHECK(result.rules_applied > 0U);
-    CHECK(result.cost_evaluations >= 2U);
-    CHECK(result.chosen_plan_cost == Approx(rotated_cost));
+    CHECK(result.plan_diagnostics.rules_attempted > 0U);
+    CHECK(result.plan_diagnostics.rules_applied > 0U);
+    CHECK(result.plan_diagnostics.cost_evaluations >= 2U);
+    CHECK(result.plan_diagnostics.chosen_plan_cost == Approx(rotated_cost));
+    REQUIRE(result.plan_diagnostics.chosen_logical_plan);
+    REQUIRE_FALSE(result.plan_diagnostics.alternatives.empty());
+    const auto has_rotated_cost = std::any_of(
+        result.plan_diagnostics.alternatives.begin(),
+        result.plan_diagnostics.alternatives.end(),
+        [&](const auto& alternative) {
+            return alternative.total_cost == Approx(rotated_cost);
+        });
+    CHECK(has_rotated_cost);
+    CHECK(result.plan_diagnostics.rule_trace.size() == result.plan_diagnostics.rules_attempted);
 }
 
 TEST_CASE("plan_query propagates relation metadata and snapshot requirements to physical scans")

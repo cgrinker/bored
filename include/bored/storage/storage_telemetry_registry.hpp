@@ -2,6 +2,7 @@
 
 #include "bored/ddl/ddl_telemetry.hpp"
 #include "bored/parser/parser_telemetry.hpp"
+#include "bored/planner/planner_telemetry.hpp"
 #include "bored/txn/transaction_telemetry.hpp"
 
 #include <cstddef>
@@ -137,6 +138,9 @@ public:
     using TransactionSampler = std::function<bored::txn::TransactionTelemetrySnapshot()>;
     using TransactionVisitor = std::function<void(const std::string&, const bored::txn::TransactionTelemetrySnapshot&)>;
 
+    using PlannerSampler = std::function<bored::planner::PlannerTelemetrySnapshot()>;
+    using PlannerVisitor = std::function<void(const std::string&, const bored::planner::PlannerTelemetrySnapshot&)>;
+
     void register_page_manager(std::string identifier, PageManagerSampler sampler);
     void unregister_page_manager(const std::string& identifier);
     PageManagerTelemetrySnapshot aggregate_page_managers() const;
@@ -182,6 +186,11 @@ public:
     bored::txn::TransactionTelemetrySnapshot aggregate_transactions() const;
     void visit_transactions(const TransactionVisitor& visitor) const;
 
+    void register_planner(std::string identifier, PlannerSampler sampler);
+    void unregister_planner(const std::string& identifier);
+    bored::planner::PlannerTelemetrySnapshot aggregate_planner() const;
+    void visit_planner(const PlannerVisitor& visitor) const;
+
 private:
     mutable std::mutex mutex_{};
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
@@ -193,6 +202,7 @@ private:
     std::unordered_map<std::string, DdlSampler> ddl_samplers_{};
     std::unordered_map<std::string, ParserSampler> parser_samplers_{};
     std::unordered_map<std::string, TransactionSampler> transaction_samplers_{};
+    std::unordered_map<std::string, PlannerSampler> planner_samplers_{};
 };
 
 }  // namespace bored::storage

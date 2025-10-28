@@ -34,4 +34,9 @@ const PlannerOptions& PlannerContext::options() const noexcept
     return config_.options;
 }
 
+PlannerTelemetry* PlannerContext::telemetry() const noexcept
+{
+    return config_.telemetry;
+}
+
 }  // namespace bored::planner

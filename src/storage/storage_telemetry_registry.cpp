@@ -1,6 +1,7 @@
 #include "bored/storage/storage_telemetry_registry.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -161,6 +162,31 @@ bored::txn::TransactionTelemetrySnapshot& accumulate(bored::txn::TransactionTele
     }
     target.last_snapshot_xmax = std::max(target.last_snapshot_xmax, source.last_snapshot_xmax);
     target.last_snapshot_age = std::max(target.last_snapshot_age, source.last_snapshot_age);
+    return target;
+}
+
+bored::planner::PlannerTelemetrySnapshot& accumulate(bored::planner::PlannerTelemetrySnapshot& target,
+                                                      const bored::planner::PlannerTelemetrySnapshot& source)
+{
+    target.plans_attempted += source.plans_attempted;
+    target.plans_succeeded += source.plans_succeeded;
+    target.plans_failed += source.plans_failed;
+    target.rules_attempted += source.rules_attempted;
+    target.rules_applied += source.rules_applied;
+    target.cost_evaluations += source.cost_evaluations;
+    target.alternatives_considered += source.alternatives_considered;
+    target.total_chosen_cost += source.total_chosen_cost;
+    if (std::isfinite(source.last_chosen_cost)) {
+        target.last_chosen_cost = source.last_chosen_cost;
+    }
+    if (std::isfinite(source.min_chosen_cost) &&
+        (!std::isfinite(target.min_chosen_cost) || source.min_chosen_cost < target.min_chosen_cost)) {
+        target.min_chosen_cost = source.min_chosen_cost;
+    }
+    if (std::isfinite(source.max_chosen_cost) &&
+        (!std::isfinite(target.max_chosen_cost) || source.max_chosen_cost > target.max_chosen_cost)) {
+        target.max_chosen_cost = source.max_chosen_cost;
+    }
     return target;
 }
 
@@ -545,6 +571,48 @@ void StorageTelemetryRegistry::register_parser(std::string identifier, ParserSam
     parser_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
 }
 
+void StorageTelemetryRegistry::unregister_parser(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    parser_samplers_.erase(identifier);
+}
+
+bored::parser::ParserTelemetrySnapshot StorageTelemetryRegistry::aggregate_parser() const
+{
+    std::vector<ParserSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(parser_samplers_.size());
+        for (const auto& [_, sampler] : parser_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<bored::parser::ParserTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_parser(const ParserVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, ParserSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(parser_samplers_.size());
+        for (const auto& [identifier, sampler] : parser_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
 void StorageTelemetryRegistry::register_transaction(std::string identifier, TransactionSampler sampler)
 {
     if (!sampler) {
@@ -596,36 +664,45 @@ void StorageTelemetryRegistry::visit_transactions(const TransactionVisitor& visi
     }
 }
 
-void StorageTelemetryRegistry::unregister_parser(const std::string& identifier)
+void StorageTelemetryRegistry::register_planner(std::string identifier, PlannerSampler sampler)
 {
+    if (!sampler) {
+        return;
+    }
     std::lock_guard guard(mutex_);
-    parser_samplers_.erase(identifier);
+    planner_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
 }
 
-bored::parser::ParserTelemetrySnapshot StorageTelemetryRegistry::aggregate_parser() const
+void StorageTelemetryRegistry::unregister_planner(const std::string& identifier)
 {
-    std::vector<ParserSampler> samplers;
+    std::lock_guard guard(mutex_);
+    planner_samplers_.erase(identifier);
+}
+
+bored::planner::PlannerTelemetrySnapshot StorageTelemetryRegistry::aggregate_planner() const
+{
+    std::vector<PlannerSampler> samplers;
     {
         std::lock_guard guard(mutex_);
-        samplers.reserve(parser_samplers_.size());
-        for (const auto& [_, sampler] : parser_samplers_) {
+        samplers.reserve(planner_samplers_.size());
+        for (const auto& [_, sampler] : planner_samplers_) {
             samplers.push_back(sampler);
         }
     }
-    return aggregate_snapshots<bored::parser::ParserTelemetrySnapshot>(samplers);
+    return aggregate_snapshots<bored::planner::PlannerTelemetrySnapshot>(samplers);
 }
 
-void StorageTelemetryRegistry::visit_parser(const ParserVisitor& visitor) const
+void StorageTelemetryRegistry::visit_planner(const PlannerVisitor& visitor) const
 {
     if (!visitor) {
         return;
     }
 
-    std::vector<std::pair<std::string, ParserSampler>> entries;
+    std::vector<std::pair<std::string, PlannerSampler>> entries;
     {
         std::lock_guard guard(mutex_);
-        entries.reserve(parser_samplers_.size());
-        for (const auto& [identifier, sampler] : parser_samplers_) {
+        entries.reserve(planner_samplers_.size());
+        for (const auto& [identifier, sampler] : planner_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }

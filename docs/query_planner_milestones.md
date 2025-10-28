@@ -55,17 +55,13 @@
 	- Added planner integration smoke tests that traverse physical plans with an executor stub, validating hash join pipelines and update snapshots end-to-end.
 
 ## Milestone 4: Diagnostics, Telemetry & Hardening (0.5 sprint)
-- [ ] Expose planner decisions through `planner::PlanDiagnostics` (chosen plan tree, alternative costs, rule traces).
-- [ ] Integrate planner telemetry with `StorageTelemetryRegistry` / diagnostics JSON surfaces.
+## Milestone 4: Diagnostics, Telemetry & Hardening (0.5 sprint)
+## Milestone 4: Diagnostics, Telemetry & Hardening (0.5 sprint)
+- [x] Expose planner decisions through `planner::PlanDiagnostics` (chosen plan tree, alternative costs, rule traces).
+- [x] Integrate planner telemetry with `StorageTelemetryRegistry` / diagnostics JSON surfaces.
 - [ ] Add explain-style pretty printer for physical plans.
 - [ ] Benchmark planner latency across representative workloads; set baseline thresholds for regression detection.
 - [ ] Finish documentation (operator guide addendum, troubleshooting checklist).
-
-## Deliverables & Exit Criteria
-- Deterministic planning pipeline producing executable physical plans for covered statements.
-- Rule framework with cost-guided selection and statistics integration.
-- Planner diagnostics and telemetry available through operator tooling.
-- Comprehensive test coverage (unit, integration, regression) to guard against plan regressions.
 
 ## Appendix: Planner Extension Guidelines
 - Keep new logical or physical operators in dedicated translation units under `src/planner/` with mirrored headers in `include/bored/planner/`.

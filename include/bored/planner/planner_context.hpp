@@ -13,6 +13,7 @@ namespace bored::planner {
 
 class StatisticsCatalog;
 class CostModel;
+class PlannerTelemetry;
 
 struct PlannerOptions final {
     bool enable_rule_tracing = false;
@@ -26,6 +27,7 @@ struct PlannerContextConfig final {
     const CostModel* cost_model = nullptr;
     txn::Snapshot snapshot{};
     PlannerOptions options{};
+    PlannerTelemetry* telemetry = nullptr;
 };
 
 class PlannerContext final {
@@ -38,6 +40,7 @@ public:
     [[nodiscard]] const CostModel* cost_model() const noexcept;
     [[nodiscard]] const txn::Snapshot& snapshot() const noexcept;
     [[nodiscard]] const PlannerOptions& options() const noexcept;
+    [[nodiscard]] PlannerTelemetry* telemetry() const noexcept;
 
 private:
     PlannerContextConfig config_{};

@@ -1,17 +1,21 @@
 #include "bored/storage/storage_telemetry_registry.hpp"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <vector>
 
 using namespace bored::storage;
+using Catch::Approx;
 
 namespace ddl = bored::ddl;
 namespace parser = bored::parser;
+namespace planner = bored::planner;
 
 namespace {
 
@@ -151,6 +155,23 @@ parser::ParserTelemetrySnapshot make_parser_snapshot(std::uint64_t base)
     snapshot.diagnostics_error = base + 5U;
     snapshot.total_parse_duration_ns = (base + 6U) * 20U;
     snapshot.last_parse_duration_ns = (base + 7U) * 10U;
+    return snapshot;
+}
+
+planner::PlannerTelemetrySnapshot make_planner_snapshot(std::uint64_t base)
+{
+    planner::PlannerTelemetrySnapshot snapshot{};
+    snapshot.plans_attempted = base + 1U;
+    snapshot.plans_succeeded = base;
+    snapshot.plans_failed = base / 2U;
+    snapshot.rules_attempted = base + 2U;
+    snapshot.rules_applied = base + 1U;
+    snapshot.cost_evaluations = (base + 3U) * 2U;
+    snapshot.alternatives_considered = base + 4U;
+    snapshot.total_chosen_cost = static_cast<double>((base + 5U) * 15U);
+    snapshot.last_chosen_cost = static_cast<double>((base + 6U) * 7U);
+    snapshot.min_chosen_cost = static_cast<double>(base + 1U);
+    snapshot.max_chosen_cost = static_cast<double>((base + 7U) * 5U);
     return snapshot;
 }
 
@@ -313,6 +334,47 @@ TEST_CASE("StorageTelemetryRegistry visits parser samplers")
     REQUIRE(snapshots.size() == 2U);
 }
 
+TEST_CASE("StorageTelemetryRegistry aggregates planner telemetry")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_planner("planner_a", [] { return make_planner_snapshot(2U); });
+    registry.register_planner("planner_b", [] { return make_planner_snapshot(5U); });
+
+    const auto total = registry.aggregate_planner();
+
+    REQUIRE(total.plans_attempted == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(total.plans_succeeded == (2U + 5U));
+    REQUIRE(total.plans_failed == (2U / 2U + 5U / 2U));
+    REQUIRE(total.rules_attempted == ((2U + 2U) + (5U + 2U)));
+    REQUIRE(total.rules_applied == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(total.cost_evaluations == (((2U + 3U) * 2U) + ((5U + 3U) * 2U)));
+    REQUIRE(total.alternatives_considered == ((2U + 4U) + (5U + 4U)));
+    REQUIRE(total.total_chosen_cost == Approx(static_cast<double>((2U + 5U) * 15U + (5U + 5U) * 15U)));
+    CHECK(std::isfinite(total.last_chosen_cost));
+    REQUIRE(total.min_chosen_cost == Approx(static_cast<double>(2U + 1U)));
+    REQUIRE(total.max_chosen_cost == Approx(static_cast<double>((5U + 7U) * 5U)));
+}
+
+TEST_CASE("StorageTelemetryRegistry visits planner samplers")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_planner("planner_a", [] { return make_planner_snapshot(3U); });
+    registry.register_planner("planner_b", [] { return make_planner_snapshot(6U); });
+
+    std::vector<std::string> ids;
+    std::vector<planner::PlannerTelemetrySnapshot> snapshots;
+
+    registry.visit_planner([&](const std::string& id, const planner::PlannerTelemetrySnapshot& snapshot) {
+        ids.push_back(id);
+        snapshots.push_back(snapshot);
+    });
+
+    REQUIRE(ids.size() == 2U);
+    REQUIRE(std::find(ids.begin(), ids.end(), "planner_a") != ids.end());
+    REQUIRE(std::find(ids.begin(), ids.end(), "planner_b") != ids.end());
+    REQUIRE(snapshots.size() == 2U);
+}
+
 TEST_CASE("StorageTelemetryRegistry visits DDL samplers")
 {
     StorageTelemetryRegistry registry;
@@ -342,6 +404,7 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     registry.register_catalog("cat", [] { return make_catalog_snapshot(2U); });
     registry.register_ddl("ddl", [] { return make_ddl_snapshot(3U); });
     registry.register_parser("parser", [] { return make_parser_snapshot(4U); });
+    registry.register_planner("planner", [] { return make_planner_snapshot(4U); });
 
     registry.unregister_page_manager("pm");
     registry.unregister_checkpoint_scheduler("ckpt");
@@ -349,6 +412,7 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     registry.unregister_catalog("cat");
     registry.unregister_ddl("ddl");
     registry.unregister_parser("parser");
+    registry.unregister_planner("planner");
 
     auto pm_total = registry.aggregate_page_managers();
     auto ckpt_total = registry.aggregate_checkpoint_schedulers();
@@ -356,6 +420,7 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     auto cat_total = registry.aggregate_catalog();
     auto ddl_total = registry.aggregate_ddl();
     auto parser_total = registry.aggregate_parser();
+    auto planner_total = registry.aggregate_planner();
 
     REQUIRE(pm_total.initialize.attempts == 0U);
     REQUIRE(ckpt_total.invocations == 0U);
@@ -370,4 +435,6 @@ TEST_CASE("StorageTelemetryRegistry unregisters samplers")
     REQUIRE(ddl_total.failures.other_failures == 0U);
     REQUIRE(parser_total.scripts_attempted == 0U);
     REQUIRE(parser_total.diagnostics_error == 0U);
+    REQUIRE(planner_total.plans_attempted == 0U);
+    REQUIRE(planner_total.rules_attempted == 0U);
 }

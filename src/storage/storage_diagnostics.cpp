@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 namespace bored::storage {
 namespace {
@@ -22,6 +23,22 @@ void append_field(std::string& out, const char* name, std::uint64_t value, bool&
     out.append(name);
     out.append("\":");
     out.append(std::to_string(value));
+}
+
+void append_double_field(std::string& out, const char* name, double value, bool& first)
+{
+    if (!first) {
+        out.push_back(',');
+    }
+    first = false;
+    out.push_back('"');
+    out.append(name);
+    out.append("\":");
+    if (std::isfinite(value)) {
+        out.append(std::to_string(value));
+    } else {
+        out.append("0.0");
+    }
 }
 
 void append_operation_snapshot(std::string& out, const OperationTelemetrySnapshot& snapshot)
@@ -278,6 +295,24 @@ void append_transaction_snapshot(std::string& out, const bored::txn::Transaction
     out.push_back('}');
 }
 
+void append_planner_snapshot(std::string& out, const bored::planner::PlannerTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "plans_attempted", snapshot.plans_attempted, first);
+    append_field(out, "plans_succeeded", snapshot.plans_succeeded, first);
+    append_field(out, "plans_failed", snapshot.plans_failed, first);
+    append_field(out, "rules_attempted", snapshot.rules_attempted, first);
+    append_field(out, "rules_applied", snapshot.rules_applied, first);
+    append_field(out, "cost_evaluations", snapshot.cost_evaluations, first);
+    append_field(out, "alternatives_considered", snapshot.alternatives_considered, first);
+    append_double_field(out, "total_chosen_cost", snapshot.total_chosen_cost, first);
+    append_double_field(out, "last_chosen_cost", snapshot.last_chosen_cost, first);
+    append_double_field(out, "min_chosen_cost", snapshot.min_chosen_cost, first);
+    append_double_field(out, "max_chosen_cost", snapshot.max_chosen_cost, first);
+    out.push_back('}');
+}
+
 void append_page_manager_section(std::string& out, const StorageDiagnosticsPageManagerSection& section)
 {
     out.push_back('{');
@@ -485,6 +520,29 @@ void append_transaction_section(std::string& out, const StorageDiagnosticsTransa
     out.push_back('}');
 }
 
+void append_planner_section(std::string& out, const StorageDiagnosticsPlannerSection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_planner_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_planner_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 }  // namespace
 
 StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryRegistry& registry,
@@ -565,6 +623,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+    document.planner.total = registry.aggregate_planner();
+    if (options.include_planner_details) {
+        registry.visit_planner([&](const std::string& identifier, const bored::planner::PlannerTelemetrySnapshot& snapshot) {
+            document.planner.details.push_back(StorageDiagnosticsPlannerEntry{identifier, snapshot});
+        });
+        std::sort(document.planner.details.begin(), document.planner.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+
     document.ddl.total = registry.aggregate_ddl();
     if (options.include_ddl_details) {
         registry.visit_ddl([&](const std::string& identifier, const ddl::DdlTelemetrySnapshot& snapshot) {
@@ -603,6 +670,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_parser_section(out, document.parser);
     out.append(",\"ddl\":");
     append_ddl_section(out, document.ddl);
+    out.append(",\"planner\":");
+    append_planner_section(out, document.planner);
     out.push_back('}');
     return out;
 }

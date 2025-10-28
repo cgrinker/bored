@@ -4,6 +4,7 @@
 #include "bored/planner/rule.hpp"
 #include "bored/planner/rules/join_rules.hpp"
 #include "bored/planner/rules/predicate_pushdown_rule.hpp"
+#include "bored/planner/planner_telemetry.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -150,12 +151,18 @@ LogicalOperatorPtr explore_memo(const PlannerContext& context,
                                 Memo::GroupId root_group,
                                 RuleTrace* trace,
                                 const CostModel* cost_model,
-                                std::size_t* cost_evaluations,
-                                double* chosen_cost)
+                                PlanDiagnostics* diagnostics)
 {
     const auto* root_group_ptr = memo.find_group(root_group);
     if (!root_group_ptr) {
         return nullptr;
+    }
+
+    if (diagnostics) {
+        diagnostics->alternatives.clear();
+        diagnostics->cost_evaluations = 0U;
+        diagnostics->chosen_plan_cost = 0.0;
+        diagnostics->chosen_logical_plan = nullptr;
     }
 
     std::unordered_map<const LogicalOperator*, Memo::GroupId> group_lookup;
@@ -240,6 +247,9 @@ LogicalOperatorPtr explore_memo(const PlannerContext& context,
     if (!cost_model) {
         for (auto it = final_group->expressions().rbegin(); it != final_group->expressions().rend(); ++it) {
             if (*it) {
+                if (diagnostics) {
+                    diagnostics->chosen_logical_plan = *it;
+                }
                 return *it;
             }
         }
@@ -247,25 +257,29 @@ LogicalOperatorPtr explore_memo(const PlannerContext& context,
     }
 
     double best_cost = std::numeric_limits<double>::infinity();
-    LogicalOperatorPtr best_expression = final_group->expressions().front();
+    LogicalOperatorPtr best_expression;
 
     for (const auto& expression : final_group->expressions()) {
         if (!expression) {
             continue;
         }
         const auto estimate = cost_model->estimate_plan(expression);
-        if (cost_evaluations) {
-            ++(*cost_evaluations);
-        }
         const double total_cost = estimate.cost.total();
+        if (diagnostics) {
+            diagnostics->alternatives.push_back({expression, total_cost});
+            ++diagnostics->cost_evaluations;
+        }
         if (total_cost < best_cost) {
             best_cost = total_cost;
             best_expression = expression;
         }
     }
 
-    if (chosen_cost && best_cost < std::numeric_limits<double>::infinity()) {
-        *chosen_cost = best_cost;
+    if (diagnostics && best_expression) {
+        diagnostics->chosen_logical_plan = best_expression;
+        if (best_cost < std::numeric_limits<double>::infinity()) {
+            diagnostics->chosen_plan_cost = best_cost;
+        }
     }
 
     return best_expression;
@@ -276,9 +290,16 @@ LogicalOperatorPtr explore_memo(const PlannerContext& context,
 PlannerResult plan_query(const PlannerContext& context, const LogicalPlan& plan)
 {
     PlannerResult result{};
+    PlannerTelemetry* telemetry = context.telemetry();
+    if (telemetry != nullptr) {
+        telemetry->record_plan_attempt();
+    }
     auto root = plan.root();
     if (!root) {
         result.diagnostics.emplace_back("logical plan is empty");
+        if (telemetry != nullptr) {
+            telemetry->record_plan_failure();
+        }
         return result;
     }
 
@@ -287,8 +308,6 @@ PlannerResult plan_query(const PlannerContext& context, const LogicalPlan& plan)
 
     RuleEngine engine{&default_rule_registry(), context.options().rule_options};
     RuleTrace trace{};
-    std::size_t cost_evaluations = 0U;
-    double chosen_cost = 0.0;
     const auto* cost_model = context.cost_model();
     if (auto representative = explore_memo(context,
                                            engine,
@@ -296,26 +315,34 @@ PlannerResult plan_query(const PlannerContext& context, const LogicalPlan& plan)
                                            root_group,
                                            &trace,
                                            cost_model,
-                                           &cost_evaluations,
-                                           &chosen_cost)) {
+                                           &result.plan_diagnostics)) {
         root = std::move(representative);
+    }
+    if (!result.plan_diagnostics.chosen_logical_plan) {
+        result.plan_diagnostics.chosen_logical_plan = root;
     }
 
     result.plan = PhysicalPlan{lower_placeholder(context, root)};
-    result.rules_attempted = trace.applications.size();
-    result.rules_applied = static_cast<std::size_t>(std::count_if(
+
+    result.plan_diagnostics.rules_attempted = trace.applications.size();
+    result.plan_diagnostics.rules_applied = static_cast<std::size_t>(std::count_if(
         trace.applications.begin(), trace.applications.end(), [](const auto& application) {
             return application.success;
         }));
-    result.cost_evaluations = cost_evaluations;
-    if (cost_model && cost_evaluations > 0U) {
-        result.chosen_plan_cost = chosen_cost;
+    result.plan_diagnostics.rule_trace.clear();
+    result.plan_diagnostics.rule_trace.reserve(trace.applications.size());
+    for (const auto& application : trace.applications) {
+        result.plan_diagnostics.rule_trace.push_back({application.rule_name, application.success});
     }
 
     if (context.options().enable_rule_tracing) {
         for (const auto& application : trace.applications) {
             result.diagnostics.push_back(application.rule_name + (application.success ? ":applied" : ":skipped"));
         }
+    }
+
+    if (telemetry != nullptr) {
+        telemetry->record_plan_success(result.plan_diagnostics);
     }
     return result;
 }
