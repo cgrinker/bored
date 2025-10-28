@@ -19,11 +19,14 @@
 	- Appendix now references naming conventions, immutability guidance, and statistics handles for future extensions.
 
 ## Milestone 1: Rule Framework & Canonical Transformations (1 sprint)
-- [ ] Build rule registry / dispatcher supporting pattern matching and rule priorities.
-- [ ] Implement mandatory logical simplifications (predicate pushdown, projection pruning, constant folding stubs).
+- [x] Build rule registry / dispatcher supporting pattern matching and rule priorities.
+	- Registry now maintains per-rule priorities, pattern matching, and category toggles surfaced through planner options.
+- [x] Implement mandatory logical simplifications (predicate pushdown, projection pruning, constant folding stubs).
+	- Projection pruning eliminates identity projections; filter pushdown swaps identity projections ahead of filters; constant folding stub wired for future expression folding.
 - [ ] Add join reordering primitives for associative/commutative inner joins (left-deep search baseline).
 - [ ] Provide memo-style plan exploration stubs (grouping equivalent expressions) with hooks for future costing.
-- [ ] Extend unit tests with rule application traces and failure diagnostics when no rules fire.
+- [x] Extend unit tests with rule application traces and failure diagnostics when no rules fire.
+	- Added planner-rule suites that assert trace capture, disabled-rule behavior, and planner-level diagnostics when tracing is enabled.
 
 ## Milestone 2: Statistics & Costing Integration (1 sprint)
 - [ ] Define `StatisticsCatalog` API for accessing row counts, distinct counts, and histogram stubs.

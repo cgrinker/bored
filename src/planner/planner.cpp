@@ -1,4 +1,6 @@
 #include "bored/planner/planner.hpp"
+#include "bored/planner/rule.hpp"
+#include "bored/planner/rules/predicate_pushdown_rule.hpp"
 
 #include <utility>
 
@@ -44,9 +46,21 @@ PhysicalOperatorPtr lower_placeholder(const LogicalOperatorPtr& logical)
     return PhysicalOperator::make(to_physical(logical->type()), std::move(lowered_children), std::move(properties));
 }
 
+const RuleRegistry& default_rule_registry()
+{
+    static RuleRegistry registry = [] {
+        RuleRegistry reg;
+        reg.register_rule(make_projection_pruning_rule());
+        reg.register_rule(make_filter_pushdown_rule());
+        reg.register_rule(make_constant_folding_rule());
+        return reg;
+    }();
+    return registry;
+}
+
 }  // namespace
 
-PlannerResult plan_query(const PlannerContext&, const LogicalPlan& plan)
+PlannerResult plan_query(const PlannerContext& context, const LogicalPlan& plan)
 {
     PlannerResult result{};
     auto root = plan.root();
@@ -55,7 +69,22 @@ PlannerResult plan_query(const PlannerContext&, const LogicalPlan& plan)
         return result;
     }
 
+    RuleEngine engine{&default_rule_registry(), context.options().rule_options};
+    RuleContext rule_context{&context};
+    std::vector<LogicalOperatorPtr> alternatives;
+    RuleTrace trace{};
+    engine.apply_rules(rule_context, root, alternatives, context.options().enable_rule_tracing ? &trace : nullptr);
+
+    if (!alternatives.empty()) {
+        root = alternatives.front();
+    }
+
     result.plan = PhysicalPlan{lower_placeholder(root)};
+    if (context.options().enable_rule_tracing) {
+        for (const auto& application : trace.applications) {
+            result.diagnostics.push_back(application.rule_name + (application.success ? ":applied" : ":skipped"));
+        }
+    }
     return result;
 }
 

@@ -52,6 +52,8 @@ add_library(${PROJECT_NAME}_lib
     src/planner/physical_plan.cpp
     src/planner/planner_context.cpp
     src/planner/planner.cpp
+    src/planner/rule.cpp
+    src/planner/rules/predicate_pushdown_rule.cpp
     src/txn/transaction_manager.cpp
     src/txn/wal_commit_pipeline.cpp
     src/txn/persistent_transaction_id_allocator.cpp
@@ -151,6 +153,7 @@ if(BORED_ENABLE_TESTS)
     tests/vacuum_background_loop_tests.cpp
         tests/vacuum_worker_tests.cpp
         tests/planner_scaffolding_tests.cpp
+    tests/planner_rule_tests.cpp
     tests/transaction_manager_tests.cpp
     tests/wal_commit_pipeline_tests.cpp
     )
