@@ -44,6 +44,7 @@
 - Join output defaults to concatenating child columns, with projection hooks for downstream shape control; telemetry tracks comparisons, matches, and emitted rows.
 - Hash join materialises build-side tuple buffers and exposes projection hooks alongside telemetry for build/probe/match counts; spill integration remains TODO.
 - Aggregation executor groups by caller-provided keys, maintains per-group aggregate state via callback-defined accumulators, and reports input/group counts through executor telemetry.
+- Upcoming follow-ups: (1) propagate join/aggregate operator metadata into the planner explain pipeline, (2) add mixed join+aggregate integration scenarios, and (3) prototype aggregation spill/reclaim policies once the temp storage story is defined.
 
 ## Milestone 3: DML & WAL Coordination (1 sprint)
 - [ ] Implement Insert executor that consumes child rows, allocates heap tuples, and emits WAL via `PageManager` hooks.
