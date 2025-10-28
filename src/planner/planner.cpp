@@ -15,6 +15,8 @@
 namespace bored::planner {
 namespace {
 
+constexpr std::size_t kHashJoinThreshold = 500U;
+
 void append_unique(std::vector<std::string>& target, const std::vector<std::string>& values)
 {
     for (const auto& value : values) {
@@ -60,6 +62,8 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
         lowered_children.push_back(lower_placeholder(context, child));
     }
 
+    auto operator_type = to_physical(logical->type());
+
     PhysicalProperties properties{};
     properties.expected_cardinality = logical->properties().estimated_cardinality;
     properties.preserves_order = logical->properties().preserves_order;
@@ -91,9 +95,17 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
         if (properties.ordering_columns.empty()) {
             properties.ordering_columns = lowered_children[0]->properties().ordering_columns;
         }
+
+        const auto left_cardinality = lowered_children[0]->properties().expected_cardinality;
+        const auto right_cardinality = lowered_children[1]->properties().expected_cardinality;
+        if (left_cardinality >= kHashJoinThreshold && right_cardinality >= kHashJoinThreshold) {
+            operator_type = PhysicalOperatorType::HashJoin;
+        } else {
+            operator_type = PhysicalOperatorType::NestedLoopJoin;
+        }
     }
 
-    return PhysicalOperator::make(to_physical(logical->type()), std::move(lowered_children), std::move(properties));
+    return PhysicalOperator::make(operator_type, std::move(lowered_children), std::move(properties));
 }
 
 const RuleRegistry& default_rule_registry()

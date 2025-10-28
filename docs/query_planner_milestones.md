@@ -44,7 +44,7 @@
 
 ## Milestone 3: Physical Operator Selection & Plan Lowering (1 sprint)
 - [x] Map optimized logical operators to executor-ready physical operators (seq scan, nested-loop join, hash join stub, aggregation).
-	- Planner lowerer now produces concrete physical operators with relation metadata, scan visibility flags, and respects memo-selected join ordering; hash join and aggregation stubs remain TODO pending logical operators.
+	- Planner lowerer now produces concrete physical operators with relation metadata, scan visibility flags, and respects memo-selected join ordering; hash join lowering currently selects hash vs. nested-loop joins via cardinality heuristics while aggregation stubs remain TODO pending logical operators.
 - [x] Emit physical plan properties (output schema, ordering, partitioning) for executor validation.
 	- Physical plans now annotate ordering and partitioning columns, propagating metadata from scans through projections and joins for downstream executor validation.
 - [ ] Wire transaction snapshot awareness into scan primitives (visibility filters, lock modes).

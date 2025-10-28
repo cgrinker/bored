@@ -6,6 +6,8 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+
 using bored::planner::LogicalOperator;
 using bored::planner::LogicalOperatorPtr;
 using bored::planner::LogicalOperatorType;
@@ -272,4 +274,29 @@ TEST_CASE("plan_query propagates relation metadata and snapshot requirements to 
     CHECK(physical_props.requires_visibility_check);
     CHECK(physical_props.partitioning_columns == std::vector<std::string>{"order_id", "customer_id"});
     CHECK(physical_props.ordering_columns.empty());
+}
+
+TEST_CASE("plan_query selects hash join when both inputs exceed threshold")
+{
+    auto left = make_table_scan("public.big_orders", 5000U, {"order_id"});
+    auto right = make_table_scan("public.big_customers", 6000U, {"customer_id"});
+
+    LogicalProperties join_props{};
+    join_props.output_columns = {"order_id", "customer_id"};
+
+    auto join = LogicalOperator::make(
+        LogicalOperatorType::Join,
+        std::vector<LogicalOperatorPtr>{left, right},
+        join_props);
+
+    LogicalPlan plan{join};
+    PlannerContext context{};
+
+    PlannerResult result = plan_query(context, plan);
+    auto root = result.plan.root();
+    REQUIRE(root);
+    CHECK(root->type() == PhysicalOperatorType::HashJoin);
+    auto partitions = root->properties().partitioning_columns;
+    std::sort(partitions.begin(), partitions.end());
+    CHECK(partitions == std::vector<std::string>{"customer_id", "order_id"});
 }
