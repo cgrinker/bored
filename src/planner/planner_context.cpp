@@ -14,6 +14,11 @@ const bored::catalog::CatalogAccessor* PlannerContext::catalog() const noexcept
     return config_.catalog;
 }
 
+const StatisticsCatalog* PlannerContext::statistics() const noexcept
+{
+    return config_.statistics;
+}
+
 const txn::Snapshot& PlannerContext::snapshot() const noexcept
 {
     return config_.snapshot;

@@ -11,6 +11,8 @@ class CatalogAccessor;
 
 namespace bored::planner {
 
+class StatisticsCatalog;
+
 struct PlannerOptions final {
     bool enable_rule_tracing = false;
     bool enable_costing = true;
@@ -19,6 +21,7 @@ struct PlannerOptions final {
 
 struct PlannerContextConfig final {
     const bored::catalog::CatalogAccessor* catalog = nullptr;
+    const StatisticsCatalog* statistics = nullptr;
     txn::Snapshot snapshot{};
     PlannerOptions options{};
 };
@@ -29,6 +32,7 @@ public:
     explicit PlannerContext(PlannerContextConfig config);
 
     [[nodiscard]] const bored::catalog::CatalogAccessor* catalog() const noexcept;
+    [[nodiscard]] const StatisticsCatalog* statistics() const noexcept;
     [[nodiscard]] const txn::Snapshot& snapshot() const noexcept;
     [[nodiscard]] const PlannerOptions& options() const noexcept;
 

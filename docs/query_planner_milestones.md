@@ -31,7 +31,8 @@
 	- Added planner-rule suites that assert trace capture, disabled-rule behavior, and planner-level diagnostics when tracing is enabled.
 
 ## Milestone 2: Statistics & Costing Integration (1 sprint)
-- [ ] Define `StatisticsCatalog` API for accessing row counts, distinct counts, and histogram stubs.
+- [x] Define `StatisticsCatalog` API for accessing row counts, distinct counts, and histogram stubs.
+	- Introduced planner-level `StatisticsCatalog` with table/column stat records, planner context wiring, and Catch2 coverage for registration and lookup semantics.
 - [ ] Implement a baseline cost model (IO + CPU) for scans, joins, and aggregations.
 - [ ] Connect cost model to rule framework so cheapest alternative per group is selected.
 - [ ] Add telemetry counters for rule applications, costing invocations, and chosen plan costs.
