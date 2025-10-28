@@ -56,6 +56,7 @@ add_library(${PROJECT_NAME}_lib
     src/planner/planner_context.cpp
     src/planner/planner.cpp
     src/planner/planner_telemetry.cpp
+    src/planner/plan_printer.cpp
     src/planner/rule.cpp
     src/planner/rules/join_rules.cpp
     src/planner/rules/predicate_pushdown_rule.cpp
@@ -163,6 +164,7 @@ if(BORED_ENABLE_TESTS)
     tests/planner_rule_tests.cpp
         tests/planner_integration_tests.cpp
         tests/planner_telemetry_tests.cpp
+        tests/planner_plan_printer_tests.cpp
     tests/transaction_manager_tests.cpp
     tests/wal_commit_pipeline_tests.cpp
     )
