@@ -328,6 +328,7 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     const StorageDiagnosticsOptions options{};
     const auto doc = collect_storage_diagnostics(registry, options);
 
+    REQUIRE(doc.schema_version == kStorageDiagnosticsSchemaVersion);
     REQUIRE(doc.page_managers.details.size() == 2U);
     REQUIRE(doc.page_managers.total.initialize.attempts == ((1U + 1U) + (5U + 1U)));
     REQUIRE(doc.checkpoints.details.size() == 2U);
@@ -466,6 +467,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
 
     const auto doc = collect_storage_diagnostics(registry, options);
 
+    REQUIRE(doc.schema_version == kStorageDiagnosticsSchemaVersion);
     REQUIRE(doc.page_managers.details.empty());
     REQUIRE(doc.checkpoints.details.empty());
     REQUIRE(doc.retention.details.empty());
@@ -528,6 +530,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"hash_join_build_rows\"") != std::string::npos);
     REQUIRE(json.find("\"aggregation_groups_emitted\"") != std::string::npos);
     REQUIRE(json.find("\"mutation_attempts\"") != std::string::npos);
+    REQUIRE(json.find("\"schema_version\"") != std::string::npos);
     REQUIRE(json.find("\"outstanding_replay_backlog_bytes\"") != std::string::npos);
     REQUIRE(json.find("\"last_replay_backlog_bytes\"") != std::string::npos);
 }

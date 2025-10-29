@@ -146,6 +146,27 @@ target_link_libraries(${PROJECT_NAME}
     ${PROJECT_NAME}_lib
 )
 
+find_package(CLI11 CONFIG REQUIRED)
+find_package(replxx CONFIG REQUIRED)
+find_package(Threads REQUIRED)
+
+add_executable(boredctl
+    src/tools/boredctl_main.cpp
+)
+
+target_link_libraries(boredctl
+    PRIVATE
+        ${PROJECT_NAME}_lib
+        CLI11::CLI11
+    replxx::replxx
+    Threads::Threads
+)
+
+target_compile_features(boredctl
+    PUBLIC
+        cxx_std_20
+)
+
 
 option(BORED_ENABLE_TESTS "Build and enable tests" ON)
 option(BORED_ENABLE_BENCHMARKS "Build storage benchmarking harness" ON)

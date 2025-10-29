@@ -85,10 +85,7 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
 10. **User-Facing Tooling & Diagnostics**
     - **Responsibilities:** Provide CLI tooling, SQL shell, configuration surfaces, and observability dashboards for relational workloads.
     - **Prerequisites:** Core relational functionality (parser through executor) and telemetry registry integration.
-    - **Key Tasks:**
-      - Implement interactive SQL shell powered by the parser and executor stack.
-      - Expose catalog inspection commands and system views.
-      - Integrate telemetry (query latencies, lock waits) into existing diagnostics pipelines.
+  - **Milestones:** Tracked in [user_tooling_diagnostics_milestones.md](user_tooling_diagnostics_milestones.md).
 
 ## Next Steps
 - Execute Transaction & Concurrency Milestone 1 (Txn identity and visibility plumbing) as outlined in `docs/transaction_concurrency_milestones.md`.

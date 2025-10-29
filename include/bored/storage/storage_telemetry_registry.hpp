@@ -341,4 +341,7 @@ private:
     std::unordered_map<std::string, ExecutorSampler> executor_samplers_{};
 };
 
+StorageTelemetryRegistry* get_global_storage_telemetry_registry() noexcept;
+void set_global_storage_telemetry_registry(StorageTelemetryRegistry* registry) noexcept;
+
 }  // namespace bored::storage

@@ -11,6 +11,8 @@
 
 namespace bored::storage {
 
+inline constexpr std::uint32_t kStorageDiagnosticsSchemaVersion = 1U;
+
 struct StorageDiagnosticsOptions final {
     bool include_page_manager_details = true;
     bool include_checkpoint_details = true;
@@ -180,6 +182,7 @@ struct StorageDiagnosticsExecutorSection final {
 };
 
 struct StorageDiagnosticsDocument final {
+    std::uint32_t schema_version = kStorageDiagnosticsSchemaVersion;
     std::chrono::system_clock::time_point collected_at{};
     std::uint64_t last_checkpoint_lsn = 0U;
     std::uint64_t outstanding_replay_backlog_bytes = 0U;

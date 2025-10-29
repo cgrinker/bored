@@ -1,6 +1,7 @@
 #include "bored/storage/storage_telemetry_registry.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <utility>
@@ -1122,6 +1123,22 @@ void StorageTelemetryRegistry::visit_executors(const ExecutorVisitor& visitor) c
         }
         visitor(identifier, sampler());
     }
+}
+
+namespace {
+
+std::atomic<StorageTelemetryRegistry*> g_global_storage_registry{nullptr};
+
+}  // namespace
+
+StorageTelemetryRegistry* get_global_storage_telemetry_registry() noexcept
+{
+    return g_global_storage_registry.load(std::memory_order_acquire);
+}
+
+void set_global_storage_telemetry_registry(StorageTelemetryRegistry* registry) noexcept
+{
+    g_global_storage_registry.store(registry, std::memory_order_release);
 }
 
 }  // namespace bored::storage

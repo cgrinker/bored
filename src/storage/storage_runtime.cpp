@@ -130,6 +130,10 @@ std::error_code StorageRuntime::initialize()
         return std::make_error_code(std::errc::invalid_argument);
     }
 
+    if (config_.storage_telemetry_registry) {
+        set_global_storage_telemetry_registry(config_.storage_telemetry_registry);
+    }
+
     return {};
 }
 
@@ -145,6 +149,11 @@ void StorageRuntime::shutdown()
     index_retention_pruner_.reset();
     index_retention_executor_.reset();
     checkpoint_manager_.reset();
+
+    if (config_.storage_telemetry_registry &&
+        get_global_storage_telemetry_registry() == config_.storage_telemetry_registry) {
+        set_global_storage_telemetry_registry(nullptr);
+    }
 
     if (async_io_ && owns_async_io_) {
         async_io_->shutdown();

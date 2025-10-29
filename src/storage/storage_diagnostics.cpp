@@ -989,6 +989,9 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     std::string out;
     out.reserve(2048U);
     out.push_back('{');
+    out.append("\"schema_version\":");
+    out.append(std::to_string(static_cast<unsigned long long>(document.schema_version)));
+    out.append(",");
     out.append("\"collected_at_ns\":");
     const auto collected_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(document.collected_at.time_since_epoch()).count();
     out.append(std::to_string(static_cast<long long>(collected_ns)));
