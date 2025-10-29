@@ -79,6 +79,26 @@ WalRetentionTelemetrySnapshot& accumulate(WalRetentionTelemetrySnapshot& target,
     return target;
 }
 
+IndexRetentionTelemetrySnapshot& accumulate(IndexRetentionTelemetrySnapshot& target,
+                                            const IndexRetentionTelemetrySnapshot& source)
+{
+    target.scheduled_candidates += source.scheduled_candidates;
+    target.dropped_candidates += source.dropped_candidates;
+    target.checkpoint_runs += source.checkpoint_runs;
+    target.checkpoint_failures += source.checkpoint_failures;
+    target.dispatch_batches += source.dispatch_batches;
+    target.dispatch_failures += source.dispatch_failures;
+    target.dispatched_candidates += source.dispatched_candidates;
+    target.skipped_candidates += source.skipped_candidates;
+    target.pruned_candidates += source.pruned_candidates;
+    target.total_checkpoint_duration_ns += source.total_checkpoint_duration_ns;
+    target.last_checkpoint_duration_ns = std::max(target.last_checkpoint_duration_ns, source.last_checkpoint_duration_ns);
+    target.total_dispatch_duration_ns += source.total_dispatch_duration_ns;
+    target.last_dispatch_duration_ns = std::max(target.last_dispatch_duration_ns, source.last_dispatch_duration_ns);
+    target.pending_candidates += source.pending_candidates;
+    return target;
+}
+
 TempCleanupTelemetrySnapshot& accumulate(TempCleanupTelemetrySnapshot& target, const TempCleanupTelemetrySnapshot& source)
 {
     target.invocations += source.invocations;
@@ -404,6 +424,57 @@ void StorageTelemetryRegistry::visit_wal_retention(const WalRetentionVisitor& vi
         std::lock_guard guard(mutex_);
         entries.reserve(wal_retention_samplers_.size());
         for (const auto& [identifier, sampler] : wal_retention_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_index_retention(std::string identifier, IndexRetentionSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    index_retention_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_index_retention(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    index_retention_samplers_.erase(identifier);
+}
+
+IndexRetentionTelemetrySnapshot StorageTelemetryRegistry::aggregate_index_retention() const
+{
+    std::vector<IndexRetentionSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(index_retention_samplers_.size());
+        for (const auto& [_, sampler] : index_retention_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<IndexRetentionTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_index_retention(const IndexRetentionVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, IndexRetentionSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(index_retention_samplers_.size());
+        for (const auto& [identifier, sampler] : index_retention_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }

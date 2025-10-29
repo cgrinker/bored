@@ -3,6 +3,7 @@
 #include "bored/storage/page_latch_guard.hpp"
 #include "bored/storage/page_operations.hpp"
 #include "bored/storage/temp_resource_registry.hpp"
+#include "bored/storage/index_btree_leaf_ops.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -40,11 +41,6 @@ constexpr std::size_t kIndexPayloadBase = sizeof(PageHeader) + sizeof(IndexBtree
     return std::make_error_code(std::errc::invalid_argument);
 }
 
-struct LeafEntry final {
-    IndexBtreeTuplePointer pointer{};
-    std::vector<std::byte> key{};
-};
-
 [[nodiscard]] bool pointers_equal(const IndexBtreeTuplePointer& lhs, const IndexBtreeTuplePointer& rhs) noexcept
 {
     return lhs.heap_page_id == rhs.heap_page_id && lhs.heap_slot_id == rhs.heap_slot_id;
@@ -64,128 +60,7 @@ struct LeafEntry final {
     return {};
 }
 
-[[nodiscard]] std::vector<LeafEntry> read_leaf_entries(std::span<const std::byte> page,
-                                                       std::error_code& out_error)
-{
-    const auto& header = page_header(page);
-    const auto& index = index_header(page);
-
-    if (!is_index_page(header) || !index_page_is_leaf(index)) {
-        out_error = make_invalid_page_error();
-        return {};
-    }
-
-    if (header.tuple_count == 0U) {
-        out_error.clear();
-        return {};
-    }
-
-    const auto pointer_size = sizeof(IndexBtreeTuplePointer);
-    const auto slot_count = static_cast<std::size_t>(header.tuple_count);
-    const auto directory_begin = reinterpret_cast<const IndexBtreeSlotEntry*>(page.data() + header.free_end);
-
-    std::vector<LeafEntry> entries;
-    entries.reserve(slot_count);
-
-    for (std::size_t logical_index = 0; logical_index < slot_count; ++logical_index) {
-        const auto& slot = directory_begin[logical_index];
-        if (slot.infinite_key()) {
-            out_error = std::make_error_code(std::errc::operation_not_supported);
-            return {};
-        }
-
-        const auto key_length = static_cast<std::size_t>(slot.effective_length());
-        const auto key_offset = static_cast<std::size_t>(slot.key_offset);
-        if (key_offset < kIndexPayloadBase || key_offset > page.size()) {
-            out_error = make_invalid_page_error();
-            return {};
-        }
-
-        if (key_offset + key_length > static_cast<std::size_t>(page_header(page).free_start)) {
-            out_error = make_invalid_page_error();
-            return {};
-        }
-
-        if (key_offset < pointer_size || key_offset - pointer_size < kIndexPayloadBase) {
-            out_error = make_invalid_page_error();
-            return {};
-        }
-
-        const auto pointer_offset = key_offset - pointer_size;
-        LeafEntry entry{};
-        std::memcpy(&entry.pointer, page.data() + pointer_offset, pointer_size);
-        entry.key.resize(key_length);
-        if (key_length != 0U) {
-            std::memcpy(entry.key.data(), page.data() + key_offset, key_length);
-        }
-        entries.push_back(std::move(entry));
-    }
-
-    out_error.clear();
-    return entries;
-}
-
-[[nodiscard]] std::size_t total_payload_size(std::span<const LeafEntry> entries)
-{
-    const auto pointer_size = sizeof(IndexBtreeTuplePointer);
-    std::size_t total = 0U;
-    for (const auto& entry : entries) {
-        total += pointer_size + entry.key.size();
-    }
-    return total;
-}
-
-[[nodiscard]] bool rebuild_leaf_page(std::span<std::byte> page,
-                                     std::span<const LeafEntry> entries,
-                                     std::uint64_t lsn)
-{
-    auto& header = page_header(page);
-    auto& index = index_header(page);
-
-    if (!index_page_is_leaf(index)) {
-        return false;
-    }
-
-    const auto pointer_size = sizeof(IndexBtreeTuplePointer);
-    const auto slot_size = sizeof(IndexBtreeSlotEntry);
-    const auto payload_bytes = total_payload_size(std::span<const LeafEntry>(entries.data(), entries.size()));
-    const auto slot_bytes = static_cast<std::size_t>(entries.size()) * slot_size;
-
-    if (kIndexPayloadBase + payload_bytes + slot_bytes > page.size()) {
-        return false;
-    }
-
-    const auto slot_start = page.size() - slot_bytes;
-    const auto payload_end = kIndexPayloadBase + payload_bytes;
-
-    auto* slots = reinterpret_cast<IndexBtreeSlotEntry*>(page.data() + slot_start);
-    std::size_t write_cursor = kIndexPayloadBase;
-
-    for (std::size_t logical_index = 0; logical_index < entries.size(); ++logical_index) {
-        const auto& entry = entries[logical_index];
-        std::memcpy(page.data() + write_cursor, &entry.pointer, pointer_size);
-        const auto key_offset = write_cursor + pointer_size;
-        if (!entry.key.empty()) {
-            std::memcpy(page.data() + key_offset, entry.key.data(), entry.key.size());
-        }
-
-        slots[logical_index].key_offset = static_cast<std::uint16_t>(key_offset);
-        slots[logical_index].key_length = static_cast<std::uint16_t>(entry.key.size());
-
-        write_cursor = key_offset + entry.key.size();
-    }
-
-    header.free_start = static_cast<std::uint16_t>(payload_end);
-    header.free_end = static_cast<std::uint16_t>(slot_start);
-    header.tuple_count = static_cast<std::uint16_t>(entries.size());
-    header.fragment_count = 0U;
-    header.flags |= static_cast<std::uint16_t>(PageFlag::Dirty);
-    header.lsn = lsn;
-
-    return true;
-}
-
-[[nodiscard]] std::size_t find_insertion_position(const std::vector<LeafEntry>& entries,
+[[nodiscard]] std::size_t find_insertion_position(const std::vector<IndexBtreeLeafEntry>& entries,
                                                   std::span<const std::byte> key,
                                                   const IndexComparatorEntry* comparator,
                                                   bool allow_duplicates,
@@ -210,7 +85,7 @@ struct LeafEntry final {
     return position;
 }
 
-[[nodiscard]] std::size_t locate_pointer(const std::vector<LeafEntry>& entries,
+[[nodiscard]] std::size_t locate_pointer(const std::vector<IndexBtreeLeafEntry>& entries,
                                          const IndexBtreeTuplePointer& pointer,
                                          std::span<const std::byte> key,
                                          const IndexComparatorEntry* comparator)
@@ -348,7 +223,7 @@ std::error_code IndexBtreeManager::insert_leaf(std::span<std::byte> page,
     }
 
     std::error_code parse_error;
-    auto entries = read_leaf_entries(page, parse_error);
+    auto entries = read_index_leaf_entries(page, parse_error);
     if (parse_error) {
         return parse_error;
     }
@@ -359,20 +234,20 @@ std::error_code IndexBtreeManager::insert_leaf(std::span<std::byte> page,
         return std::make_error_code(std::errc::file_exists);
     }
 
-    LeafEntry entry{};
+    IndexBtreeLeafEntry entry{};
     entry.pointer = tuple_pointer;
     entry.key.assign(key.begin(), key.end());
 
     entries.insert(entries.begin() + static_cast<std::ptrdiff_t>(insert_pos), std::move(entry));
 
-    const auto payload_bytes = total_payload_size(std::span<const LeafEntry>(entries.data(), entries.size()));
+    const auto payload_bytes = index_leaf_payload_size(std::span<const IndexBtreeLeafEntry>(entries.data(), entries.size()));
     const auto slot_bytes = entries.size() * sizeof(IndexBtreeSlotEntry);
     if (kIndexPayloadBase + payload_bytes + slot_bytes > page.size()) {
         out_result.requires_split = true;
         return std::make_error_code(std::errc::no_buffer_space);
     }
 
-    if (!rebuild_leaf_page(page, std::span<const LeafEntry>(entries.data(), entries.size()), lsn)) {
+    if (!rebuild_index_leaf_page(page, std::span<const IndexBtreeLeafEntry>(entries.data(), entries.size()), lsn)) {
         out_result.requires_split = true;
         return std::make_error_code(std::errc::no_buffer_space);
     }
@@ -409,7 +284,7 @@ std::error_code IndexBtreeManager::delete_leaf(std::span<std::byte> page,
     }
 
     std::error_code parse_error;
-    auto entries = read_leaf_entries(page, parse_error);
+    auto entries = read_index_leaf_entries(page, parse_error);
     if (parse_error) {
         return parse_error;
     }
@@ -443,7 +318,7 @@ std::error_code IndexBtreeManager::delete_leaf(std::span<std::byte> page,
         return std::make_error_code(std::errc::no_such_file_or_directory);
     }
 
-    if (!rebuild_leaf_page(page, std::span<const LeafEntry>(entries.data(), entries.size()), lsn)) {
+    if (!rebuild_index_leaf_page(page, std::span<const IndexBtreeLeafEntry>(entries.data(), entries.size()), lsn)) {
         return std::make_error_code(std::errc::io_error);
     }
 
@@ -479,7 +354,7 @@ std::error_code IndexBtreeManager::update_leaf(std::span<std::byte> page,
     }
 
     std::error_code parse_error;
-    auto entries = read_leaf_entries(page, parse_error);
+    auto entries = read_index_leaf_entries(page, parse_error);
     if (parse_error) {
         return parse_error;
     }
@@ -488,7 +363,7 @@ std::error_code IndexBtreeManager::update_leaf(std::span<std::byte> page,
         return make_invalid_page_error();
     }
 
-    LeafEntry entry = entries[slot_index];
+    IndexBtreeLeafEntry entry = entries[slot_index];
     entries.erase(entries.begin() + slot_index);
     entry.pointer = tuple_pointer;
     entry.key.assign(new_key.begin(), new_key.end());
@@ -497,14 +372,14 @@ std::error_code IndexBtreeManager::update_leaf(std::span<std::byte> page,
     const auto insert_pos = find_insertion_position(entries, entry.key, comparator_, true, duplicate);
     entries.insert(entries.begin() + static_cast<std::ptrdiff_t>(insert_pos), std::move(entry));
 
-    const auto payload_bytes = total_payload_size(entries);
+    const auto payload_bytes = index_leaf_payload_size(std::span<const IndexBtreeLeafEntry>(entries.data(), entries.size()));
     const auto slot_bytes = entries.size() * sizeof(IndexBtreeSlotEntry);
     if (kIndexPayloadBase + payload_bytes + slot_bytes > page.size()) {
         out_result.requires_split = true;
         return std::make_error_code(std::errc::no_buffer_space);
     }
 
-    if (!rebuild_leaf_page(page, std::span<const LeafEntry>(entries.data(), entries.size()), lsn)) {
+    if (!rebuild_index_leaf_page(page, std::span<const IndexBtreeLeafEntry>(entries.data(), entries.size()), lsn)) {
         out_result.requires_split = true;
         return std::make_error_code(std::errc::no_buffer_space);
     }
@@ -532,7 +407,7 @@ IndexSearchResult IndexBtreeManager::find_leaf_slot(std::span<const std::byte> p
     }
 
     std::error_code parse_error;
-    auto entries = read_leaf_entries(page, parse_error);
+    auto entries = read_index_leaf_entries(page, parse_error);
     if (parse_error) {
         return result;
     }

@@ -1,6 +1,8 @@
 #include "bored/storage/storage_runtime.hpp"
 
 #include "bored/executor/executor_temp_resource_manager.hpp"
+#include "bored/storage/index_retention.hpp"
+#include "bored/storage/index_retention_pruner.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/temp_resource_registry.hpp"
 #include "bored/storage/wal_replayer.hpp"
@@ -14,6 +16,7 @@
 #include <fstream>
 #include <optional>
 #include <system_error>
+#include <vector>
 
 namespace {
 
@@ -51,6 +54,7 @@ TEST_CASE("StorageRuntime wires temp cleanup into checkpoint and recovery", "[st
     config.wal_writer.segment_size = 4U * kWalBlockSize;
     config.wal_writer.buffer_size = 2U * kWalBlockSize;
     config.wal_writer.size_flush_threshold = kWalBlockSize;
+    config.wal_writer.start_lsn = kWalBlockSize;
     config.wal_writer.retention.retention_segments = 1U;
     config.wal_writer.telemetry_identifier = "runtime_wal";
     config.wal_writer.temp_cleanup_telemetry_identifier = "runtime_temp_cleanup";
@@ -102,6 +106,7 @@ TEST_CASE("StorageRuntime wires temp cleanup into checkpoint and recovery", "[st
     std::optional<WalAppendResult> checkpoint_result;
     REQUIRE_FALSE(runtime.checkpoint_scheduler()->maybe_run(now, provider, true, checkpoint_result));
     REQUIRE(checkpoint_result.has_value());
+    CHECK(checkpoint_result->lsn > 0U);
     CHECK_FALSE(std::filesystem::exists(spill_file));
 
     std::filesystem::path crash_spill_dir;
@@ -131,5 +136,165 @@ TEST_CASE("StorageRuntime wires temp cleanup into checkpoint and recovery", "[st
 
     CHECK_FALSE(std::filesystem::exists(crash_spill_file));
 
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("StorageRuntime dispatches index retention candidates via pruner", "[storage][runtime]")
+{
+    using namespace bored::storage;
+
+    StorageTelemetryRegistry storage_registry;
+    WalTelemetryRegistry wal_registry;
+
+    auto wal_dir = make_temp_dir("bored_storage_runtime_retention_");
+
+    IndexRetentionPruner::Config pruner_config{};
+    std::vector<IndexRetentionCandidate> invoked{};
+    pruner_config.prune_callback = [&invoked](const IndexRetentionCandidate& candidate) -> std::error_code {
+        invoked.push_back(candidate);
+        return {};
+    };
+
+    StorageRuntimeConfig config{};
+    config.async_io.backend = AsyncIoBackend::ThreadPool;
+    config.async_io.worker_threads = 1U;
+    config.async_io.queue_depth = 4U;
+    config.wal_telemetry_registry = &wal_registry;
+    config.storage_telemetry_registry = &storage_registry;
+    config.temp_manager.base_directory = wal_dir / "spill";
+    config.wal_writer.directory = wal_dir;
+    config.wal_writer.segment_size = 4U * kWalBlockSize;
+    config.wal_writer.buffer_size = 2U * kWalBlockSize;
+    config.wal_writer.size_flush_threshold = kWalBlockSize;
+    config.wal_writer.start_lsn = kWalBlockSize;
+    config.wal_writer.retention.retention_segments = 1U;
+    config.wal_writer.telemetry_identifier = "runtime_retention_wal";
+    config.index_retention.retention_window = std::chrono::milliseconds{0};
+    config.index_retention_pruner = pruner_config;
+
+    config.checkpoint_scheduler.min_interval = std::chrono::seconds(300);
+    config.checkpoint_scheduler.dirty_page_trigger = 0U;
+    config.checkpoint_scheduler.active_transaction_trigger = 0U;
+    config.checkpoint_scheduler.lsn_gap_trigger = kWalBlockSize;
+    config.checkpoint_scheduler.flush_after_emit = true;
+    config.checkpoint_scheduler.retention = config.wal_writer.retention;
+    config.checkpoint_scheduler.telemetry_identifier = "runtime_retention_checkpoint";
+
+    StorageRuntime runtime{config};
+    REQUIRE_FALSE(runtime.initialize());
+
+    auto manager = runtime.index_retention_manager();
+    REQUIRE(manager != nullptr);
+
+    IndexRetentionCandidate candidate{};
+    candidate.index_id = 333U;
+    candidate.page_id = 77U;
+    candidate.level = 0U;
+    candidate.prune_lsn = 1U;
+    manager->schedule_candidate(candidate);
+
+    auto provider = [&](CheckpointSnapshot& snapshot) -> std::error_code {
+        snapshot.redo_lsn = 100U;
+        snapshot.undo_lsn = 100U;
+        snapshot.dirty_pages.clear();
+        snapshot.active_transactions.clear();
+        return {};
+    };
+
+    const auto now = std::chrono::steady_clock::now();
+    std::optional<WalAppendResult> checkpoint_result;
+    REQUIRE_FALSE(runtime.checkpoint_scheduler()->maybe_run(now, provider, true, checkpoint_result));
+    REQUIRE(checkpoint_result.has_value());
+    CHECK(checkpoint_result->lsn > 0U);
+
+    auto retention_snapshot = manager->telemetry_snapshot();
+    INFO("dispatched=" << retention_snapshot.dispatched_candidates << ", pruned=" << retention_snapshot.pruned_candidates << ", pending=" << retention_snapshot.pending_candidates);
+    CHECK(retention_snapshot.dispatched_candidates == 1U);
+
+    REQUIRE(invoked.size() == 1U);
+    CHECK(invoked.front().index_id == candidate.index_id);
+    CHECK(invoked.front().page_id == candidate.page_id);
+
+    runtime.shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("StorageRuntime dispatches index retention candidates via executor fallback", "[storage][runtime]")
+{
+    using namespace bored::storage;
+
+    StorageTelemetryRegistry storage_registry;
+    WalTelemetryRegistry wal_registry;
+
+    auto wal_dir = make_temp_dir("bored_storage_runtime_retention_executor_");
+
+    StorageRuntimeConfig config{};
+    config.async_io.backend = AsyncIoBackend::ThreadPool;
+    config.async_io.worker_threads = 1U;
+    config.async_io.queue_depth = 4U;
+    config.wal_telemetry_registry = &wal_registry;
+    config.storage_telemetry_registry = &storage_registry;
+    config.temp_manager.base_directory = wal_dir / "spill";
+    config.wal_writer.directory = wal_dir;
+    config.wal_writer.segment_size = 4U * kWalBlockSize;
+    config.wal_writer.buffer_size = 2U * kWalBlockSize;
+    config.wal_writer.size_flush_threshold = kWalBlockSize;
+    config.wal_writer.start_lsn = kWalBlockSize;
+    config.wal_writer.retention.retention_segments = 1U;
+    config.wal_writer.telemetry_identifier = "runtime_retention_executor_wal";
+    config.index_retention.retention_window = std::chrono::milliseconds{0};
+
+    std::vector<IndexRetentionCandidate> invoked{};
+    config.index_retention_pruner = IndexRetentionPruner::Config{};
+    config.index_retention_executor = IndexRetentionExecutor::Config{};
+    config.index_retention_executor->prune_callback = [&invoked](const IndexRetentionCandidate& candidate) -> std::error_code {
+        invoked.push_back(candidate);
+        return {};
+    };
+
+    config.checkpoint_scheduler.min_interval = std::chrono::seconds(300);
+    config.checkpoint_scheduler.dirty_page_trigger = 0U;
+    config.checkpoint_scheduler.active_transaction_trigger = 0U;
+    config.checkpoint_scheduler.lsn_gap_trigger = kWalBlockSize;
+    config.checkpoint_scheduler.flush_after_emit = true;
+    config.checkpoint_scheduler.retention = config.wal_writer.retention;
+    config.checkpoint_scheduler.telemetry_identifier = "runtime_retention_executor_checkpoint";
+
+    StorageRuntime runtime{config};
+    REQUIRE_FALSE(runtime.initialize());
+
+    auto manager = runtime.index_retention_manager();
+    REQUIRE(manager != nullptr);
+
+    IndexRetentionCandidate candidate{};
+    candidate.index_id = 901U;
+    candidate.page_id = 11U;
+    candidate.level = 2U;
+    candidate.prune_lsn = 3U;
+    manager->schedule_candidate(candidate);
+
+    auto provider = [&](CheckpointSnapshot& snapshot) -> std::error_code {
+        snapshot.redo_lsn = 100U;
+        snapshot.undo_lsn = 100U;
+        snapshot.dirty_pages.clear();
+        snapshot.active_transactions.clear();
+        return {};
+    };
+
+    const auto now = std::chrono::steady_clock::now();
+    std::optional<WalAppendResult> checkpoint_result;
+    REQUIRE_FALSE(runtime.checkpoint_scheduler()->maybe_run(now, provider, true, checkpoint_result));
+    REQUIRE(checkpoint_result.has_value());
+    CHECK(checkpoint_result->lsn > 0U);
+
+    auto retention_snapshot = manager->telemetry_snapshot();
+    INFO("dispatched=" << retention_snapshot.dispatched_candidates << ", pruned=" << retention_snapshot.pruned_candidates << ", pending=" << retention_snapshot.pending_candidates);
+    CHECK(retention_snapshot.dispatched_candidates == 1U);
+
+    REQUIRE(invoked.size() == 1U);
+    CHECK(invoked.front().index_id == candidate.index_id);
+    CHECK(invoked.front().page_id == candidate.page_id);
+
+    runtime.shutdown();
     (void)std::filesystem::remove_all(wal_dir);
 }

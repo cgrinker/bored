@@ -187,6 +187,27 @@ void append_retention_snapshot(std::string& out, const WalRetentionTelemetrySnap
     out.push_back('}');
 }
 
+void append_index_retention_snapshot(std::string& out, const IndexRetentionTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "scheduled_candidates", snapshot.scheduled_candidates, first);
+    append_field(out, "dropped_candidates", snapshot.dropped_candidates, first);
+    append_field(out, "checkpoint_runs", snapshot.checkpoint_runs, first);
+    append_field(out, "checkpoint_failures", snapshot.checkpoint_failures, first);
+    append_field(out, "dispatch_batches", snapshot.dispatch_batches, first);
+    append_field(out, "dispatch_failures", snapshot.dispatch_failures, first);
+    append_field(out, "dispatched_candidates", snapshot.dispatched_candidates, first);
+    append_field(out, "skipped_candidates", snapshot.skipped_candidates, first);
+    append_field(out, "pruned_candidates", snapshot.pruned_candidates, first);
+    append_field(out, "total_checkpoint_duration_ns", snapshot.total_checkpoint_duration_ns, first);
+    append_field(out, "last_checkpoint_duration_ns", snapshot.last_checkpoint_duration_ns, first);
+    append_field(out, "total_dispatch_duration_ns", snapshot.total_dispatch_duration_ns, first);
+    append_field(out, "last_dispatch_duration_ns", snapshot.last_dispatch_duration_ns, first);
+    append_field(out, "pending_candidates", snapshot.pending_candidates, first);
+    out.push_back('}');
+}
+
 void append_temp_cleanup_snapshot(std::string& out, const TempCleanupTelemetrySnapshot& snapshot)
 {
     out.push_back('{');
@@ -460,6 +481,29 @@ void append_retention_section(std::string& out, const StorageDiagnosticsRetentio
     out.push_back('}');
 }
 
+void append_index_retention_section(std::string& out, const StorageDiagnosticsIndexRetentionSection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_index_retention_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_index_retention_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 void append_temp_cleanup_section(std::string& out, const StorageDiagnosticsTempCleanupSection& section)
 {
     out.push_back('{');
@@ -702,6 +746,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+    document.index_retention.total = registry.aggregate_index_retention();
+    if (options.include_index_retention_details) {
+        registry.visit_index_retention([&](const std::string& identifier, const IndexRetentionTelemetrySnapshot& snapshot) {
+            document.index_retention.details.push_back(StorageDiagnosticsIndexRetentionEntry{identifier, snapshot});
+        });
+        std::sort(document.index_retention.details.begin(), document.index_retention.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+
     document.temp_cleanup.total = registry.aggregate_temp_cleanup();
     if (options.include_temp_cleanup_details) {
         registry.visit_temp_cleanup([&](const std::string& identifier, const TempCleanupTelemetrySnapshot& snapshot) {
@@ -800,6 +853,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_checkpoint_section(out, document.checkpoints);
     out.append(",\"retention\":");
     append_retention_section(out, document.retention);
+    out.append(",\"index_retention\":");
+    append_index_retention_section(out, document.index_retention);
     out.append(",\"temp_cleanup\":");
     append_temp_cleanup_section(out, document.temp_cleanup);
     out.append(",\"durability\":");

@@ -4,11 +4,15 @@
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/checkpoint_manager.hpp"
 #include "bored/storage/checkpoint_scheduler.hpp"
+#include "bored/storage/index_retention.hpp"
+#include "bored/storage/index_retention_executor.hpp"
+#include "bored/storage/index_retention_pruner.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/wal_recovery.hpp"
 
 #include <memory>
+#include <optional>
 #include <system_error>
 
 namespace bored::storage {
@@ -22,6 +26,10 @@ struct StorageRuntimeConfig final {
     StorageTelemetryRegistry* storage_telemetry_registry = nullptr;
     WalWriterConfig wal_writer{};
     CheckpointScheduler::Config checkpoint_scheduler{};
+    IndexRetentionManager::Config index_retention{};
+    IndexRetentionManager::DispatchHook index_retention_dispatch{};
+    std::optional<IndexRetentionPruner::Config> index_retention_pruner{};
+    std::optional<IndexRetentionExecutor::Config> index_retention_executor{};
     bored::executor::ExecutorTempResourceManager::Config temp_manager{};
 };
 
@@ -48,6 +56,7 @@ public:
     [[nodiscard]] std::shared_ptr<CheckpointManager> checkpoint_manager() const noexcept;
     [[nodiscard]] CheckpointScheduler* checkpoint_scheduler() const noexcept;
     [[nodiscard]] const WalWriterConfig& wal_writer_config() const noexcept;
+    [[nodiscard]] IndexRetentionManager* index_retention_manager() const noexcept;
 
     [[nodiscard]] WalRecoveryDriver make_recovery_driver() const;
 
@@ -60,6 +69,9 @@ private:
     std::shared_ptr<WalWriter> wal_writer_{};
     std::shared_ptr<CheckpointManager> checkpoint_manager_{};
     std::unique_ptr<CheckpointScheduler> checkpoint_scheduler_{};
+    std::unique_ptr<IndexRetentionManager> index_retention_manager_{};
+    std::unique_ptr<IndexRetentionPruner> index_retention_pruner_{};
+    std::unique_ptr<IndexRetentionExecutor> index_retention_executor_{};
 };
 
 }  // namespace bored::storage

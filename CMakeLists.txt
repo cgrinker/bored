@@ -36,7 +36,10 @@ add_library(${PROJECT_NAME}_lib
     src/storage/lock_manager.cpp
     src/storage/free_space_map_persistence.cpp
     src/storage/index_btree_manager.cpp
+    src/storage/index_btree_leaf_ops.cpp
     src/storage/index_comparator_registry.cpp
+    src/storage/index_retention_executor.cpp
+    src/storage/index_retention_pruner.cpp
     src/storage/wal_apply_helpers.cpp
     src/storage/wal_writer.cpp
     src/storage/wal_reader.cpp
@@ -48,6 +51,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/storage_runtime.cpp
     src/storage/storage_telemetry_registry.cpp
     src/storage/storage_diagnostics.cpp
+    src/storage/index_retention.cpp
     src/storage/temp_resource_registry.cpp
     src/storage/vacuum_scheduler.cpp
     src/storage/vacuum_background_loop.cpp
@@ -179,6 +183,9 @@ if(BORED_ENABLE_TESTS)
         tests/lock_manager_tests.cpp
         tests/storage_telemetry_tests.cpp
         tests/storage_diagnostics_tests.cpp
+    tests/index_retention_tests.cpp
+        tests/index_retention_pruner_tests.cpp
+    tests/index_retention_executor_tests.cpp
     tests/storage_runtime_tests.cpp
         tests/vacuum_scheduler_tests.cpp
     tests/vacuum_background_loop_tests.cpp

@@ -24,6 +24,9 @@ struct CheckpointSnapshot final {
     std::vector<WalCheckpointTxnEntry> active_transactions{};
 };
 
+struct IndexRetentionStats;
+using IndexRetentionHook = std::function<std::error_code(std::chrono::steady_clock::time_point, std::uint64_t, IndexRetentionStats*)>;
+
 class CheckpointScheduler final {
 public:
     struct Config final {
@@ -37,6 +40,7 @@ public:
         std::string telemetry_identifier{};
         std::string retention_telemetry_identifier{};
         std::shared_ptr<WalDurabilityHorizon> durability_horizon{};
+        IndexRetentionHook index_retention_hook{};
     };
 
     using SnapshotProvider = std::function<std::error_code(CheckpointSnapshot&)>;
@@ -46,7 +50,8 @@ public:
     CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager, Config config);
     CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager,
                         Config config,
-                        RetentionHook retention_hook);
+                        RetentionHook retention_hook,
+                        IndexRetentionHook index_retention_hook = {});
     ~CheckpointScheduler();
 
     [[nodiscard]] std::error_code maybe_run(std::chrono::steady_clock::time_point now,
@@ -88,6 +93,7 @@ private:
     std::shared_ptr<CheckpointManager> checkpoint_manager_{};
     Config config_{};
     RetentionHook retention_hook_{};
+    IndexRetentionHook index_retention_hook_{};
     StorageTelemetryRegistry* telemetry_registry_ = nullptr;
     std::string telemetry_identifier_{};
     std::string retention_telemetry_identifier_{};

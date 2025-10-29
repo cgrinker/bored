@@ -50,6 +50,26 @@ WalRetentionTelemetrySnapshot make_retention(std::uint64_t seed)
     return snapshot;
 }
 
+IndexRetentionTelemetrySnapshot make_index_retention(std::uint64_t seed)
+{
+    IndexRetentionTelemetrySnapshot snapshot{};
+    snapshot.scheduled_candidates = seed + 1U;
+    snapshot.dropped_candidates = seed;
+    snapshot.checkpoint_runs = seed + 2U;
+    snapshot.checkpoint_failures = seed;
+    snapshot.dispatch_batches = seed + 3U;
+    snapshot.dispatch_failures = seed % 2U;
+    snapshot.dispatched_candidates = seed + 4U;
+    snapshot.pruned_candidates = seed + 5U;
+    snapshot.skipped_candidates = seed + 1U;
+    snapshot.total_checkpoint_duration_ns = (seed + 6U) * 7U;
+    snapshot.last_checkpoint_duration_ns = (seed + 6U) * 5U;
+    snapshot.total_dispatch_duration_ns = (seed + 7U) * 9U;
+    snapshot.last_dispatch_duration_ns = (seed + 7U) * 6U;
+    snapshot.pending_candidates = seed + 8U;
+    return snapshot;
+}
+
 TempCleanupTelemetrySnapshot make_temp_cleanup(std::uint64_t seed)
 {
     TempCleanupTelemetrySnapshot snapshot{};
@@ -230,6 +250,7 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     registry.register_checkpoint_scheduler("ckpt_a", [] { return make_checkpoint(2U); });
     registry.register_checkpoint_scheduler("ckpt_b", [] { return make_checkpoint(4U); });
     registry.register_wal_retention("ret_a", [] { return make_retention(3U); });
+    registry.register_index_retention("idx_ret_a", [] { return make_index_retention(2U); });
     registry.register_temp_cleanup("cleanup_a", [] { return make_temp_cleanup(2U); });
     registry.register_temp_cleanup("cleanup_b", [] { return make_temp_cleanup(4U); });
     registry.register_durability_horizon("dur_a", [] { return make_durability(2U); });
@@ -256,6 +277,9 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.checkpoints.total.emitted_checkpoints == ((2U + 2U) + (4U + 2U)));
     REQUIRE(doc.retention.details.size() == 1U);
     REQUIRE(doc.retention.total.pruned_segments == (3U + 2U));
+    REQUIRE(doc.index_retention.details.size() == 1U);
+    REQUIRE(doc.index_retention.total.scheduled_candidates == (2U + 1U));
+    REQUIRE(doc.index_retention.total.dispatched_candidates == (2U + 4U));
     REQUIRE(doc.temp_cleanup.details.size() == 2U);
     REQUIRE(doc.temp_cleanup.total.invocations == ((2U + 1U) + (4U + 1U)));
     REQUIRE(doc.temp_cleanup.total.failures == (2U + 4U));
@@ -331,6 +355,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     registry.register_page_manager("pm", [] { return make_page_manager(1U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(1U); });
     registry.register_wal_retention("ret", [] { return make_retention(1U); });
+    registry.register_index_retention("idx_ret", [] { return make_index_retention(1U); });
     registry.register_temp_cleanup("cleanup", [] { return make_temp_cleanup(2U); });
     registry.register_durability_horizon("dur", [] { return make_durability(3U); });
     registry.register_vacuum("vac", [] { return make_vacuum(2U); });
@@ -345,6 +370,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     options.include_page_manager_details = false;
     options.include_checkpoint_details = false;
     options.include_retention_details = false;
+    options.include_index_retention_details = false;
     options.include_temp_cleanup_details = false;
     options.include_durability_details = false;
     options.include_vacuum_details = false;
@@ -360,6 +386,7 @@ TEST_CASE("collect_storage_diagnostics honors detail options")
     REQUIRE(doc.page_managers.details.empty());
     REQUIRE(doc.checkpoints.details.empty());
     REQUIRE(doc.retention.details.empty());
+    REQUIRE(doc.index_retention.details.empty());
     REQUIRE(doc.temp_cleanup.details.empty());
     REQUIRE(doc.durability.details.empty());
     REQUIRE(doc.vacuum.details.empty());
@@ -377,6 +404,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     registry.register_page_manager("pm", [] { return make_page_manager(3U); });
     registry.register_checkpoint_scheduler("ckpt", [] { return make_checkpoint(5U); });
     registry.register_wal_retention("ret", [] { return make_retention(7U); });
+    registry.register_index_retention("idx_ret", [] { return make_index_retention(5U); });
     registry.register_temp_cleanup("cleanup", [] { return make_temp_cleanup(5U); });
     registry.register_durability_horizon("dur", [] { return make_durability(5U); });
     registry.register_vacuum("vac", [] { return make_vacuum(3U); });
@@ -395,6 +423,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"pm\"") != std::string::npos);
     REQUIRE(json.find("\"checkpoints\"") != std::string::npos);
     REQUIRE(json.find("\"retention\"") != std::string::npos);
+    REQUIRE(json.find("\"index_retention\"") != std::string::npos);
     REQUIRE(json.find("\"temp_cleanup\"") != std::string::npos);
     REQUIRE(json.find("\"durability\"") != std::string::npos);
     REQUIRE(json.find("\"catalog\"") != std::string::npos);

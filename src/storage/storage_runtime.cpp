@@ -2,7 +2,9 @@
 
 #include "bored/storage/wal_telemetry_registry.hpp"
 
+#include <chrono>
 #include <exception>
+#include <span>
 #include <utility>
 
 namespace bored::storage {
@@ -59,6 +61,66 @@ std::error_code StorageRuntime::initialize()
     }
     checkpoint_config.retention = wal_writer_config_.retention;
 
+    auto index_retention_config = config_.index_retention;
+    if (!index_retention_config.telemetry_registry) {
+        index_retention_config.telemetry_registry = config_.storage_telemetry_registry;
+    }
+    if (index_retention_config.telemetry_registry && index_retention_config.telemetry_identifier.empty()) {
+        index_retention_config.telemetry_identifier = "index_retention";
+    }
+
+    auto dispatch = config_.index_retention_dispatch;
+    if (!dispatch) {
+        IndexRetentionPruner::Config pruner_config{};
+        if (config_.index_retention_pruner) {
+            pruner_config = *config_.index_retention_pruner;
+        }
+
+        if (!pruner_config.prune_callback) {
+            IndexRetentionExecutor::Config executor_config{};
+            if (config_.index_retention_executor) {
+                executor_config = *config_.index_retention_executor;
+            }
+            index_retention_executor_ = std::make_unique<IndexRetentionExecutor>(std::move(executor_config));
+            pruner_config.prune_callback = [this](const IndexRetentionCandidate& candidate) -> std::error_code {
+                if (!this->index_retention_executor_) {
+                    return {};
+                }
+                return this->index_retention_executor_->prune(candidate);
+            };
+        } else {
+            index_retention_executor_.reset();
+        }
+
+        index_retention_pruner_ = std::make_unique<IndexRetentionPruner>(std::move(pruner_config));
+        dispatch = [this](std::span<const IndexRetentionCandidate> candidates, IndexRetentionStats& stats) -> std::error_code {
+            if (!this->index_retention_pruner_) {
+                return {};
+            }
+            return this->index_retention_pruner_->dispatch(candidates, stats);
+        };
+    } else {
+        index_retention_pruner_.reset();
+        index_retention_executor_.reset();
+    }
+
+    try {
+        index_retention_manager_ = std::make_unique<IndexRetentionManager>(index_retention_config, std::move(dispatch));
+    } catch (const std::system_error& error) {
+        return error.code();
+    } catch (const std::exception&) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    checkpoint_config.index_retention_hook = [this](std::chrono::steady_clock::time_point now,
+                                                    std::uint64_t checkpoint_lsn,
+                                                    IndexRetentionStats* stats) -> std::error_code {
+        if (!this->index_retention_manager_) {
+            return {};
+        }
+        return this->index_retention_manager_->apply_checkpoint(now, checkpoint_lsn, stats);
+    };
+
     try {
         checkpoint_scheduler_ = std::make_unique<CheckpointScheduler>(checkpoint_manager_, checkpoint_config);
     } catch (const std::system_error& error) {
@@ -78,6 +140,9 @@ void StorageRuntime::shutdown()
     }
 
     checkpoint_scheduler_.reset();
+    index_retention_manager_.reset();
+    index_retention_pruner_.reset();
+    index_retention_executor_.reset();
     checkpoint_manager_.reset();
 
     if (async_io_ && owns_async_io_) {
@@ -132,6 +197,11 @@ CheckpointScheduler* StorageRuntime::checkpoint_scheduler() const noexcept
 const WalWriterConfig& StorageRuntime::wal_writer_config() const noexcept
 {
     return wal_writer_config_;
+}
+
+IndexRetentionManager* StorageRuntime::index_retention_manager() const noexcept
+{
+    return index_retention_manager_.get();
 }
 
 WalRecoveryDriver StorageRuntime::make_recovery_driver() const

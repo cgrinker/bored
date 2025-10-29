@@ -76,6 +76,23 @@ struct WalRetentionTelemetrySnapshot final {
     std::uint64_t last_duration_ns = 0U;
 };
 
+struct IndexRetentionTelemetrySnapshot final {
+    std::uint64_t scheduled_candidates = 0U;
+    std::uint64_t dropped_candidates = 0U;
+    std::uint64_t checkpoint_runs = 0U;
+    std::uint64_t checkpoint_failures = 0U;
+    std::uint64_t dispatch_batches = 0U;
+    std::uint64_t dispatch_failures = 0U;
+    std::uint64_t dispatched_candidates = 0U;
+    std::uint64_t skipped_candidates = 0U;
+    std::uint64_t pruned_candidates = 0U;
+    std::uint64_t total_checkpoint_duration_ns = 0U;
+    std::uint64_t last_checkpoint_duration_ns = 0U;
+    std::uint64_t total_dispatch_duration_ns = 0U;
+    std::uint64_t last_dispatch_duration_ns = 0U;
+    std::uint64_t pending_candidates = 0U;
+};
+
 struct TempCleanupTelemetrySnapshot final {
     std::uint64_t invocations = 0U;
     std::uint64_t failures = 0U;
@@ -129,6 +146,9 @@ public:
     using WalRetentionSampler = std::function<WalRetentionTelemetrySnapshot()>;
     using WalRetentionVisitor = std::function<void(const std::string&, const WalRetentionTelemetrySnapshot&)>;
 
+    using IndexRetentionSampler = std::function<IndexRetentionTelemetrySnapshot()>;
+    using IndexRetentionVisitor = std::function<void(const std::string&, const IndexRetentionTelemetrySnapshot&)>;
+
     using TempCleanupSampler = std::function<TempCleanupTelemetrySnapshot()>;
     using TempCleanupVisitor = std::function<void(const std::string&, const TempCleanupTelemetrySnapshot&)>;
 
@@ -170,6 +190,11 @@ public:
     void unregister_wal_retention(const std::string& identifier);
     WalRetentionTelemetrySnapshot aggregate_wal_retention() const;
     void visit_wal_retention(const WalRetentionVisitor& visitor) const;
+
+    void register_index_retention(std::string identifier, IndexRetentionSampler sampler);
+    void unregister_index_retention(const std::string& identifier);
+    IndexRetentionTelemetrySnapshot aggregate_index_retention() const;
+    void visit_index_retention(const IndexRetentionVisitor& visitor) const;
 
     void register_temp_cleanup(std::string identifier, TempCleanupSampler sampler);
     void unregister_temp_cleanup(const std::string& identifier);
@@ -221,6 +246,7 @@ private:
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
     std::unordered_map<std::string, CheckpointSampler> checkpoint_samplers_{};
     std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
+    std::unordered_map<std::string, IndexRetentionSampler> index_retention_samplers_{};
     std::unordered_map<std::string, TempCleanupSampler> temp_cleanup_samplers_{};
     std::unordered_map<std::string, DurabilitySampler> durability_samplers_{};
     std::unordered_map<std::string, VacuumSampler> vacuum_samplers_{};

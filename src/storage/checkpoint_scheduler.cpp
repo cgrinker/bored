@@ -1,5 +1,6 @@
 #include "bored/storage/checkpoint_scheduler.hpp"
 
+#include "bored/storage/index_retention.hpp"
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/wal_format.hpp"
 
@@ -20,21 +21,23 @@ namespace {
 }  // namespace
 
 CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager)
-    : CheckpointScheduler(std::move(checkpoint_manager), Config{}, RetentionHook{})
+    : CheckpointScheduler(std::move(checkpoint_manager), Config{}, RetentionHook{}, IndexRetentionHook{})
 {
 }
 
 CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager, Config config)
-    : CheckpointScheduler(std::move(checkpoint_manager), std::move(config), RetentionHook{})
+    : CheckpointScheduler(std::move(checkpoint_manager), std::move(config), RetentionHook{}, IndexRetentionHook{})
 {
 }
 
 CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> checkpoint_manager,
                                          Config config,
-                                         RetentionHook retention_hook)
+                                         RetentionHook retention_hook,
+                                         IndexRetentionHook index_retention_hook)
     : checkpoint_manager_{std::move(checkpoint_manager)}
     , config_{config}
     , retention_hook_{std::move(retention_hook)}
+    , index_retention_hook_{std::move(index_retention_hook)}
     , telemetry_registry_{config_.telemetry_registry}
     , telemetry_identifier_{config_.telemetry_identifier}
     , retention_telemetry_identifier_{config_.retention_telemetry_identifier}
@@ -53,6 +56,10 @@ CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> chec
             }
             return writer->apply_retention(config, segment_id, stats);
         };
+    }
+
+    if (!index_retention_hook_) {
+        index_retention_hook_ = std::move(config_.index_retention_hook);
     }
 
     if (telemetry_registry_) {
@@ -251,6 +258,13 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
             retention_telemetry_.archived_segments += retention_stats.archived_segments;
             retention_telemetry_.total_duration_ns += retention_duration_ns;
             retention_telemetry_.last_duration_ns = retention_duration_ns;
+        }
+    }
+
+    if (index_retention_hook_) {
+        IndexRetentionStats index_stats{};
+        if (auto index_retention_ec = index_retention_hook_(now, append_result.lsn, &index_stats); index_retention_ec) {
+            return index_retention_ec;
         }
     }
 
