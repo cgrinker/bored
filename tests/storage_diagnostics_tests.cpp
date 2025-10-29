@@ -37,6 +37,12 @@ CheckpointTelemetrySnapshot make_checkpoint(std::uint64_t seed)
     snapshot.emitted_checkpoints = seed + 2U;
     snapshot.trigger_dirty = seed + 3U;
     snapshot.total_emit_duration_ns = (seed + 4U) * 10U;
+    snapshot.total_checkpoint_duration_ns = (seed + 5U) * 100U;
+    snapshot.last_checkpoint_duration_ns = (seed + 6U) * 50U;
+    snapshot.max_checkpoint_duration_ns = (seed + 7U) * 75U;
+    snapshot.total_fence_duration_ns = (seed + 8U) * 60U;
+    snapshot.last_fence_duration_ns = (seed + 9U) * 30U;
+    snapshot.max_fence_duration_ns = (seed + 10U) * 45U;
     snapshot.last_checkpoint_id = seed + 5U;
     return snapshot;
 }

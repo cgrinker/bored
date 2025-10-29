@@ -56,10 +56,16 @@ struct CheckpointTelemetrySnapshot final {
     std::uint64_t trigger_lsn_gap = 0U;
     std::uint64_t total_emit_duration_ns = 0U;
     std::uint64_t last_emit_duration_ns = 0U;
+    std::uint64_t total_checkpoint_duration_ns = 0U;
+    std::uint64_t last_checkpoint_duration_ns = 0U;
+    std::uint64_t max_checkpoint_duration_ns = 0U;
     std::uint64_t total_flush_duration_ns = 0U;
     std::uint64_t last_flush_duration_ns = 0U;
     std::uint64_t total_retention_duration_ns = 0U;
     std::uint64_t last_retention_duration_ns = 0U;
+    std::uint64_t total_fence_duration_ns = 0U;
+    std::uint64_t last_fence_duration_ns = 0U;
+    std::uint64_t max_fence_duration_ns = 0U;
     std::uint64_t coordinator_begin_calls = 0U;
     std::uint64_t coordinator_begin_failures = 0U;
     std::uint64_t coordinator_prepare_calls = 0U;

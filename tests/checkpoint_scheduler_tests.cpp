@@ -19,7 +19,9 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
+#include <thread>
 #include <fstream>
 
 namespace {
@@ -427,6 +429,7 @@ TEST_CASE("CheckpointScheduler overlaps checkpoint with concurrent transactions"
     scheduler_config.min_interval = std::chrono::milliseconds{0};
     scheduler_config.flush_after_emit = false;
     scheduler_config.coordinator = &coordinator;
+    scheduler_config.dirty_page_trigger = 1U;
 
     CheckpointScheduler scheduler{checkpoint_manager, scheduler_config};
 
@@ -441,13 +444,15 @@ TEST_CASE("CheckpointScheduler overlaps checkpoint with concurrent transactions"
     std::promise<void> worker_attempt_promise;
     auto worker_attempt_future = worker_attempt_promise.get_future();
 
-    auto worker_future = std::async(std::launch::async, [&]() -> std::uint64_t {
+    auto worker_future = std::async(std::launch::async, [&]() -> std::pair<std::uint64_t, std::chrono::nanoseconds> {
         provider_ready_future.wait();
+        const auto block_start = std::chrono::steady_clock::now();
         worker_attempt_promise.set_value();
         auto ctx = transaction_manager.begin();
+        const auto block_end = std::chrono::steady_clock::now();
         const auto id = ctx.id();
         transaction_manager.commit(ctx);
-        return id;
+        return std::make_pair(id, std::chrono::duration_cast<std::chrono::nanoseconds>(block_end - block_start));
     });
 
     std::atomic<int> provider_calls{0};
@@ -493,8 +498,12 @@ TEST_CASE("CheckpointScheduler overlaps checkpoint with concurrent transactions"
 
     auto worker_resume_status = worker_future.wait_for(250ms);
     REQUIRE(worker_resume_status == std::future_status::ready);
-    const auto resumed_id = worker_future.get();
+    const auto worker_result = worker_future.get();
+    const auto resumed_id = worker_result.first;
+    const auto blocked_duration = worker_result.second;
     CHECK(resumed_id == active_txn.id() + 1U);
+    CHECK(blocked_duration > std::chrono::nanoseconds::zero());
+    CHECK(blocked_duration < 50ms);
 
     transaction_manager.commit(active_txn);
 
@@ -503,6 +512,112 @@ TEST_CASE("CheckpointScheduler overlaps checkpoint with concurrent transactions"
     CHECK(telemetry.coordinator_begin_calls == 1U);
     CHECK(telemetry.coordinator_prepare_calls == 1U);
     CHECK(telemetry.coordinator_commit_calls == 1U);
+    CHECK(telemetry.last_checkpoint_duration_ns > 0U);
+    CHECK(telemetry.total_checkpoint_duration_ns >= telemetry.last_checkpoint_duration_ns);
+    CHECK(telemetry.max_checkpoint_duration_ns >= telemetry.last_checkpoint_duration_ns);
+    CHECK(telemetry.last_fence_duration_ns > 0U);
+    CHECK(telemetry.total_fence_duration_ns >= telemetry.last_fence_duration_ns);
+    CHECK(telemetry.max_fence_duration_ns >= telemetry.last_fence_duration_ns);
+    const auto blocked_ns = static_cast<std::uint64_t>(blocked_duration.count());
+    CHECK(blocked_ns <= telemetry.last_fence_duration_ns + 100000U);
+
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("CheckpointScheduler telemetry reports checkpoint duration trends")
+{
+    using namespace bored::storage;
+    using namespace std::chrono_literals;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_checkpoint_scheduler_trends_");
+
+    WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * kWalBlockSize;
+    wal_config.buffer_size = 2U * kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, wal_config);
+    auto checkpoint_manager = std::make_shared<CheckpointManager>(wal_writer);
+
+    WalRetentionManager retention_manager{wal_config.directory,
+                                          wal_config.file_prefix,
+                                          wal_config.file_extension,
+                                          wal_writer->durability_horizon()};
+
+    bored::txn::TransactionIdAllocatorStub allocator{200U};
+    bored::txn::TransactionManager transaction_manager{allocator};
+
+    CheckpointCoordinator coordinator{checkpoint_manager, transaction_manager, retention_manager};
+
+    CheckpointScheduler::Config scheduler_config{};
+    scheduler_config.min_interval = std::chrono::milliseconds{0};
+    scheduler_config.flush_after_emit = false;
+    scheduler_config.coordinator = &coordinator;
+
+    CheckpointScheduler scheduler{checkpoint_manager, scheduler_config};
+
+    std::atomic<int> provider_invocations{0};
+    auto provider = [&](CheckpointSnapshot& snapshot) -> std::error_code {
+        snapshot.redo_lsn = wal_writer->next_lsn();
+        snapshot.undo_lsn = snapshot.redo_lsn;
+        snapshot.dirty_pages = {
+            WalCheckpointDirtyPageEntry{.page_id = 64U, .reserved = 0U, .page_lsn = snapshot.redo_lsn},
+            WalCheckpointDirtyPageEntry{.page_id = 65U, .reserved = 0U, .page_lsn = snapshot.redo_lsn}
+        };
+        snapshot.active_transactions.clear();
+        snapshot.index_metadata.clear();
+
+        const auto invocation = provider_invocations.fetch_add(1, std::memory_order_relaxed);
+        if ((invocation % 2) == 1) {
+            const auto attempt = invocation / 2;
+            if (attempt == 0) {
+                std::this_thread::sleep_for(5ms);
+            } else if (attempt == 1) {
+                std::this_thread::sleep_for(2ms);
+            } else {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+
+        return {};
+    };
+
+    std::optional<WalAppendResult> first_result;
+    REQUIRE_FALSE(scheduler.maybe_run(std::chrono::steady_clock::now(), provider, false, first_result));
+    REQUIRE(first_result.has_value());
+
+    std::this_thread::sleep_for(1ms);
+
+    std::optional<WalAppendResult> second_result;
+    REQUIRE_FALSE(scheduler.maybe_run(std::chrono::steady_clock::now(), provider, true, second_result));
+    REQUIRE(second_result.has_value());
+
+    std::this_thread::sleep_for(1ms);
+
+    std::optional<WalAppendResult> third_result;
+    REQUIRE_FALSE(scheduler.maybe_run(std::chrono::steady_clock::now(), provider, true, third_result));
+    REQUIRE(third_result.has_value());
+
+    const auto telemetry = scheduler.telemetry_snapshot();
+    CHECK(telemetry.emitted_checkpoints == 3U);
+    CHECK(telemetry.total_checkpoint_duration_ns >= telemetry.max_checkpoint_duration_ns);
+    CHECK(telemetry.max_checkpoint_duration_ns > telemetry.last_checkpoint_duration_ns);
+    CHECK(telemetry.last_checkpoint_duration_ns > 0U);
+    CHECK(telemetry.total_fence_duration_ns >= telemetry.max_fence_duration_ns);
+    CHECK(telemetry.max_fence_duration_ns >= telemetry.last_fence_duration_ns);
+
+    const auto last_checkpoint_ns = std::chrono::nanoseconds{telemetry.last_checkpoint_duration_ns};
+    const auto max_checkpoint_ns = std::chrono::nanoseconds{telemetry.max_checkpoint_duration_ns};
+    CHECK(last_checkpoint_ns <= 4ms);
+    CHECK(max_checkpoint_ns >= 5ms);
+
+    const auto last_fence_ns = std::chrono::nanoseconds{telemetry.last_fence_duration_ns};
+    const auto max_fence_ns = std::chrono::nanoseconds{telemetry.max_fence_duration_ns};
+    CHECK(last_fence_ns <= 4ms);
+    CHECK(max_fence_ns >= 5ms);
 
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();

@@ -58,10 +58,18 @@ CheckpointTelemetrySnapshot& accumulate(CheckpointTelemetrySnapshot& target, con
     target.trigger_lsn_gap += source.trigger_lsn_gap;
     target.total_emit_duration_ns += source.total_emit_duration_ns;
     target.last_emit_duration_ns = std::max(target.last_emit_duration_ns, source.last_emit_duration_ns);
+    target.total_checkpoint_duration_ns += source.total_checkpoint_duration_ns;
+    target.last_checkpoint_duration_ns = std::max(target.last_checkpoint_duration_ns,
+                                                  source.last_checkpoint_duration_ns);
+    target.max_checkpoint_duration_ns = std::max(target.max_checkpoint_duration_ns,
+                                                 source.max_checkpoint_duration_ns);
     target.total_flush_duration_ns += source.total_flush_duration_ns;
     target.last_flush_duration_ns = std::max(target.last_flush_duration_ns, source.last_flush_duration_ns);
     target.total_retention_duration_ns += source.total_retention_duration_ns;
     target.last_retention_duration_ns = std::max(target.last_retention_duration_ns, source.last_retention_duration_ns);
+    target.total_fence_duration_ns += source.total_fence_duration_ns;
+    target.last_fence_duration_ns = std::max(target.last_fence_duration_ns, source.last_fence_duration_ns);
+    target.max_fence_duration_ns = std::max(target.max_fence_duration_ns, source.max_fence_duration_ns);
     target.coordinator_begin_calls += source.coordinator_begin_calls;
     target.coordinator_begin_failures += source.coordinator_begin_failures;
     target.coordinator_prepare_calls += source.coordinator_prepare_calls;

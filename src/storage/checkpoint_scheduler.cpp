@@ -152,6 +152,8 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
         }
     }
 
+    const auto attempt_start = std::chrono::steady_clock::now();
+
     CheckpointSnapshot snapshot;
     if (auto ec = provider(snapshot); ec) {
         return ec;
@@ -217,6 +219,9 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     const bool use_coordinator = coordinator_ != nullptr;
     const bool dry_run_only = config_.dry_run_only;
 
+    std::chrono::steady_clock::time_point fence_start{};
+    bool fence_active = false;
+
     if (use_coordinator) {
         const auto begin_start = std::chrono::steady_clock::now();
         auto begin_ec = coordinator_->begin_checkpoint(next_checkpoint_id_, coordinator_checkpoint);
@@ -242,6 +247,9 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
             }
             return begin_ec;
         }
+
+        fence_start = begin_end;
+        fence_active = true;
 
         const auto prepare_start = std::chrono::steady_clock::now();
         auto prepare_ec = coordinator_->prepare_checkpoint(provider, coordinator_checkpoint);
@@ -332,6 +340,15 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
         ? compute_checkpoint_bytes(coordinator_checkpoint.snapshot, append_result)
         : compute_checkpoint_bytes(snapshot, append_result);
     consume_io_budget(emit_end, emitted_bytes, force);
+
+    const auto checkpoint_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(emit_end - attempt_start);
+    const auto checkpoint_duration_ns = checkpoint_ns.count() > 0 ? static_cast<std::uint64_t>(checkpoint_ns.count()) : 0ULL;
+
+    std::uint64_t fence_duration_ns = 0ULL;
+    if (fence_active) {
+        const auto fence_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(emit_end - fence_start);
+        fence_duration_ns = fence_ns.count() > 0 ? static_cast<std::uint64_t>(fence_ns.count()) : 0ULL;
+    }
 
     if (config_.flush_after_emit && writer) {
         const auto flush_start = std::chrono::steady_clock::now();
@@ -432,6 +449,12 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
         telemetry_.last_checkpoint_lsn = last_checkpoint_lsn_;
         const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch());
         telemetry_.last_checkpoint_timestamp_ns = now_ns.count() > 0 ? static_cast<std::uint64_t>(now_ns.count()) : 0ULL;
+        telemetry_.total_checkpoint_duration_ns += checkpoint_duration_ns;
+        telemetry_.last_checkpoint_duration_ns = checkpoint_duration_ns;
+        telemetry_.max_checkpoint_duration_ns = std::max(telemetry_.max_checkpoint_duration_ns, checkpoint_duration_ns);
+        telemetry_.total_fence_duration_ns += fence_duration_ns;
+        telemetry_.last_fence_duration_ns = fence_duration_ns;
+        telemetry_.max_fence_duration_ns = std::max(telemetry_.max_fence_duration_ns, fence_duration_ns);
     }
 
     out_result = append_result;

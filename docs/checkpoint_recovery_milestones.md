@@ -42,9 +42,9 @@ The checkpoint and recovery coordination layer integrates relational components 
   - [x] Introduce throttling and scheduling policies so checkpoint and foreground workload share IO budget.
   - [x] Validate concurrent execution by running synthetic workloads during checkpoint prepare/commit phases.
 - **Exit Criteria:**
-  - [ ] Telemetry reports reduced checkpoint duration and bounded foreground latency impact under load-driven tests.
+  - [x] Telemetry reports reduced checkpoint duration and bounded foreground latency impact under load-driven tests.
 
-**Current Status:** A shared `CheckpointPageRegistry` records highest-LSN heap page mutations alongside index metadata, `CheckpointScheduler` enforces a token-bucket IO budget with telemetry, and concurrency drills block/resume synthetic transactions around checkpoint prepare/commit to validate coordination. Telemetry-driven load validation remains outstanding.
+**Current Status:** A shared `CheckpointPageRegistry` records highest-LSN heap page mutations alongside index metadata, `CheckpointScheduler` enforces a token-bucket IO budget with telemetry, simulated concurrency drills block/resume transactions around checkpoint prepare/commit, and load-driven tests capture checkpoint/fence duration telemetry to validate bounded impact.
 
 ## Milestone 4: Recovery Telemetry & Diagnostics
 - **Goals:** Provide visibility into checkpoint lag, recovery progress, and failure scenarios for operators.

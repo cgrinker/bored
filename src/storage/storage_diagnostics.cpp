@@ -183,6 +183,12 @@ void append_checkpoint_snapshot(std::string& out, const CheckpointTelemetrySnaps
     append_field(out, "last_checkpoint_id", snapshot.last_checkpoint_id, first);
     append_field(out, "last_checkpoint_lsn", snapshot.last_checkpoint_lsn, first);
     append_field(out, "last_checkpoint_timestamp_ns", snapshot.last_checkpoint_timestamp_ns, first);
+    append_field(out, "total_checkpoint_duration_ns", snapshot.total_checkpoint_duration_ns, first);
+    append_field(out, "last_checkpoint_duration_ns", snapshot.last_checkpoint_duration_ns, first);
+    append_field(out, "max_checkpoint_duration_ns", snapshot.max_checkpoint_duration_ns, first);
+    append_field(out, "total_fence_duration_ns", snapshot.total_fence_duration_ns, first);
+    append_field(out, "last_fence_duration_ns", snapshot.last_fence_duration_ns, first);
+    append_field(out, "max_fence_duration_ns", snapshot.max_fence_duration_ns, first);
     append_field(out, "io_throttle_deferrals", snapshot.io_throttle_deferrals, first);
     append_field(out, "io_throttle_bytes_consumed", snapshot.io_throttle_bytes_consumed, first);
     append_field(out, "io_throttle_budget", snapshot.io_throttle_budget, first);
