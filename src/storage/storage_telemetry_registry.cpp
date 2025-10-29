@@ -10,22 +10,24 @@ namespace bored::storage {
 
 namespace {
 
+void accumulate_operation(OperationTelemetrySnapshot& lhs, const OperationTelemetrySnapshot& rhs)
+{
+    lhs.attempts += rhs.attempts;
+    lhs.failures += rhs.failures;
+    lhs.total_duration_ns += rhs.total_duration_ns;
+    lhs.last_duration_ns = std::max(lhs.last_duration_ns, rhs.last_duration_ns);
+}
+
+void accumulate_latch(LatchTelemetrySnapshot& lhs, const LatchTelemetrySnapshot& rhs)
+{
+    lhs.attempts += rhs.attempts;
+    lhs.failures += rhs.failures;
+    lhs.total_wait_ns += rhs.total_wait_ns;
+    lhs.last_wait_ns = std::max(lhs.last_wait_ns, rhs.last_wait_ns);
+}
+
 PageManagerTelemetrySnapshot& accumulate(PageManagerTelemetrySnapshot& target, const PageManagerTelemetrySnapshot& source)
 {
-    auto accumulate_operation = [](OperationTelemetrySnapshot& lhs, const OperationTelemetrySnapshot& rhs) {
-        lhs.attempts += rhs.attempts;
-        lhs.failures += rhs.failures;
-        lhs.total_duration_ns += rhs.total_duration_ns;
-        lhs.last_duration_ns = std::max(lhs.last_duration_ns, rhs.last_duration_ns);
-    };
-
-    auto accumulate_latch = [](LatchTelemetrySnapshot& lhs, const LatchTelemetrySnapshot& rhs) {
-        lhs.attempts += rhs.attempts;
-        lhs.failures += rhs.failures;
-        lhs.total_wait_ns += rhs.total_wait_ns;
-        lhs.last_wait_ns = std::max(lhs.last_wait_ns, rhs.last_wait_ns);
-    };
-
     accumulate_operation(target.initialize, source.initialize);
     accumulate_operation(target.insert, source.insert);
     accumulate_operation(target.remove, source.remove);
@@ -76,6 +78,15 @@ WalRetentionTelemetrySnapshot& accumulate(WalRetentionTelemetrySnapshot& target,
     target.archived_segments += source.archived_segments;
     target.total_duration_ns += source.total_duration_ns;
     target.last_duration_ns = std::max(target.last_duration_ns, source.last_duration_ns);
+    return target;
+}
+
+IndexTelemetrySnapshot& accumulate(IndexTelemetrySnapshot& target, const IndexTelemetrySnapshot& source)
+{
+    accumulate_operation(target.build, source.build);
+    accumulate_operation(target.probe, source.probe);
+    target.mutation_attempts += source.mutation_attempts;
+    target.split_events += source.split_events;
     return target;
 }
 
@@ -679,6 +690,57 @@ void StorageTelemetryRegistry::visit_catalog(const CatalogVisitor& visitor) cons
         std::lock_guard guard(mutex_);
         entries.reserve(catalog_samplers_.size());
         for (const auto& [identifier, sampler] : catalog_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_index(std::string identifier, IndexSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard{mutex_};
+    index_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_index(const std::string& identifier)
+{
+    std::lock_guard guard{mutex_};
+    index_samplers_.erase(identifier);
+}
+
+IndexTelemetrySnapshot StorageTelemetryRegistry::aggregate_indexes() const
+{
+    std::vector<IndexSampler> samplers;
+    {
+        std::lock_guard guard{mutex_};
+        samplers.reserve(index_samplers_.size());
+        for (const auto& [_, sampler] : index_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<IndexTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_indexes(const IndexVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, IndexSampler>> entries;
+    {
+        std::lock_guard guard{mutex_};
+        entries.reserve(index_samplers_.size());
+        for (const auto& [identifier, sampler] : index_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }

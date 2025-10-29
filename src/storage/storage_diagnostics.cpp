@@ -208,6 +208,30 @@ void append_index_retention_snapshot(std::string& out, const IndexRetentionTelem
     out.push_back('}');
 }
 
+void append_index_snapshot(std::string& out, const IndexTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+
+    auto append_object = [&](const char* name, auto&& fn) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('"');
+        out.append(name);
+        out.append("\":");
+        fn();
+    };
+
+    append_object("build", [&] { append_operation_snapshot(out, snapshot.build); });
+    append_object("probe", [&] { append_operation_snapshot(out, snapshot.probe); });
+    append_field(out, "mutation_attempts", snapshot.mutation_attempts, first);
+    append_field(out, "split_events", snapshot.split_events, first);
+
+    out.push_back('}');
+}
+
 void append_temp_cleanup_snapshot(std::string& out, const TempCleanupTelemetrySnapshot& snapshot)
 {
     out.push_back('{');
@@ -504,6 +528,29 @@ void append_index_retention_section(std::string& out, const StorageDiagnosticsIn
     out.push_back('}');
 }
 
+void append_index_section(std::string& out, const StorageDiagnosticsIndexSection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_index_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_index_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 void append_temp_cleanup_section(std::string& out, const StorageDiagnosticsTempCleanupSection& section)
 {
     out.push_back('{');
@@ -755,6 +802,15 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
 
+            document.indexes.total = registry.aggregate_indexes();
+            if (options.include_index_details) {
+                registry.visit_indexes([&](const std::string& identifier, const IndexTelemetrySnapshot& snapshot) {
+                    document.indexes.details.push_back(StorageDiagnosticsIndexEntry{identifier, snapshot});
+                });
+                std::sort(document.indexes.details.begin(), document.indexes.details.end(),
+                          [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+            }
+
     document.temp_cleanup.total = registry.aggregate_temp_cleanup();
     if (options.include_temp_cleanup_details) {
         registry.visit_temp_cleanup([&](const std::string& identifier, const TempCleanupTelemetrySnapshot& snapshot) {
@@ -855,6 +911,8 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     append_retention_section(out, document.retention);
     out.append(",\"index_retention\":");
     append_index_retention_section(out, document.index_retention);
+    out.append(",\"indexes\":");
+    append_index_section(out, document.indexes);
     out.append(",\"temp_cleanup\":");
     append_temp_cleanup_section(out, document.temp_cleanup);
     out.append(",\"durability\":");

@@ -93,6 +93,13 @@ struct IndexRetentionTelemetrySnapshot final {
     std::uint64_t pending_candidates = 0U;
 };
 
+struct IndexTelemetrySnapshot final {
+    OperationTelemetrySnapshot build{};
+    OperationTelemetrySnapshot probe{};
+    std::uint64_t mutation_attempts = 0U;
+    std::uint64_t split_events = 0U;
+};
+
 struct TempCleanupTelemetrySnapshot final {
     std::uint64_t invocations = 0U;
     std::uint64_t failures = 0U;
@@ -176,6 +183,9 @@ public:
     using ExecutorSampler = std::function<bored::executor::ExecutorTelemetrySnapshot()>;
     using ExecutorVisitor = std::function<void(const std::string&, const bored::executor::ExecutorTelemetrySnapshot&)>;
 
+    using IndexSampler = std::function<IndexTelemetrySnapshot()>;
+    using IndexVisitor = std::function<void(const std::string&, const IndexTelemetrySnapshot&)>;
+
     void register_page_manager(std::string identifier, PageManagerSampler sampler);
     void unregister_page_manager(const std::string& identifier);
     PageManagerTelemetrySnapshot aggregate_page_managers() const;
@@ -216,6 +226,11 @@ public:
     CatalogTelemetrySnapshot aggregate_catalog() const;
     void visit_catalog(const CatalogVisitor& visitor) const;
 
+    void register_index(std::string identifier, IndexSampler sampler);
+    void unregister_index(const std::string& identifier);
+    IndexTelemetrySnapshot aggregate_indexes() const;
+    void visit_indexes(const IndexVisitor& visitor) const;
+
     void register_ddl(std::string identifier, DdlSampler sampler);
     void unregister_ddl(const std::string& identifier);
     ddl::DdlTelemetrySnapshot aggregate_ddl() const;
@@ -247,6 +262,7 @@ private:
     std::unordered_map<std::string, CheckpointSampler> checkpoint_samplers_{};
     std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
     std::unordered_map<std::string, IndexRetentionSampler> index_retention_samplers_{};
+    std::unordered_map<std::string, IndexSampler> index_samplers_{};
     std::unordered_map<std::string, TempCleanupSampler> temp_cleanup_samplers_{};
     std::unordered_map<std::string, DurabilitySampler> durability_samplers_{};
     std::unordered_map<std::string, VacuumSampler> vacuum_samplers_{};
