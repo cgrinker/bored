@@ -2,6 +2,7 @@
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/storage/index_btree_manager.hpp"
 #include "bored/storage/index_btree_page.hpp"
+#include "bored/storage/index_btree_leaf_ops.hpp"
 #include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_recovery.hpp"
 #include "bored/storage/wal_undo_walker.hpp"
@@ -2146,6 +2147,216 @@ TEST_CASE("WalReplayer replays page compaction")
         }
     }
     CHECK(refresh_seen);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("Wal recovery replays mixed heap and index workloads across restart")
+{
+    using bored::storage::IndexBtreeLeafEntry;
+    using bored::storage::IndexBtreePageHeader;
+    using bored::storage::IndexBtreeSlotEntry;
+    using bored::storage::IndexBtreeTuplePointer;
+    using bored::storage::WalIndexSplitFlag;
+    using bored::storage::WalIndexSplitHeader;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_mixed_heap_index_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t heap_page_id = 44'200U;
+    constexpr std::uint32_t left_page_id = 55'100U;
+    constexpr std::uint32_t right_page_id = 55'101U;
+    constexpr std::uint64_t index_identifier = 77'700U;
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> heap_page{};
+    auto heap_span = std::span<std::byte>(heap_page.data(), heap_page.size());
+    REQUIRE_FALSE(manager.initialize_page(heap_span, PageType::Table, heap_page_id));
+
+    const auto baseline_heap = heap_page;
+
+    struct RowEntry final {
+        std::uint64_t row_id = 0U;
+        std::uint64_t key = 0U;
+        PageManager::TupleInsertResult insert{};
+    };
+
+    std::array<RowEntry, 4> rows{{
+        RowEntry{9'001U, 10U, {}},
+        RowEntry{9'002U, 20U, {}},
+        RowEntry{9'003U, 30U, {}},
+        RowEntry{9'004U, 40U, {}}
+    }};
+
+    for (auto& row : rows) {
+        auto payload_str = std::string{"row_"} + std::to_string(row.key);
+        std::vector<std::byte> payload(payload_str.size());
+        std::memcpy(payload.data(), payload_str.data(), payload_str.size());
+        REQUIRE_FALSE(manager.insert_tuple(heap_span,
+                                           std::span<const std::byte>(payload.data(), payload.size()),
+                                           row.row_id,
+                                           row.insert));
+    }
+
+    auto make_key_bytes = [](std::uint64_t value) {
+        std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+        std::memcpy(bytes.data(), &value, sizeof(value));
+        return bytes;
+    };
+
+    auto build_entries = [&](std::span<const RowEntry> source) {
+        std::vector<IndexBtreeLeafEntry> entries;
+        entries.reserve(source.size());
+        for (const auto& row : source) {
+            IndexBtreeLeafEntry entry{};
+            entry.pointer.heap_page_id = heap_page_id;
+            entry.pointer.heap_slot_id = row.insert.slot.index;
+            auto key_bytes = make_key_bytes(row.key);
+            entry.key.assign(key_bytes.begin(), key_bytes.end());
+            entries.push_back(std::move(entry));
+        }
+        return entries;
+    };
+
+    auto left_entries = build_entries(std::span<const RowEntry>(rows.data(), 2U));
+    auto right_entries = build_entries(std::span<const RowEntry>(rows.data() + 2U, 2U));
+
+    auto build_slots_payload = [](const std::vector<IndexBtreeLeafEntry>& entries,
+                                  std::vector<IndexBtreeSlotEntry>& out_slots,
+                                  std::vector<std::byte>& out_payload) {
+        constexpr std::size_t pointer_size = sizeof(IndexBtreeTuplePointer);
+        out_slots.clear();
+        out_payload.clear();
+        out_slots.reserve(entries.size());
+        out_payload.reserve(entries.size() * (pointer_size + sizeof(std::uint64_t)));
+        for (const auto& entry : entries) {
+            const auto* pointer_bytes = reinterpret_cast<const std::byte*>(&entry.pointer);
+            out_payload.insert(out_payload.end(), pointer_bytes, pointer_bytes + pointer_size);
+            const auto key_offset = static_cast<std::uint16_t>(kIndexPayloadBase + out_payload.size());
+            out_payload.insert(out_payload.end(), entry.key.begin(), entry.key.end());
+
+            IndexBtreeSlotEntry slot{};
+            slot.key_offset = key_offset;
+            slot.key_length = static_cast<std::uint16_t>(entry.key.size());
+            out_slots.push_back(slot);
+        }
+    };
+
+    std::vector<IndexBtreeSlotEntry> left_slots;
+    std::vector<std::byte> left_payload;
+    build_slots_payload(left_entries, left_slots, left_payload);
+
+    std::vector<IndexBtreeSlotEntry> right_slots;
+    std::vector<std::byte> right_payload;
+    build_slots_payload(right_entries, right_slots, right_payload);
+
+    auto pivot_key_buffer = make_key_bytes(rows[2].key);
+    auto pivot_key = std::span<const std::byte>(pivot_key_buffer.data(), pivot_key_buffer.size());
+
+    WalIndexSplitHeader split_header{};
+    split_header.index_id = index_identifier;
+    split_header.left_page_id = left_page_id;
+    split_header.right_page_id = right_page_id;
+    split_header.parent_page_id = 0U;
+    split_header.right_sibling_page_id = 0U;
+    split_header.level = 0U;
+    split_header.flags = static_cast<std::uint16_t>(WalIndexSplitFlag::Leaf | WalIndexSplitFlag::Root);
+    split_header.parent_insert_slot = 0U;
+    split_header.pivot_key_length = static_cast<std::uint32_t>(pivot_key.size());
+    split_header.left_slot_count = static_cast<std::uint32_t>(left_slots.size());
+    split_header.right_slot_count = static_cast<std::uint32_t>(right_slots.size());
+    split_header.left_payload_length = static_cast<std::uint32_t>(left_payload.size());
+    split_header.right_payload_length = static_cast<std::uint32_t>(right_payload.size());
+
+    const auto split_payload_size = bored::storage::wal_index_split_payload_size(left_slots.size(),
+                                                                                left_payload.size(),
+                                                                                right_slots.size(),
+                                                                                right_payload.size(),
+                                                                                pivot_key.size());
+    std::vector<std::byte> split_payload(split_payload_size);
+    REQUIRE(bored::storage::encode_wal_index_split(std::span<std::byte>(split_payload.data(), split_payload.size()),
+                                                   split_header,
+                                                   std::span<const IndexBtreeSlotEntry>(left_slots.data(), left_slots.size()),
+                                                   std::span<const std::byte>(left_payload.data(), left_payload.size()),
+                                                   std::span<const IndexBtreeSlotEntry>(right_slots.data(), right_slots.size()),
+                                                   std::span<const std::byte>(right_payload.data(), right_payload.size()),
+                                                   pivot_key));
+
+    WalRecordDescriptor split_descriptor{};
+    split_descriptor.type = WalRecordType::IndexSplit;
+    split_descriptor.page_id = heap_page_id;
+    split_descriptor.payload = std::span<const std::byte>(split_payload.data(), split_payload.size());
+
+    bored::storage::WalAppendResult split_append{};
+    REQUIRE_FALSE(wal_writer->append_record(split_descriptor, split_append));
+
+    auto commit_header = make_commit_header(wal_writer, heap_page_id, heap_page_id + 1U, heap_page_id);
+    bored::storage::WalAppendResult commit_append{};
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_append));
+
+    const auto committed_heap_image = heap_page;
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> expected_left_page{};
+    auto expected_left_span = std::span<std::byte>(expected_left_page.data(), expected_left_page.size());
+    REQUIRE_FALSE(bored::storage::initialize_index_page(expected_left_span, split_header.left_page_id, split_header.level, true));
+    REQUIRE(bored::storage::rebuild_index_leaf_page(expected_left_span,
+                                                    std::span<const IndexBtreeLeafEntry>(left_entries.data(), left_entries.size()),
+                                                    split_append.lsn));
+    auto& expected_left_index = *reinterpret_cast<IndexBtreePageHeader*>(expected_left_page.data() + kIndexHeaderOffset);
+    expected_left_index.right_sibling_page_id = split_header.right_page_id;
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> expected_right_page{};
+    auto expected_right_span = std::span<std::byte>(expected_right_page.data(), expected_right_page.size());
+    REQUIRE_FALSE(bored::storage::initialize_index_page(expected_right_span, split_header.right_page_id, split_header.level, true));
+    REQUIRE(bored::storage::rebuild_index_leaf_page(expected_right_span,
+                                                    std::span<const IndexBtreeLeafEntry>(right_entries.data(), right_entries.size()),
+                                                    split_append.lsn));
+    auto& expected_right_index = *reinterpret_cast<IndexBtreePageHeader*>(expected_right_page.data() + kIndexHeaderOffset);
+    expected_right_index.right_sibling_page_id = split_header.right_sibling_page_id;
+
+    REQUIRE_FALSE(wal_writer->flush());
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    bool split_seen = false;
+    for (const auto& record : plan.redo) {
+        if (static_cast<WalRecordType>(record.header.type) == WalRecordType::IndexSplit) {
+            split_seen = true;
+            break;
+        }
+    }
+    REQUIRE(split_seen);
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Table, &replay_fsm};
+    context.set_page(heap_page_id, std::span<const std::byte>(baseline_heap.data(), baseline_heap.size()));
+    WalReplayer replayer{context};
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+
+    auto replay_heap = context.get_page(heap_page_id);
+    auto expected_heap_span = std::span<const std::byte>(committed_heap_image.data(), committed_heap_image.size());
+    REQUIRE(std::equal(replay_heap.begin(), replay_heap.end(), expected_heap_span.begin(), expected_heap_span.end()));
+
+    auto replay_left = context.get_page(split_header.left_page_id);
+    auto expected_left_const = std::span<const std::byte>(expected_left_page.data(), expected_left_page.size());
+    REQUIRE(std::equal(replay_left.begin(), replay_left.end(), expected_left_const.begin(), expected_left_const.end()));
+
+    auto replay_right = context.get_page(split_header.right_page_id);
+    auto expected_right_const = std::span<const std::byte>(expected_right_page.data(), expected_right_page.size());
+    REQUIRE(std::equal(replay_right.begin(), replay_right.end(), expected_right_const.begin(), expected_right_const.end()));
 
     (void)std::filesystem::remove_all(wal_dir);
 }
