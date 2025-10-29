@@ -85,9 +85,23 @@ CheckpointTelemetrySnapshot make_checkpoint_snapshot(std::uint64_t base)
     snapshot.last_flush_duration_ns = (base + 18U) * 20U;
     snapshot.total_retention_duration_ns = (base + 19U) * 300U;
     snapshot.last_retention_duration_ns = (base + 20U) * 30U;
-    snapshot.last_checkpoint_id = base + 21U;
-    snapshot.last_checkpoint_lsn = base + 22U;
-    snapshot.last_checkpoint_timestamp_ns = (base + 23U) * 40U;
+    snapshot.coordinator_begin_calls = base + 21U;
+    snapshot.coordinator_begin_failures = base + 22U;
+    snapshot.coordinator_prepare_calls = base + 23U;
+    snapshot.coordinator_prepare_failures = base + 24U;
+    snapshot.coordinator_commit_calls = base + 25U;
+    snapshot.coordinator_commit_failures = base + 26U;
+    snapshot.coordinator_abort_calls = base + 27U;
+    snapshot.coordinator_dry_runs = base + 28U;
+    snapshot.coordinator_total_begin_duration_ns = (base + 29U) * 400U;
+    snapshot.coordinator_last_begin_duration_ns = (base + 30U) * 40U;
+    snapshot.coordinator_total_prepare_duration_ns = (base + 31U) * 500U;
+    snapshot.coordinator_last_prepare_duration_ns = (base + 32U) * 50U;
+    snapshot.coordinator_total_commit_duration_ns = (base + 33U) * 600U;
+    snapshot.coordinator_last_commit_duration_ns = (base + 34U) * 60U;
+    snapshot.last_checkpoint_id = base + 35U;
+    snapshot.last_checkpoint_lsn = base + 36U;
+    snapshot.last_checkpoint_timestamp_ns = (base + 37U) * 40U;
     return snapshot;
 }
 
@@ -296,8 +310,23 @@ TEST_CASE("StorageTelemetryRegistry aggregates checkpoint schedulers")
     REQUIRE(total.emit_failures == ((10U + 5U) + (20U + 5U)));
     REQUIRE(total.total_emit_duration_ns == ((10U + 15U) * 100U + (20U + 15U) * 100U));
     REQUIRE(total.last_emit_duration_ns == ((20U + 16U) * 10U));
-    REQUIRE(total.last_checkpoint_id == (20U + 21U));
-    REQUIRE(total.last_checkpoint_timestamp_ns == ((20U + 23U) * 40U));
+    REQUIRE(total.coordinator_begin_calls == ((10U + 21U) + (20U + 21U)));
+    REQUIRE(total.coordinator_begin_failures == ((10U + 22U) + (20U + 22U)));
+    REQUIRE(total.coordinator_prepare_calls == ((10U + 23U) + (20U + 23U)));
+    REQUIRE(total.coordinator_prepare_failures == ((10U + 24U) + (20U + 24U)));
+    REQUIRE(total.coordinator_commit_calls == ((10U + 25U) + (20U + 25U)));
+    REQUIRE(total.coordinator_commit_failures == ((10U + 26U) + (20U + 26U)));
+    REQUIRE(total.coordinator_abort_calls == ((10U + 27U) + (20U + 27U)));
+    REQUIRE(total.coordinator_dry_runs == ((10U + 28U) + (20U + 28U)));
+    REQUIRE(total.coordinator_total_begin_duration_ns == ((10U + 29U) * 400U + (20U + 29U) * 400U));
+    REQUIRE(total.coordinator_last_begin_duration_ns == ((20U + 30U) * 40U));
+    REQUIRE(total.coordinator_total_prepare_duration_ns == ((10U + 31U) * 500U + (20U + 31U) * 500U));
+    REQUIRE(total.coordinator_last_prepare_duration_ns == ((20U + 32U) * 50U));
+    REQUIRE(total.coordinator_total_commit_duration_ns == ((10U + 33U) * 600U + (20U + 33U) * 600U));
+    REQUIRE(total.coordinator_last_commit_duration_ns == ((20U + 34U) * 60U));
+    REQUIRE(total.last_checkpoint_id == (20U + 35U));
+    REQUIRE(total.last_checkpoint_lsn == (20U + 36U));
+    REQUIRE(total.last_checkpoint_timestamp_ns == ((20U + 37U) * 40U));
 }
 
 TEST_CASE("StorageTelemetryRegistry aggregates WAL retention samplers")

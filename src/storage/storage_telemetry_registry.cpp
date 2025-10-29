@@ -62,6 +62,23 @@ CheckpointTelemetrySnapshot& accumulate(CheckpointTelemetrySnapshot& target, con
     target.last_flush_duration_ns = std::max(target.last_flush_duration_ns, source.last_flush_duration_ns);
     target.total_retention_duration_ns += source.total_retention_duration_ns;
     target.last_retention_duration_ns = std::max(target.last_retention_duration_ns, source.last_retention_duration_ns);
+    target.coordinator_begin_calls += source.coordinator_begin_calls;
+    target.coordinator_begin_failures += source.coordinator_begin_failures;
+    target.coordinator_prepare_calls += source.coordinator_prepare_calls;
+    target.coordinator_prepare_failures += source.coordinator_prepare_failures;
+    target.coordinator_commit_calls += source.coordinator_commit_calls;
+    target.coordinator_commit_failures += source.coordinator_commit_failures;
+    target.coordinator_abort_calls += source.coordinator_abort_calls;
+    target.coordinator_dry_runs += source.coordinator_dry_runs;
+    target.coordinator_total_begin_duration_ns += source.coordinator_total_begin_duration_ns;
+    target.coordinator_last_begin_duration_ns = std::max(target.coordinator_last_begin_duration_ns,
+                                                         source.coordinator_last_begin_duration_ns);
+    target.coordinator_total_prepare_duration_ns += source.coordinator_total_prepare_duration_ns;
+    target.coordinator_last_prepare_duration_ns = std::max(target.coordinator_last_prepare_duration_ns,
+                                                           source.coordinator_last_prepare_duration_ns);
+    target.coordinator_total_commit_duration_ns += source.coordinator_total_commit_duration_ns;
+    target.coordinator_last_commit_duration_ns = std::max(target.coordinator_last_commit_duration_ns,
+                                                         source.coordinator_last_commit_duration_ns);
     target.last_checkpoint_id = std::max(target.last_checkpoint_id, source.last_checkpoint_id);
     target.last_checkpoint_lsn = std::max(target.last_checkpoint_lsn, source.last_checkpoint_lsn);
     target.last_checkpoint_timestamp_ns = std::max(target.last_checkpoint_timestamp_ns, source.last_checkpoint_timestamp_ns);

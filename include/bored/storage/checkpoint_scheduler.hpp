@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/storage/checkpoint_manager.hpp"
+#include "bored/storage/checkpoint_types.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/wal_durability_horizon.hpp"
 #include "bored/storage/wal_retention.hpp"
@@ -17,14 +18,8 @@
 
 namespace bored::storage {
 
-struct CheckpointSnapshot final {
-    std::uint64_t redo_lsn = 0U;
-    std::uint64_t undo_lsn = 0U;
-    std::vector<WalCheckpointDirtyPageEntry> dirty_pages{};
-    std::vector<WalCheckpointTxnEntry> active_transactions{};
-};
-
 struct IndexRetentionStats;
+class CheckpointCoordinator;
 using IndexRetentionHook = std::function<std::error_code(std::chrono::steady_clock::time_point, std::uint64_t, IndexRetentionStats*)>;
 
 class CheckpointScheduler final {
@@ -35,12 +30,14 @@ public:
         std::size_t active_transaction_trigger = 32U;
         std::uint64_t lsn_gap_trigger = 0U;
         bool flush_after_emit = true;
+        bool dry_run_only = false;
         WalRetentionConfig retention{};
         StorageTelemetryRegistry* telemetry_registry = nullptr;
         std::string telemetry_identifier{};
         std::string retention_telemetry_identifier{};
         std::shared_ptr<WalDurabilityHorizon> durability_horizon{};
         IndexRetentionHook index_retention_hook{};
+        CheckpointCoordinator* coordinator = nullptr;
     };
 
     using SnapshotProvider = std::function<std::error_code(CheckpointSnapshot&)>;
@@ -94,6 +91,7 @@ private:
     Config config_{};
     RetentionHook retention_hook_{};
     IndexRetentionHook index_retention_hook_{};
+    CheckpointCoordinator* coordinator_ = nullptr;
     StorageTelemetryRegistry* telemetry_registry_ = nullptr;
     std::string telemetry_identifier_{};
     std::string retention_telemetry_identifier_{};

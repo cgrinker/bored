@@ -1,5 +1,7 @@
 #include "bored/storage/checkpoint_scheduler.hpp"
 
+#include "bored/storage/checkpoint_coordinator.hpp"
+
 #include "bored/storage/index_retention.hpp"
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/wal_format.hpp"
@@ -38,6 +40,7 @@ CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> chec
     , config_{config}
     , retention_hook_{std::move(retention_hook)}
     , index_retention_hook_{std::move(index_retention_hook)}
+    , coordinator_{config_.coordinator}
     , telemetry_registry_{config_.telemetry_registry}
     , telemetry_identifier_{config_.telemetry_identifier}
     , retention_telemetry_identifier_{config_.retention_telemetry_identifier}
@@ -168,17 +171,98 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     };
     mark_trigger(trigger_reason);
 
+    CheckpointCoordinator::ActiveCheckpoint coordinator_checkpoint{};
+    const bool use_coordinator = coordinator_ != nullptr;
+    const bool dry_run_only = config_.dry_run_only;
+
+    if (use_coordinator) {
+        const auto begin_start = std::chrono::steady_clock::now();
+        auto begin_ec = coordinator_->begin_checkpoint(next_checkpoint_id_, coordinator_checkpoint);
+        const auto begin_end = std::chrono::steady_clock::now();
+        const auto begin_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(begin_end - begin_start);
+        const auto begin_duration_ns = begin_ns.count() > 0 ? static_cast<std::uint64_t>(begin_ns.count()) : 0ULL;
+
+        {
+            std::lock_guard guard{telemetry_mutex_};
+            telemetry_.coordinator_begin_calls += 1U;
+            telemetry_.coordinator_total_begin_duration_ns += begin_duration_ns;
+            telemetry_.coordinator_last_begin_duration_ns = begin_duration_ns;
+            if (begin_ec) {
+                telemetry_.coordinator_begin_failures += 1U;
+            }
+        }
+
+        if (begin_ec) {
+            coordinator_->abort_checkpoint(coordinator_checkpoint);
+            {
+                std::lock_guard guard{telemetry_mutex_};
+                telemetry_.coordinator_abort_calls += 1U;
+            }
+            return begin_ec;
+        }
+
+        const auto prepare_start = std::chrono::steady_clock::now();
+        auto prepare_ec = coordinator_->prepare_checkpoint(provider, coordinator_checkpoint);
+        const auto prepare_end = std::chrono::steady_clock::now();
+        const auto prepare_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(prepare_end - prepare_start);
+        const auto prepare_duration_ns = prepare_ns.count() > 0 ? static_cast<std::uint64_t>(prepare_ns.count()) : 0ULL;
+
+        {
+            std::lock_guard guard{telemetry_mutex_};
+            telemetry_.coordinator_prepare_calls += 1U;
+            telemetry_.coordinator_total_prepare_duration_ns += prepare_duration_ns;
+            telemetry_.coordinator_last_prepare_duration_ns = prepare_duration_ns;
+            if (prepare_ec) {
+                telemetry_.coordinator_prepare_failures += 1U;
+            }
+        }
+
+        if (prepare_ec) {
+            coordinator_->abort_checkpoint(coordinator_checkpoint);
+            {
+                std::lock_guard guard{telemetry_mutex_};
+                telemetry_.coordinator_abort_calls += 1U;
+            }
+            return prepare_ec;
+        }
+
+        if (dry_run_only) {
+            coordinator_->abort_checkpoint(coordinator_checkpoint);
+            {
+                std::lock_guard guard{telemetry_mutex_};
+                telemetry_.coordinator_abort_calls += 1U;
+                telemetry_.coordinator_dry_runs += 1U;
+            }
+            return {};
+        }
+    }
+
     WalAppendResult append_result{};
     const auto emit_start = std::chrono::steady_clock::now();
-    auto emit_ec = checkpoint_manager_->emit_checkpoint(next_checkpoint_id_,
-                                                        snapshot.redo_lsn,
-                                                        snapshot.undo_lsn,
-                                                        snapshot.dirty_pages,
-                                                        snapshot.active_transactions,
-                                                        append_result);
+    std::error_code emit_ec{};
+    if (use_coordinator) {
+        emit_ec = coordinator_->commit_checkpoint(coordinator_checkpoint, append_result);
+    } else {
+        emit_ec = checkpoint_manager_->emit_checkpoint(next_checkpoint_id_,
+                                                       snapshot.redo_lsn,
+                                                       snapshot.undo_lsn,
+                                                       snapshot.dirty_pages,
+                                                       snapshot.active_transactions,
+                                                       append_result);
+    }
     const auto emit_end = std::chrono::steady_clock::now();
     const auto emit_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(emit_end - emit_start);
     const auto emit_duration_ns = emit_ns.count() > 0 ? static_cast<std::uint64_t>(emit_ns.count()) : 0ULL;
+
+    if (use_coordinator) {
+        std::lock_guard guard{telemetry_mutex_};
+        telemetry_.coordinator_commit_calls += 1U;
+        telemetry_.coordinator_total_commit_duration_ns += emit_duration_ns;
+        telemetry_.coordinator_last_commit_duration_ns = emit_duration_ns;
+        if (emit_ec) {
+            telemetry_.coordinator_commit_failures += 1U;
+        }
+    }
 
     {
         std::lock_guard guard{telemetry_mutex_};

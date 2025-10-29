@@ -5,6 +5,7 @@
 #include "bored/txn/transaction_types.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <memory>
@@ -53,6 +54,36 @@ private:
 
 class TransactionManager final : public SnapshotManager {
 public:
+    class CheckpointFence final {
+    public:
+        CheckpointFence() = default;
+        CheckpointFence(TransactionManager* manager,
+                        Snapshot snapshot,
+                        TransactionId oldest_active,
+                        TransactionId next_transaction_id) noexcept;
+        CheckpointFence(const CheckpointFence&) = delete;
+        CheckpointFence& operator=(const CheckpointFence&) = delete;
+        CheckpointFence(CheckpointFence&& other) noexcept;
+        CheckpointFence& operator=(CheckpointFence&& other) noexcept;
+        ~CheckpointFence();
+
+        [[nodiscard]] bool active() const noexcept;
+        [[nodiscard]] const Snapshot& snapshot() const noexcept;
+        [[nodiscard]] TransactionId oldest_active_transaction() const noexcept;
+        [[nodiscard]] TransactionId next_transaction_id() const noexcept;
+
+        void release() noexcept;
+
+    private:
+        void move_from(CheckpointFence&& other) noexcept;
+
+        TransactionManager* manager_ = nullptr;
+        Snapshot snapshot_{};
+        TransactionId oldest_active_transaction_ = 0U;
+        TransactionId next_transaction_id_ = 0U;
+        bool active_ = false;
+    };
+
     explicit TransactionManager(TransactionIdAllocator& id_allocator, CommitPipeline* pipeline = nullptr);
 
     void set_commit_pipeline(CommitPipeline* pipeline);
@@ -73,6 +104,7 @@ public:
     std::size_t active_transaction_count() const;
 
     void advance_low_water_mark(TransactionId txn_id);
+    CheckpointFence acquire_checkpoint_fence();
 
 private:
     using StatePtr = std::shared_ptr<TransactionContext::State>;
@@ -85,6 +117,7 @@ private:
     void complete_abort(TransactionContext& ctx);
     [[noreturn]] void fail_commit(TransactionContext& ctx, const char* stage, std::error_code ec);
     void update_durable_commit_lsn(CommitSequence commit_lsn) noexcept;
+    void release_checkpoint_fence() noexcept;
 
     TransactionIdAllocator* id_allocator_ = nullptr;
     std::atomic<CommitPipeline*> commit_pipeline_{nullptr};
@@ -104,6 +137,8 @@ private:
     mutable TransactionId external_low_water_mark_ = 0U;
     mutable TransactionId last_allocated_id_ = 0U;
     mutable Telemetry telemetry_{};
+    bool checkpoint_guard_active_ = false;
+    mutable std::condition_variable checkpoint_condition_{};
 };
 
 }  // namespace bored::txn

@@ -30,6 +30,57 @@ WalRetentionManager::WalRetentionManager(std::filesystem::path wal_directory,
 {
 }
 
+WalRetentionManager::ScopedPin::ScopedPin(const WalRetentionManager* manager) noexcept
+    : manager_{manager}
+    , active_{manager != nullptr}
+{
+    if (active_) {
+        manager_->active_pins_.fetch_add(1U, std::memory_order_acq_rel);
+    }
+}
+
+WalRetentionManager::ScopedPin::ScopedPin(ScopedPin&& other) noexcept
+{
+    move_from(std::move(other));
+}
+
+WalRetentionManager::ScopedPin& WalRetentionManager::ScopedPin::operator=(ScopedPin&& other) noexcept
+{
+    if (this != &other) {
+        release();
+        move_from(std::move(other));
+    }
+    return *this;
+}
+
+WalRetentionManager::ScopedPin::~ScopedPin()
+{
+    release();
+}
+
+bool WalRetentionManager::ScopedPin::active() const noexcept
+{
+    return active_;
+}
+
+void WalRetentionManager::ScopedPin::release() noexcept
+{
+    if (manager_ && active_) {
+        manager_->active_pins_.fetch_sub(1U, std::memory_order_acq_rel);
+        active_ = false;
+        manager_ = nullptr;
+    }
+}
+
+void WalRetentionManager::ScopedPin::move_from(ScopedPin&& other) noexcept
+{
+    manager_ = other.manager_;
+    active_ = other.active_;
+
+    other.manager_ = nullptr;
+    other.active_ = false;
+}
+
 std::error_code WalRetentionManager::gather_segments(SegmentList& segments) const
 {
     WalReader reader{wal_directory_, file_prefix_, file_extension_};
@@ -102,6 +153,10 @@ std::error_code WalRetentionManager::apply(const WalRetentionConfig& config,
 
     if (stats) {
         *stats = WalRetentionStats{};
+    }
+
+    if (active_pins_.load(std::memory_order_acquire) != 0U) {
+        return {};
     }
 
     SegmentList segments;
@@ -182,6 +237,11 @@ std::error_code WalRetentionManager::apply(const WalRetentionConfig& config,
     }
 
     return {};
+}
+
+WalRetentionManager::ScopedPin WalRetentionManager::pin() const noexcept
+{
+    return ScopedPin{this};
 }
 
 }  // namespace bored::storage

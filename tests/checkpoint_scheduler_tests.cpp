@@ -2,9 +2,12 @@
 
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/checkpoint_manager.hpp"
+#include "bored/storage/checkpoint_coordinator.hpp"
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/temp_resource_registry.hpp"
+#include "bored/storage/wal_retention.hpp"
+#include "bored/txn/transaction_manager.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -258,6 +261,63 @@ TEST_CASE("CheckpointScheduler default retention hook invokes WalWriter retentio
     const auto telemetry = scheduler.retention_telemetry_snapshot();
     REQUIRE(telemetry.invocations == 1U);
     REQUIRE(telemetry.failures == 0U);
+
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("CheckpointScheduler dry run tracks coordinator phases")
+{
+    using namespace bored::storage;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_checkpoint_scheduler_dry_");
+
+    WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * kWalBlockSize;
+    wal_config.buffer_size = 2U * kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, wal_config);
+    auto checkpoint_manager = std::make_shared<CheckpointManager>(wal_writer);
+
+    WalRetentionManager retention_manager{wal_config.directory,
+                                          wal_config.file_prefix,
+                                          wal_config.file_extension,
+                                          wal_writer->durability_horizon()};
+
+    bored::txn::TransactionIdAllocatorStub allocator{1U};
+    bored::txn::TransactionManager transaction_manager{allocator};
+
+    CheckpointCoordinator coordinator{checkpoint_manager, transaction_manager, retention_manager};
+
+    CheckpointScheduler::Config scheduler_config{};
+    scheduler_config.min_interval = std::chrono::seconds(0);
+    scheduler_config.flush_after_emit = false;
+    scheduler_config.dry_run_only = true;
+    scheduler_config.coordinator = &coordinator;
+
+    CheckpointScheduler scheduler{checkpoint_manager, scheduler_config};
+
+    const auto now = std::chrono::steady_clock::now();
+    std::optional<WalAppendResult> result;
+    auto provider = [&](CheckpointSnapshot& snapshot) -> std::error_code {
+        snapshot.redo_lsn = wal_writer->next_lsn();
+        snapshot.undo_lsn = snapshot.redo_lsn;
+        return {};
+    };
+
+    REQUIRE_FALSE(scheduler.maybe_run(now, provider, true, result));
+    CHECK_FALSE(result.has_value());
+
+    const auto telemetry = scheduler.telemetry_snapshot();
+    CHECK(telemetry.coordinator_begin_calls == 1U);
+    CHECK(telemetry.coordinator_prepare_calls == 1U);
+    CHECK(telemetry.coordinator_commit_calls == 0U);
+    CHECK(telemetry.coordinator_dry_runs == 1U);
+    CHECK(telemetry.emitted_checkpoints == 0U);
+    CHECK(telemetry.retention_invocations == 0U);
 
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();

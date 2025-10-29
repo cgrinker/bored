@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
+#include <future>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -316,4 +318,43 @@ TEST_CASE("TransactionManager commit failure rolls back pipeline", "[txn]")
     auto telemetry = manager.telemetry_snapshot();
     CHECK(telemetry.committed_transactions == 0U);
     CHECK(telemetry.aborted_transactions == 1U);
+}
+
+TEST_CASE("TransactionManager checkpoint fence blocks new writers until release", "[txn]")
+{
+    using namespace std::chrono_literals;
+
+    bored::txn::TransactionIdAllocatorStub allocator{60U};
+    bored::txn::TransactionManager manager{allocator};
+
+    auto active = manager.begin();
+    CHECK(active.id() == 60U);
+
+    auto fence = manager.acquire_checkpoint_fence();
+    CHECK(fence.active());
+    CHECK(fence.oldest_active_transaction() == active.id());
+    CHECK(fence.next_transaction_id() == manager.next_transaction_id());
+
+    std::promise<void> ready;
+    auto ready_future = ready.get_future();
+    auto begin_future = std::async(std::launch::async, [&manager, ready = std::move(ready)]() mutable {
+        ready.set_value();
+        auto ctx = manager.begin();
+        const auto id = ctx.id();
+        manager.commit(ctx);
+        return id;
+    });
+
+    ready_future.wait();
+    auto status = begin_future.wait_for(25ms);
+    CHECK(status == std::future_status::timeout);
+
+    fence.release();
+
+    const auto resumed_status = begin_future.wait_for(250ms);
+    REQUIRE(resumed_status == std::future_status::ready);
+    const auto resumed_id = begin_future.get();
+    CHECK(resumed_id == manager.next_transaction_id() - 1U);
+
+    manager.commit(active);
 }

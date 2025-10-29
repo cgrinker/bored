@@ -14,6 +14,80 @@ TransactionContext::TransactionContext(std::shared_ptr<State> state)
 {
 }
 
+TransactionManager::CheckpointFence::CheckpointFence(TransactionManager* manager,
+                                                     Snapshot snapshot,
+                                                     TransactionId oldest_active,
+                                                     TransactionId next_transaction_id) noexcept
+    : manager_{manager}
+    , snapshot_{std::move(snapshot)}
+    , oldest_active_transaction_{oldest_active}
+    , next_transaction_id_{next_transaction_id}
+    , active_{manager != nullptr}
+{
+}
+
+TransactionManager::CheckpointFence::CheckpointFence(CheckpointFence&& other) noexcept
+{
+    move_from(std::move(other));
+}
+
+TransactionManager::CheckpointFence& TransactionManager::CheckpointFence::operator=(CheckpointFence&& other) noexcept
+{
+    if (this != &other) {
+        release();
+        move_from(std::move(other));
+    }
+    return *this;
+}
+
+TransactionManager::CheckpointFence::~CheckpointFence()
+{
+    release();
+}
+
+bool TransactionManager::CheckpointFence::active() const noexcept
+{
+    return active_;
+}
+
+const Snapshot& TransactionManager::CheckpointFence::snapshot() const noexcept
+{
+    return snapshot_;
+}
+
+TransactionId TransactionManager::CheckpointFence::oldest_active_transaction() const noexcept
+{
+    return oldest_active_transaction_;
+}
+
+TransactionId TransactionManager::CheckpointFence::next_transaction_id() const noexcept
+{
+    return next_transaction_id_;
+}
+
+void TransactionManager::CheckpointFence::release() noexcept
+{
+    if (manager_ && active_) {
+        manager_->release_checkpoint_fence();
+        active_ = false;
+        manager_ = nullptr;
+    }
+}
+
+void TransactionManager::CheckpointFence::move_from(CheckpointFence&& other) noexcept
+{
+    manager_ = other.manager_;
+    snapshot_ = std::move(other.snapshot_);
+    oldest_active_transaction_ = other.oldest_active_transaction_;
+    next_transaction_id_ = other.next_transaction_id_;
+    active_ = other.active_;
+
+    other.manager_ = nullptr;
+    other.oldest_active_transaction_ = 0U;
+    other.next_transaction_id_ = 0U;
+    other.active_ = false;
+}
+
 TransactionId TransactionContext::id() const noexcept
 {
     return state_ ? state_->id : 0U;
@@ -100,7 +174,8 @@ TransactionContext TransactionManager::begin(const TransactionOptions& options)
     state->options = options;
 
     {
-        std::scoped_lock lock{mutex_};
+        std::unique_lock<std::mutex> lock{mutex_};
+        checkpoint_condition_.wait(lock, [this]() noexcept { return !checkpoint_guard_active_; });
         state->id = id_allocator_->allocate();
         state->state = TransactionState::Active;
         last_allocated_id_ = state->id;
@@ -298,6 +373,17 @@ void TransactionManager::advance_low_water_mark(TransactionId txn_id)
     recompute_oldest_locked();
 }
 
+TransactionManager::CheckpointFence TransactionManager::acquire_checkpoint_fence()
+{
+    std::unique_lock<std::mutex> lock{mutex_};
+    checkpoint_condition_.wait(lock, [this]() noexcept { return !checkpoint_guard_active_; });
+    checkpoint_guard_active_ = true;
+    auto snapshot = build_snapshot_locked(0U);
+    const auto oldest_active = oldest_active_ != 0U ? oldest_active_ : external_low_water_mark_;
+    const auto next_id = id_allocator_ != nullptr ? id_allocator_->peek_next() : 0U;
+    return CheckpointFence{this, std::move(snapshot), oldest_active, next_id};
+}
+
 void TransactionManager::complete_abort(TransactionContext& ctx)
 {
     auto state = ctx.state_;
@@ -476,6 +562,16 @@ Snapshot TransactionManager::build_snapshot_locked(TransactionId self_id) const
     telemetry_.last_snapshot_xmax = snapshot.xmax;
     telemetry_.last_snapshot_age = age;
     return snapshot;
+}
+
+void TransactionManager::release_checkpoint_fence() noexcept
+{
+    std::lock_guard<std::mutex> lock{mutex_};
+    if (!checkpoint_guard_active_) {
+        return;
+    }
+    checkpoint_guard_active_ = false;
+    checkpoint_condition_.notify_all();
 }
 
 }  // namespace bored::txn

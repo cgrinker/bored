@@ -3,6 +3,7 @@
 #include "bored/storage/wal_durability_horizon.hpp"
 #include "bored/storage/wal_reader.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -27,6 +28,26 @@ struct WalRetentionStats final {
 
 class WalRetentionManager final {
 public:
+    class ScopedPin final {
+    public:
+        ScopedPin() = default;
+        explicit ScopedPin(const WalRetentionManager* manager) noexcept;
+        ScopedPin(const ScopedPin&) = delete;
+        ScopedPin& operator=(const ScopedPin&) = delete;
+        ScopedPin(ScopedPin&& other) noexcept;
+        ScopedPin& operator=(ScopedPin&& other) noexcept;
+        ~ScopedPin();
+
+        [[nodiscard]] bool active() const noexcept;
+        void release() noexcept;
+
+    private:
+        void move_from(ScopedPin&& other) noexcept;
+
+        const WalRetentionManager* manager_ = nullptr;
+        bool active_ = false;
+    };
+
     WalRetentionManager(std::filesystem::path wal_directory,
                         std::string file_prefix,
                         std::string file_extension,
@@ -35,6 +56,8 @@ public:
     std::error_code apply(const WalRetentionConfig& config,
                           std::uint64_t current_segment_id,
                           WalRetentionStats* stats = nullptr) const;
+
+    [[nodiscard]] ScopedPin pin() const noexcept;
 
 private:
     using SegmentList = std::vector<WalSegmentView>;
@@ -50,6 +73,7 @@ private:
     std::string file_prefix_{};
     std::string file_extension_{};
     std::shared_ptr<WalDurabilityHorizon> durability_horizon_{};
+    mutable std::atomic<std::uint64_t> active_pins_{0U};
 };
 
 }  // namespace bored::storage
