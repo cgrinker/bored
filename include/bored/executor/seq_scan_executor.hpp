@@ -6,19 +6,31 @@
 #include "bored/executor/tuple_format.hpp"
 #include "bored/storage/storage_reader.hpp"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace bored::executor {
 
 class SequentialScanExecutor final : public ExecutorNode {
 public:
+    struct IndexProbe final {
+        bored::catalog::IndexId index_id{};
+        std::vector<std::byte> key{};
+        bool unique = true;
+    };
+
     struct Config final {
         bored::storage::StorageReader* reader = nullptr;
         bored::catalog::RelationId relation_id{};
         std::uint32_t root_page_id = 0U;
         ExecutorTelemetry* telemetry = nullptr;
         std::string telemetry_identifier{};
+        std::optional<IndexProbe> index_probe{};
+        bool enable_heap_fallback = true;
     };
 
     explicit SequentialScanExecutor(Config config);
@@ -30,6 +42,9 @@ public:
 private:
     Config config_{};
     std::unique_ptr<bored::storage::TableScanCursor> cursor_{};
+    std::vector<bored::storage::IndexProbeResult> index_hits_{};
+    std::size_t index_position_ = 0U;
+    std::unordered_set<std::uint64_t> yielded_row_ids_{};
 };
 
 }  // namespace bored::executor

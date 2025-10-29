@@ -21,8 +21,10 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <limits>
 
 using bored::catalog::RelationId;
+using bored::catalog::IndexId;
 using bored::executor::ExecutorContext;
 using bored::executor::ExecutorContextConfig;
 using bored::executor::ExecutorTelemetry;
@@ -46,6 +48,8 @@ namespace {
 struct FrozenTableTuple final {
     TupleHeader header{};
     std::vector<std::byte> payload{};
+    std::uint32_t page_id = 0U;
+    std::uint16_t slot_id = 0U;
 };
 
 class FrozenTableCursor final : public TableScanCursor {
@@ -62,6 +66,8 @@ public:
         const auto& entry = (*tuples_)[index_++];
         out_tuple.header = entry.header;
         out_tuple.payload = std::span<const std::byte>(entry.payload.data(), entry.payload.size());
+        out_tuple.page_id = entry.page_id;
+        out_tuple.slot_id = entry.slot_id;
         return true;
     }
 
@@ -76,7 +82,28 @@ class FrozenStorageReader final : public StorageReader {
 public:
     void set_table(RelationId relation, std::vector<FrozenTableTuple> tuples)
     {
-        tables_[relation.value] = std::move(tuples);
+        auto& stored = tables_[relation.value] = std::move(tuples);
+        std::uint32_t next_page = 1U;
+        std::uint16_t next_slot = 1U;
+        for (auto& tuple : stored) {
+            if (tuple.page_id == 0U) {
+                tuple.page_id = next_page;
+            }
+            if (tuple.slot_id == 0U) {
+                tuple.slot_id = next_slot++;
+                if (next_slot == std::numeric_limits<std::uint16_t>::max()) {
+                    ++next_page;
+                    next_slot = 1U;
+                }
+            }
+        }
+    }
+
+    void register_index(RelationId relation,
+                        IndexId index,
+                        std::unordered_map<std::string, std::vector<std::size_t>> entries)
+    {
+        indexes_[compose_index_key(relation.value, index.value)] = std::move(entries);
     }
 
     [[nodiscard]] std::unique_ptr<TableScanCursor> create_table_scan(const TableScanConfig& config) override
@@ -88,8 +115,50 @@ public:
         return std::make_unique<FrozenTableCursor>(&it->second);
     }
 
+    [[nodiscard]] std::vector<bored::storage::IndexProbeResult> probe_index(
+        const bored::storage::IndexProbeConfig& config) override
+    {
+        std::vector<bored::storage::IndexProbeResult> results;
+        auto table_it = tables_.find(config.relation_id.value);
+        if (table_it == tables_.end()) {
+            return results;
+        }
+
+        const auto key_string = std::string(reinterpret_cast<const char*>(config.key.data()), config.key.size());
+        auto index_it = indexes_.find(compose_index_key(config.relation_id.value, config.index_id.value));
+        if (index_it == indexes_.end()) {
+            return results;
+        }
+
+        auto row_it = index_it->second.find(key_string);
+        if (row_it == index_it->second.end()) {
+            return results;
+        }
+
+        results.reserve(row_it->second.size());
+        for (auto tuple_index : row_it->second) {
+            if (tuple_index >= table_it->second.size()) {
+                continue;
+            }
+            const auto& frozen = table_it->second[tuple_index];
+            bored::storage::IndexProbeResult result{};
+            result.tuple.header = frozen.header;
+            result.tuple.payload = std::span<const std::byte>(frozen.payload.data(), frozen.payload.size());
+            result.tuple.page_id = frozen.page_id;
+            result.tuple.slot_id = frozen.slot_id;
+            results.push_back(result);
+        }
+        return results;
+    }
+
 private:
+    static std::uint64_t compose_index_key(std::uint64_t relation_value, std::uint64_t index_value) noexcept
+    {
+        return (relation_value << 32U) ^ index_value;
+    }
+
     std::unordered_map<std::uint64_t, std::vector<FrozenTableTuple>> tables_{};
+    std::unordered_map<std::uint64_t, std::unordered_map<std::string, std::vector<std::size_t>>> indexes_{};
 };
 
 FrozenTableTuple make_tuple(TransactionId created, TransactionId deleted, std::string_view payload)
@@ -100,6 +169,13 @@ FrozenTableTuple make_tuple(TransactionId created, TransactionId deleted, std::s
     tuple.payload.resize(payload.size());
     std::memcpy(tuple.payload.data(), payload.data(), payload.size());
     return tuple;
+}
+
+std::vector<std::byte> make_probe_key(std::string_view value)
+{
+    std::vector<std::byte> key(value.size());
+    std::memcpy(key.data(), value.data(), value.size());
+    return key;
 }
 
 std::string column_to_string(const TupleColumnView& column)
@@ -176,6 +252,104 @@ TEST_CASE("SequentialScanExecutor respects snapshot visibility")
     REQUIRE(snapshot_telemetry.filter_rows_evaluated == 0U);
     REQUIRE(snapshot_telemetry.projection_rows_emitted == 0U);
     REQUIRE(snapshot_telemetry.seq_scan_latency.invocations >= expected.size());
+}
+
+TEST_CASE("SequentialScanExecutor uses index probe before heap fallback")
+{
+    FrozenStorageReader reader;
+    RelationId relation{55U};
+    IndexId index{909U};
+
+    reader.set_table(relation, {
+        make_tuple(5U, 0U, "alpha"),
+        make_tuple(6U, 0U, "bravo"),
+        make_tuple(7U, 0U, "charlie")
+    });
+
+    reader.register_index(relation, index, {
+        {"bravo", {1U}}
+    });
+
+    ExecutorTelemetry telemetry;
+
+    SequentialScanExecutor::Config config{};
+    config.reader = &reader;
+    config.relation_id = relation;
+    config.root_page_id = 6000U;
+    config.telemetry = &telemetry;
+    config.index_probe = SequentialScanExecutor::IndexProbe{
+        .index_id = index,
+        .key = make_probe_key("bravo")
+    };
+
+    SequentialScanExecutor scan{config};
+
+    Snapshot snapshot{};
+    snapshot.xmin = 1U;
+    snapshot.xmax = 100U;
+    auto context = make_context(77U, snapshot);
+
+    scan.open(context);
+    TupleBuffer buffer{};
+    std::vector<std::string> observed;
+    while (scan.next(context, buffer)) {
+        auto view = TupleView::from_buffer(buffer);
+        observed.push_back(column_to_string(view.column(1U)));
+    }
+    scan.close(context);
+
+    REQUIRE(observed.size() == 3U);
+    CHECK(observed.front() == "bravo");
+
+    auto sorted = observed;
+    std::sort(sorted.begin(), sorted.end());
+    CHECK(sorted == std::vector<std::string>{"alpha", "bravo", "charlie"});
+}
+
+TEST_CASE("SequentialScanExecutor falls back to heap when index probe misses")
+{
+    FrozenStorageReader reader;
+    RelationId relation{56U};
+    IndexId index{910U};
+
+    reader.set_table(relation, {
+        make_tuple(3U, 0U, "alpha"),
+        make_tuple(4U, 0U, "bravo"),
+        make_tuple(5U, 0U, "charlie")
+    });
+
+    reader.register_index(relation, index, {
+        {"delta", {0U}}
+    });
+
+    ExecutorTelemetry telemetry;
+    SequentialScanExecutor::Config config{};
+    config.reader = &reader;
+    config.relation_id = relation;
+    config.root_page_id = 6100U;
+    config.telemetry = &telemetry;
+    config.index_probe = SequentialScanExecutor::IndexProbe{
+        .index_id = index,
+        .key = make_probe_key("omega")
+    };
+
+    SequentialScanExecutor scan{config};
+
+    Snapshot snapshot{};
+    snapshot.xmin = 1U;
+    snapshot.xmax = 100U;
+    auto context = make_context(88U, snapshot);
+
+    scan.open(context);
+    TupleBuffer buffer{};
+    std::vector<std::string> observed;
+    while (scan.next(context, buffer)) {
+        auto view = TupleView::from_buffer(buffer);
+        observed.push_back(column_to_string(view.column(1U)));
+    }
+    scan.close(context);
+
+    CHECK(observed == std::vector<std::string>{"alpha", "bravo", "charlie"});
 }
 
 TEST_CASE("FilterExecutor applies predicate to sequential scan output")
