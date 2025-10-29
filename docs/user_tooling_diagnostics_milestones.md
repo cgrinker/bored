@@ -12,10 +12,11 @@
 ## Milestone 1: Interactive SQL Shell
 - **Goals:** Provide a readline-capable shell with SQL parsing, execution, and telemetry overlays.
 - **Key Tasks:**
-  - [ ] Initialize shell binary (`bored_shell`) with basic REPL loop and command dispatch.
-  - [ ] Integrate parser front-end for statement tokenization and error reporting.
+  - [x] Initialize shell binary (`bored_shell`) with basic REPL loop and command dispatch.
+  - [x] Integrate parser front-end for statement tokenization and error reporting.
   - [ ] Wire execution pipeline to route DDL/DML statements into the executor framework when enabled.
-  - [ ] Surface per-command timing, rows touched, and WAL bytes via telemetry registry hooks.
+  - [x] Surface per-command timing, rows touched, and WAL bytes via telemetry registry hooks.
+- **Progress (Oct 29, 2025):** Shell binary and telemetry overlays are live with parser-driven DDL scaffolding; executor wiring and full integration drills remain.
 - **Exit Criteria:**
   - [ ] Shell supports multi-line statements, command history, and executes DDL operations end-to-end against the engine in integration tests.
 

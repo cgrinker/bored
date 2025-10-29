@@ -55,6 +55,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/storage_runtime.cpp
     src/storage/storage_telemetry_registry.cpp
     src/storage/storage_diagnostics.cpp
+    src/shell/shell_engine.cpp
     src/storage/index_retention.cpp
     src/storage/temp_resource_registry.cpp
     src/storage/vacuum_scheduler.cpp
@@ -167,6 +168,23 @@ target_compile_features(boredctl
         cxx_std_20
 )
 
+add_executable(bored_shell
+    src/tools/bored_shell_main.cpp
+)
+
+target_link_libraries(bored_shell
+    PRIVATE
+        ${PROJECT_NAME}_lib
+        CLI11::CLI11
+        replxx::replxx
+        Threads::Threads
+)
+
+target_compile_features(bored_shell
+    PUBLIC
+        cxx_std_20
+)
+
 
 option(BORED_ENABLE_TESTS "Build and enable tests" ON)
 option(BORED_ENABLE_BENCHMARKS "Build storage benchmarking harness" ON)
@@ -227,6 +245,7 @@ if(BORED_ENABLE_TESTS)
         tests/planner_plan_printer_tests.cpp
     tests/transaction_manager_tests.cpp
     tests/wal_commit_pipeline_tests.cpp
+            tests/shell_engine_tests.cpp
         tests/executor_scaffolding_tests.cpp
         tests/executor_nested_loop_join_tests.cpp
     tests/executor_hash_join_tests.cpp
