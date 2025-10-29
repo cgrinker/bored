@@ -102,6 +102,9 @@ CheckpointTelemetrySnapshot make_checkpoint_snapshot(std::uint64_t base)
     snapshot.last_checkpoint_id = base + 35U;
     snapshot.last_checkpoint_lsn = base + 36U;
     snapshot.last_checkpoint_timestamp_ns = (base + 37U) * 40U;
+    snapshot.io_throttle_deferrals = base + 38U;
+    snapshot.io_throttle_bytes_consumed = (base + 39U) * 70U;
+    snapshot.io_throttle_budget = base + 40U;
     return snapshot;
 }
 
@@ -327,6 +330,9 @@ TEST_CASE("StorageTelemetryRegistry aggregates checkpoint schedulers")
     REQUIRE(total.last_checkpoint_id == (20U + 35U));
     REQUIRE(total.last_checkpoint_lsn == (20U + 36U));
     REQUIRE(total.last_checkpoint_timestamp_ns == ((20U + 37U) * 40U));
+    REQUIRE(total.io_throttle_deferrals == ((10U + 38U) + (20U + 38U)));
+    REQUIRE(total.io_throttle_bytes_consumed == ((10U + 39U) * 70U + (20U + 39U) * 70U));
+    REQUIRE(total.io_throttle_budget == (20U + 40U));
 }
 
 TEST_CASE("StorageTelemetryRegistry aggregates WAL retention samplers")

@@ -5,10 +5,13 @@
 #include "bored/storage/index_retention.hpp"
 #include "bored/storage/wal_writer.hpp"
 #include "bored/storage/wal_format.hpp"
+#include "bored/storage/wal_payloads.hpp"
+#include "bored/storage/page_format.hpp"
 
 #include <algorithm>
 #include <vector>
 #include <utility>
+#include <limits>
 
 namespace bored::storage {
 
@@ -19,6 +22,15 @@ namespace {
     return config.retention_segments > 0U
         || config.retention_hours.count() > 0
         || !config.archive_path.empty();
+}
+
+[[nodiscard]] std::size_t saturating_add(std::size_t lhs, std::size_t rhs) noexcept
+{
+    const auto max_value = std::numeric_limits<std::size_t>::max();
+    if (max_value - lhs < rhs) {
+        return max_value;
+    }
+    return lhs + rhs;
 }
 
 }  // namespace
@@ -78,6 +90,23 @@ CheckpointScheduler::CheckpointScheduler(std::shared_ptr<CheckpointManager> chec
             });
         }
     }
+
+    if (config_.io_target_bytes_per_second > 0U) {
+        io_throttle_enabled_ = true;
+        io_target_bytes_per_second_ = config_.io_target_bytes_per_second;
+        std::size_t burst = config_.io_burst_bytes != 0U ? config_.io_burst_bytes : config_.io_target_bytes_per_second;
+        if (burst == 0U) {
+            burst = config_.io_target_bytes_per_second;
+        }
+        const auto max_int64 = static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
+        if (burst > max_int64) {
+            burst = max_int64;
+        }
+        io_budget_limit_bytes_ = static_cast<std::int64_t>(burst);
+        if (io_budget_limit_bytes_ <= 0) {
+            io_budget_limit_bytes_ = static_cast<std::int64_t>(config_.io_target_bytes_per_second);
+        }
+    }
 }
 
 CheckpointScheduler::~CheckpointScheduler()
@@ -128,6 +157,8 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
         return ec;
     }
 
+    const auto estimated_bytes = estimate_checkpoint_bytes(snapshot);
+
     const auto writer = wal_writer();
     std::uint64_t current_lsn = 0U;
     if (durability_horizon_) {
@@ -171,6 +202,16 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
         }
     };
     mark_trigger(trigger_reason);
+
+    if (io_throttle_enabled_ && !force) {
+        if (!can_schedule_checkpoint(now, estimated_bytes)) {
+            std::lock_guard guard{telemetry_mutex_};
+            telemetry_.skipped_runs += 1U;
+            telemetry_.io_throttle_deferrals += 1U;
+            update_io_telemetry_locked();
+            return {};
+        }
+    }
 
     CheckpointCoordinator::ActiveCheckpoint coordinator_checkpoint{};
     const bool use_coordinator = coordinator_ != nullptr;
@@ -286,6 +327,11 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     if (emit_ec) {
         return emit_ec;
     }
+
+    const auto emitted_bytes = use_coordinator
+        ? compute_checkpoint_bytes(coordinator_checkpoint.snapshot, append_result)
+        : compute_checkpoint_bytes(snapshot, append_result);
+    consume_io_budget(emit_end, emitted_bytes, force);
 
     if (config_.flush_after_emit && writer) {
         const auto flush_start = std::chrono::steady_clock::now();
@@ -488,6 +534,110 @@ WalRetentionTelemetrySnapshot CheckpointScheduler::retention_telemetry_snapshot(
 {
     std::lock_guard guard{telemetry_mutex_};
     return retention_telemetry_;
+}
+
+void CheckpointScheduler::refill_io_budget(std::chrono::steady_clock::time_point now) const
+{
+    if (!io_throttle_enabled_) {
+        return;
+    }
+
+    if (!io_refill_initialized_) {
+        io_last_refill_ = now;
+        io_budget_balance_bytes_ = io_budget_limit_bytes_;
+        io_refill_initialized_ = true;
+        return;
+    }
+
+    if (io_target_bytes_per_second_ == 0U) {
+        return;
+    }
+
+    const auto elapsed = now - io_last_refill_;
+    if (elapsed <= std::chrono::steady_clock::duration::zero()) {
+        return;
+    }
+
+    const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+    const auto produced = static_cast<long double>(io_target_bytes_per_second_) * static_cast<long double>(elapsed_ns)
+        / static_cast<long double>(std::chrono::nanoseconds{std::chrono::seconds{1}}.count());
+    if (produced <= 0.0L) {
+        return;
+    }
+
+    const auto produced_int = static_cast<std::int64_t>(produced);
+    if (produced_int <= 0) {
+        return;
+    }
+
+    io_budget_balance_bytes_ = std::min(io_budget_balance_bytes_ + produced_int, io_budget_limit_bytes_);
+    io_last_refill_ = now;
+}
+
+bool CheckpointScheduler::can_schedule_checkpoint(std::chrono::steady_clock::time_point now,
+                                                   std::size_t estimated_bytes) const
+{
+    if (!io_throttle_enabled_) {
+        return true;
+    }
+
+    refill_io_budget(now);
+    if (io_budget_balance_bytes_ >= static_cast<std::int64_t>(estimated_bytes)) {
+        return true;
+    }
+    return false;
+}
+
+void CheckpointScheduler::consume_io_budget(std::chrono::steady_clock::time_point now,
+                                            std::size_t bytes,
+                                            bool forced)
+{
+    if (!io_throttle_enabled_) {
+        return;
+    }
+
+    refill_io_budget(now);
+    const auto cost = static_cast<std::int64_t>(bytes);
+    io_budget_balance_bytes_ = std::max<std::int64_t>(-io_budget_limit_bytes_, io_budget_balance_bytes_ - cost);
+
+    {
+        std::lock_guard guard{telemetry_mutex_};
+        telemetry_.io_throttle_bytes_consumed += bytes;
+        if (!forced) {
+            telemetry_.io_throttle_budget = static_cast<std::uint64_t>(std::max<std::int64_t>(0, io_budget_balance_bytes_));
+        }
+    }
+}
+
+void CheckpointScheduler::update_io_telemetry_locked() const
+{
+    if (!io_throttle_enabled_) {
+        return;
+    }
+    telemetry_.io_throttle_budget = static_cast<std::uint64_t>(std::max<std::int64_t>(0, io_budget_balance_bytes_));
+}
+
+std::size_t CheckpointScheduler::estimate_checkpoint_bytes(const CheckpointSnapshot& snapshot) const
+{
+    if (!io_throttle_enabled_) {
+        return 0U;
+    }
+
+    const auto page_bytes = snapshot.dirty_pages.size() * bored::storage::kPageSize;
+    const auto txn_bytes = snapshot.active_transactions.size() * sizeof(WalCheckpointTxnEntry);
+    const auto index_bytes = snapshot.index_metadata.size() * sizeof(CheckpointIndexMetadata);
+    return saturating_add(page_bytes, saturating_add(txn_bytes, index_bytes));
+}
+
+std::size_t CheckpointScheduler::compute_checkpoint_bytes(const CheckpointSnapshot& snapshot,
+                                                          const WalAppendResult& append_result) const
+{
+    if (!io_throttle_enabled_) {
+        return append_result.written_bytes;
+    }
+
+    const auto metadata_bytes = estimate_checkpoint_bytes(snapshot);
+    return saturating_add(metadata_bytes, append_result.written_bytes);
 }
 
 }  // namespace bored::storage

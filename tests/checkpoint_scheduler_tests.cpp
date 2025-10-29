@@ -323,3 +323,75 @@ TEST_CASE("CheckpointScheduler dry run tracks coordinator phases")
     io->shutdown();
     (void)std::filesystem::remove_all(wal_dir);
 }
+
+TEST_CASE("CheckpointScheduler throttles checkpoint IO budget")
+{
+    using namespace bored::storage;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_checkpoint_scheduler_throttle_");
+
+    WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * kWalBlockSize;
+    wal_config.buffer_size = 2U * kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, wal_config);
+    auto checkpoint_manager = std::make_shared<CheckpointManager>(wal_writer);
+
+    CheckpointScheduler::Config scheduler_config{};
+    scheduler_config.min_interval = std::chrono::milliseconds{0};
+    scheduler_config.dirty_page_trigger = 1U;
+    scheduler_config.active_transaction_trigger = 1000U;
+    scheduler_config.lsn_gap_trigger = 0U;
+    scheduler_config.flush_after_emit = false;
+    scheduler_config.io_target_bytes_per_second = 4U * kWalBlockSize;
+    scheduler_config.io_burst_bytes = 4U * kWalBlockSize;
+
+    CheckpointScheduler scheduler{checkpoint_manager, scheduler_config};
+
+    auto provider = [&](CheckpointSnapshot& snapshot) -> std::error_code {
+        snapshot.redo_lsn = wal_writer->next_lsn();
+        snapshot.undo_lsn = snapshot.redo_lsn;
+        snapshot.dirty_pages = {
+            WalCheckpointDirtyPageEntry{.page_id = 17U, .reserved = 0U, .page_lsn = snapshot.redo_lsn}
+        };
+        snapshot.active_transactions.clear();
+        snapshot.index_metadata.clear();
+        return {};
+    };
+
+    const auto base_time = std::chrono::steady_clock::now();
+
+    std::optional<WalAppendResult> first_result;
+    REQUIRE_FALSE(scheduler.maybe_run(base_time, provider, false, first_result));
+    REQUIRE(first_result.has_value());
+
+    auto telemetry = scheduler.telemetry_snapshot();
+    CHECK(telemetry.emitted_checkpoints == 1U);
+    CHECK(telemetry.io_throttle_deferrals == 0U);
+    CHECK(telemetry.io_throttle_bytes_consumed >= first_result->written_bytes);
+
+    std::optional<WalAppendResult> deferred_result;
+    REQUIRE_FALSE(scheduler.maybe_run(base_time, provider, false, deferred_result));
+    REQUIRE_FALSE(deferred_result.has_value());
+
+    telemetry = scheduler.telemetry_snapshot();
+    CHECK(telemetry.emitted_checkpoints == 1U);
+    CHECK(telemetry.io_throttle_deferrals == 1U);
+    CHECK(telemetry.io_throttle_budget < scheduler_config.io_target_bytes_per_second);
+
+    const auto later_time = base_time + std::chrono::seconds{2};
+    std::optional<WalAppendResult> second_result;
+    REQUIRE_FALSE(scheduler.maybe_run(later_time, provider, false, second_result));
+    REQUIRE(second_result.has_value());
+
+    telemetry = scheduler.telemetry_snapshot();
+    CHECK(telemetry.emitted_checkpoints == 2U);
+    CHECK(telemetry.io_throttle_deferrals == 1U);
+    CHECK(telemetry.io_throttle_bytes_consumed >= first_result->written_bytes + second_result->written_bytes);
+
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}

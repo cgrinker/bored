@@ -183,6 +183,9 @@ void append_checkpoint_snapshot(std::string& out, const CheckpointTelemetrySnaps
     append_field(out, "last_checkpoint_id", snapshot.last_checkpoint_id, first);
     append_field(out, "last_checkpoint_lsn", snapshot.last_checkpoint_lsn, first);
     append_field(out, "last_checkpoint_timestamp_ns", snapshot.last_checkpoint_timestamp_ns, first);
+    append_field(out, "io_throttle_deferrals", snapshot.io_throttle_deferrals, first);
+    append_field(out, "io_throttle_bytes_consumed", snapshot.io_throttle_bytes_consumed, first);
+    append_field(out, "io_throttle_budget", snapshot.io_throttle_budget, first);
     out.push_back('}');
 }
 

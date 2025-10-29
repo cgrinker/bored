@@ -77,6 +77,9 @@ struct CheckpointTelemetrySnapshot final {
     std::uint64_t last_checkpoint_id = 0U;
     std::uint64_t last_checkpoint_lsn = 0U;
     std::uint64_t last_checkpoint_timestamp_ns = 0U;
+    std::uint64_t io_throttle_deferrals = 0U;
+    std::uint64_t io_throttle_bytes_consumed = 0U;
+    std::uint64_t io_throttle_budget = 0U;
 };
 
 struct WalRetentionTelemetrySnapshot final {

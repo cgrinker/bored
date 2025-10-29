@@ -82,6 +82,9 @@ CheckpointTelemetrySnapshot& accumulate(CheckpointTelemetrySnapshot& target, con
     target.last_checkpoint_id = std::max(target.last_checkpoint_id, source.last_checkpoint_id);
     target.last_checkpoint_lsn = std::max(target.last_checkpoint_lsn, source.last_checkpoint_lsn);
     target.last_checkpoint_timestamp_ns = std::max(target.last_checkpoint_timestamp_ns, source.last_checkpoint_timestamp_ns);
+    target.io_throttle_deferrals += source.io_throttle_deferrals;
+    target.io_throttle_bytes_consumed += source.io_throttle_bytes_consumed;
+    target.io_throttle_budget = std::max(target.io_throttle_budget, source.io_throttle_budget);
     return target;
 }
 

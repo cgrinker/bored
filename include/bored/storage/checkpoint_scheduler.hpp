@@ -38,6 +38,8 @@ public:
         std::shared_ptr<WalDurabilityHorizon> durability_horizon{};
         IndexRetentionHook index_retention_hook{};
         CheckpointCoordinator* coordinator = nullptr;
+        std::size_t io_target_bytes_per_second = 0U;
+        std::size_t io_burst_bytes = 0U;
     };
 
     using SnapshotProvider = std::function<std::error_code(CheckpointSnapshot&)>;
@@ -86,6 +88,16 @@ private:
                                   TriggerReason& reason) const;
 
     [[nodiscard]] std::shared_ptr<WalWriter> wal_writer() const noexcept;
+    void refill_io_budget(std::chrono::steady_clock::time_point now) const;
+    [[nodiscard]] bool can_schedule_checkpoint(std::chrono::steady_clock::time_point now,
+                                               std::size_t estimated_bytes) const;
+    void consume_io_budget(std::chrono::steady_clock::time_point now,
+                           std::size_t bytes,
+                           bool forced);
+    void update_io_telemetry_locked() const;
+    [[nodiscard]] std::size_t estimate_checkpoint_bytes(const CheckpointSnapshot& snapshot) const;
+    [[nodiscard]] std::size_t compute_checkpoint_bytes(const CheckpointSnapshot& snapshot,
+                                                       const WalAppendResult& append_result) const;
 
     std::shared_ptr<CheckpointManager> checkpoint_manager_{};
     Config config_{};
@@ -106,6 +118,12 @@ private:
     mutable WalRetentionTelemetrySnapshot retention_telemetry_{};
     mutable std::mutex telemetry_mutex_{};
     std::shared_ptr<WalDurabilityHorizon> durability_horizon_{};
+    bool io_throttle_enabled_ = false;
+    mutable std::int64_t io_budget_balance_bytes_ = 0;
+    mutable std::int64_t io_budget_limit_bytes_ = 0;
+    mutable std::size_t io_target_bytes_per_second_ = 0U;
+    mutable std::chrono::steady_clock::time_point io_last_refill_{};
+    mutable bool io_refill_initialized_ = false;
 };
 
 }  // namespace bored::storage

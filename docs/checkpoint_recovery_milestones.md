@@ -39,12 +39,12 @@ The checkpoint and recovery coordination layer integrates relational components 
 - **Goals:** Support incremental checkpoints and overlap checkpoint preparation with ongoing workload under isolation guarantees.
 - **Key Tasks:**
   - [x] Implement dirty-page tracking to minimise checkpoint write volume.
-  - [ ] Introduce throttling and scheduling policies so checkpoint and foreground workload share IO budget.
+  - [x] Introduce throttling and scheduling policies so checkpoint and foreground workload share IO budget.
   - [ ] Validate concurrent execution by running synthetic workloads during checkpoint prepare/commit phases.
 - **Exit Criteria:**
   - [ ] Telemetry reports reduced checkpoint duration and bounded foreground latency impact under load-driven tests.
 
-**Current Status:** A shared `CheckpointPageRegistry` now records highest-LSN heap page mutations via `PageManager`, complementing the existing index registry. Scheduler wiring and workload coordination remain outstanding.
+**Current Status:** A shared `CheckpointPageRegistry` records highest-LSN heap page mutations alongside index metadata, and `CheckpointScheduler` now enforces a token-bucket IO budget with telemetry to coordinate against foreground demand. Concurrent workload validation remains outstanding.
 
 ## Milestone 4: Recovery Telemetry & Diagnostics
 - **Goals:** Provide visibility into checkpoint lag, recovery progress, and failure scenarios for operators.
