@@ -12,6 +12,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <atomic>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -390,6 +391,118 @@ TEST_CASE("CheckpointScheduler throttles checkpoint IO budget")
     CHECK(telemetry.emitted_checkpoints == 2U);
     CHECK(telemetry.io_throttle_deferrals == 1U);
     CHECK(telemetry.io_throttle_bytes_consumed >= first_result->written_bytes + second_result->written_bytes);
+
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("CheckpointScheduler overlaps checkpoint with concurrent transactions")
+{
+    using namespace bored::storage;
+    using namespace std::chrono_literals;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_checkpoint_scheduler_concurrent_");
+
+    WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * kWalBlockSize;
+    wal_config.buffer_size = 2U * kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, wal_config);
+    auto checkpoint_manager = std::make_shared<CheckpointManager>(wal_writer);
+
+    WalRetentionManager retention_manager{wal_config.directory,
+                                          wal_config.file_prefix,
+                                          wal_config.file_extension,
+                                          wal_writer->durability_horizon()};
+
+    bored::txn::TransactionIdAllocatorStub allocator{120U};
+    bored::txn::TransactionManager transaction_manager{allocator};
+
+    CheckpointCoordinator coordinator{checkpoint_manager, transaction_manager, retention_manager};
+
+    CheckpointScheduler::Config scheduler_config{};
+    scheduler_config.min_interval = std::chrono::milliseconds{0};
+    scheduler_config.flush_after_emit = false;
+    scheduler_config.coordinator = &coordinator;
+
+    CheckpointScheduler scheduler{checkpoint_manager, scheduler_config};
+
+    auto active_txn = transaction_manager.begin();
+    REQUIRE(active_txn.id() == 120U);
+
+    std::promise<void> provider_ready_promise;
+    auto provider_ready_future = provider_ready_promise.get_future();
+    std::promise<void> release_provider_promise;
+    auto release_provider_future = release_provider_promise.get_future();
+
+    std::promise<void> worker_attempt_promise;
+    auto worker_attempt_future = worker_attempt_promise.get_future();
+
+    auto worker_future = std::async(std::launch::async, [&]() -> std::uint64_t {
+        provider_ready_future.wait();
+        worker_attempt_promise.set_value();
+        auto ctx = transaction_manager.begin();
+        const auto id = ctx.id();
+        transaction_manager.commit(ctx);
+        return id;
+    });
+
+    std::atomic<int> provider_calls{0};
+    auto provider = [&](CheckpointSnapshot& snapshot) -> std::error_code {
+        snapshot.redo_lsn = wal_writer->next_lsn();
+        snapshot.undo_lsn = snapshot.redo_lsn;
+        snapshot.dirty_pages = {
+            WalCheckpointDirtyPageEntry{.page_id = 42U, .reserved = 0U, .page_lsn = snapshot.redo_lsn}
+        };
+        snapshot.active_transactions = {
+            WalCheckpointTxnEntry{.transaction_id = static_cast<std::uint32_t>(active_txn.id()),
+                                   .state = 1U,
+                                   .last_lsn = snapshot.redo_lsn}
+        };
+        snapshot.index_metadata.clear();
+        const auto call_index = provider_calls.fetch_add(1);
+        if (call_index == 0) {
+            return {};
+        }
+        if (call_index == 1) {
+            provider_ready_promise.set_value();
+            release_provider_future.wait();
+        }
+        return {};
+    };
+
+    std::optional<WalAppendResult> result;
+    auto scheduler_future = std::async(std::launch::async, [&]() {
+        return scheduler.maybe_run(std::chrono::steady_clock::now(), provider, false, result);
+    });
+
+    worker_attempt_future.wait();
+    auto worker_block_status = worker_future.wait_for(25ms);
+    CHECK(worker_block_status == std::future_status::timeout);
+
+    release_provider_promise.set_value();
+
+    auto scheduler_status = scheduler_future.wait_for(250ms);
+    REQUIRE(scheduler_status == std::future_status::ready);
+    auto scheduler_ec = scheduler_future.get();
+    REQUIRE_FALSE(scheduler_ec);
+    REQUIRE(result.has_value());
+
+    auto worker_resume_status = worker_future.wait_for(250ms);
+    REQUIRE(worker_resume_status == std::future_status::ready);
+    const auto resumed_id = worker_future.get();
+    CHECK(resumed_id == active_txn.id() + 1U);
+
+    transaction_manager.commit(active_txn);
+
+    const auto telemetry = scheduler.telemetry_snapshot();
+    CHECK(telemetry.emitted_checkpoints == 1U);
+    CHECK(telemetry.coordinator_begin_calls == 1U);
+    CHECK(telemetry.coordinator_prepare_calls == 1U);
+    CHECK(telemetry.coordinator_commit_calls == 1U);
 
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
