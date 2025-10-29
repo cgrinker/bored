@@ -16,6 +16,7 @@ std::error_code CheckpointManager::emit_checkpoint(std::uint64_t checkpoint_id,
                                                    std::uint64_t undo_lsn,
                                                    std::span<const WalCheckpointDirtyPageEntry> dirty_pages,
                                                    std::span<const WalCheckpointTxnEntry> active_transactions,
+                                                   std::span<const WalCheckpointIndexEntry> index_metadata,
                                                    WalAppendResult& out_result) const
 {
     if (!wal_writer_) {
@@ -30,19 +31,27 @@ std::error_code CheckpointManager::emit_checkpoint(std::uint64_t checkpoint_id,
         return std::make_error_code(std::errc::value_too_large);
     }
 
+    if (index_metadata.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return std::make_error_code(std::errc::value_too_large);
+    }
+
     WalCheckpointHeader header{};
     header.checkpoint_id = checkpoint_id;
     header.redo_lsn = redo_lsn;
     header.undo_lsn = undo_lsn;
     header.dirty_page_count = static_cast<std::uint32_t>(dirty_pages.size());
     header.active_transaction_count = static_cast<std::uint32_t>(active_transactions.size());
+    header.index_metadata_count = static_cast<std::uint32_t>(index_metadata.size());
 
-    const auto payload_size = wal_checkpoint_payload_size(dirty_pages.size(), active_transactions.size());
+    const auto payload_size = wal_checkpoint_payload_size(dirty_pages.size(),
+                                                         active_transactions.size(),
+                                                         index_metadata.size());
     std::vector<std::byte> payload(payload_size);
     if (!encode_wal_checkpoint(std::span<std::byte>(payload.data(), payload.size()),
                                header,
                                dirty_pages,
-                               active_transactions)) {
+                               active_transactions,
+                               index_metadata)) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 

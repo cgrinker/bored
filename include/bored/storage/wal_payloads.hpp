@@ -99,6 +99,8 @@ struct alignas(8) WalCheckpointHeader final {
     std::uint64_t undo_lsn = 0U;
     std::uint32_t dirty_page_count = 0U;
     std::uint32_t active_transaction_count = 0U;
+    std::uint32_t index_metadata_count = 0U;
+    std::uint32_t reserved = 0U;
 };
 
 struct alignas(8) WalCheckpointDirtyPageEntry final {
@@ -113,10 +115,16 @@ struct alignas(8) WalCheckpointTxnEntry final {
     std::uint64_t last_lsn = 0U;
 };
 
+struct alignas(8) WalCheckpointIndexEntry final {
+    std::uint64_t index_id = 0U;
+    std::uint64_t high_water_lsn = 0U;
+};
+
 struct WalCheckpointView final {
     WalCheckpointHeader header{};
     std::vector<WalCheckpointDirtyPageEntry> dirty_pages{};
     std::vector<WalCheckpointTxnEntry> active_transactions{};
+    std::vector<WalCheckpointIndexEntry> index_metadata{};
 };
 
 enum class WalIndexMaintenanceAction : std::uint32_t {
@@ -338,7 +346,9 @@ constexpr std::size_t wal_commit_payload_size()
     return sizeof(WalCommitHeader);
 }
 
-std::size_t wal_checkpoint_payload_size(std::size_t dirty_page_count, std::size_t active_transaction_count);
+std::size_t wal_checkpoint_payload_size(std::size_t dirty_page_count,
+                                        std::size_t active_transaction_count,
+                                        std::size_t index_metadata_count);
 
 std::size_t wal_compaction_payload_size(std::size_t entry_count);
 
@@ -410,7 +420,8 @@ bool encode_wal_commit(std::span<std::byte> buffer, const WalCommitHeader& heade
 bool encode_wal_checkpoint(std::span<std::byte> buffer,
                            const WalCheckpointHeader& header,
                            std::span<const WalCheckpointDirtyPageEntry> dirty_pages,
-                           std::span<const WalCheckpointTxnEntry> active_transactions);
+                           std::span<const WalCheckpointTxnEntry> active_transactions,
+                           std::span<const WalCheckpointIndexEntry> index_metadata);
 
 bool encode_wal_compaction(std::span<std::byte> buffer,
                            const WalCompactionHeader& header,
@@ -448,7 +459,7 @@ static_assert(sizeof(WalCommitHeader) == 40, "WalCommitHeader expected to be 40 
 static_assert(alignof(WalCommitHeader) == 8, "WalCommitHeader requires 8-byte alignment");
 static_assert(sizeof(WalTupleBeforeImageHeader) == 32, "WalTupleBeforeImageHeader expected to be 32 bytes");
 static_assert(alignof(WalTupleBeforeImageHeader) == 8, "WalTupleBeforeImageHeader requires 8-byte alignment");
-static_assert(sizeof(WalCheckpointHeader) == 32, "WalCheckpointHeader expected to be 32 bytes");
+static_assert(sizeof(WalCheckpointHeader) == 40, "WalCheckpointHeader expected to be 40 bytes");
 static_assert(alignof(WalCheckpointHeader) == 8, "WalCheckpointHeader requires 8-byte alignment");
 static_assert(sizeof(WalCheckpointDirtyPageEntry) == 16, "WalCheckpointDirtyPageEntry expected to be 16 bytes");
 static_assert(alignof(WalCheckpointDirtyPageEntry) == 8, "WalCheckpointDirtyPageEntry requires 8-byte alignment");

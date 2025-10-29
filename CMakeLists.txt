@@ -31,6 +31,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/free_space_map.cpp
     src/storage/checkpoint_manager.cpp
     src/storage/checkpoint_image_store.cpp
+    src/storage/checkpoint_page_registry.cpp
     src/storage/checkpoint_coordinator.cpp
     src/storage/checkpoint_scheduler.cpp
     src/storage/wal_payloads.cpp
@@ -40,6 +41,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/index_btree_manager.cpp
     src/storage/index_btree_leaf_ops.cpp
     src/storage/index_comparator_registry.cpp
+    src/storage/index_checkpoint_registry.cpp
     src/storage/index_retention_executor.cpp
     src/storage/index_retention_pruner.cpp
     src/storage/wal_apply_helpers.cpp
@@ -165,6 +167,7 @@ if(BORED_ENABLE_TESTS)
         tests/catalog_cache_tests.cpp
     tests/catalog_mutator_tests.cpp
     tests/catalog_checkpoint_registry_tests.cpp
+    tests/index_checkpoint_registry_tests.cpp
         tests/catalog_mvcc_tests.cpp
         tests/catalog_integration_tests.cpp
     tests/transaction_abort_integration_tests.cpp
@@ -181,6 +184,7 @@ if(BORED_ENABLE_TESTS)
         tests/wal_replay_tests.cpp
         tests/wal_telemetry_tests.cpp
         tests/wal_checkpoint_tests.cpp
+    tests/checkpoint_page_registry_tests.cpp
     tests/checkpoint_coordinator_tests.cpp
         tests/checkpoint_scheduler_tests.cpp
         tests/lock_manager_tests.cpp

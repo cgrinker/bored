@@ -14,11 +14,17 @@ struct CheckpointPageSnapshot final {
     std::vector<std::byte> image{};
 };
 
+struct CheckpointIndexMetadata final {
+    std::uint64_t index_id = 0U;
+    std::uint64_t high_water_lsn = 0U;
+};
+
 struct CheckpointSnapshot final {
     std::uint64_t redo_lsn = 0U;
     std::uint64_t undo_lsn = 0U;
     std::vector<WalCheckpointDirtyPageEntry> dirty_pages{};
     std::vector<WalCheckpointTxnEntry> active_transactions{};
+    std::vector<CheckpointIndexMetadata> index_metadata{};
     std::vector<CheckpointPageSnapshot> page_snapshots{};
 };
 

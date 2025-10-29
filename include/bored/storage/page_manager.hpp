@@ -23,6 +23,7 @@ class TransactionContext;
 namespace bored::storage {
 
 class OperationScope;
+class CheckpointPageRegistry;
 
 class PageManager final {
 public:
@@ -33,6 +34,7 @@ public:
         std::function<void(const WalCompactionEntry&)> index_metadata_callback{};
         StorageTelemetryRegistry* telemetry_registry = nullptr;
         std::string telemetry_identifier{};
+        CheckpointPageRegistry* checkpoint_registry = nullptr;
     };
 
     struct TupleInsertResult final {
@@ -164,6 +166,7 @@ private:
     void record_latch(PageLatchMode mode, std::chrono::nanoseconds wait, bool success) const;
     void record_operation(OperationKind kind, std::chrono::nanoseconds duration, bool success) const;
     [[nodiscard]] OperationTelemetrySnapshot& operation_metrics(OperationKind kind) const;
+    void record_checkpoint(std::uint32_t page_id, std::uint64_t page_lsn) const;
 };
 
 }  // namespace bored::storage

@@ -3,6 +3,7 @@
 #include "bored/storage/checkpoint_image_store.hpp"
 
 #include <span>
+#include <vector>
 #include <utility>
 
 namespace bored::storage {
@@ -57,11 +58,21 @@ std::error_code CheckpointCoordinator::commit_checkpoint(ActiveCheckpoint& check
         return std::make_error_code(std::errc::not_connected);
     }
 
+    std::vector<WalCheckpointIndexEntry> wal_index_metadata;
+    wal_index_metadata.reserve(checkpoint.snapshot.index_metadata.size());
+    for (const auto& metadata : checkpoint.snapshot.index_metadata) {
+        WalCheckpointIndexEntry entry{};
+        entry.index_id = metadata.index_id;
+        entry.high_water_lsn = metadata.high_water_lsn;
+        wal_index_metadata.push_back(entry);
+    }
+
     auto ec = checkpoint_manager_->emit_checkpoint(checkpoint.checkpoint_id,
                                                    checkpoint.snapshot.redo_lsn,
                                                    checkpoint.snapshot.undo_lsn,
                                                    checkpoint.snapshot.dirty_pages,
                                                    checkpoint.snapshot.active_transactions,
+                                                   wal_index_metadata,
                                                    out_result);
 
     if (!ec && image_store_ != nullptr) {

@@ -24,6 +24,8 @@ public:
     [[nodiscard]] std::span<std::byte> get_page(std::uint32_t page_id);
     void set_free_space_map(FreeSpaceMap* fsm) noexcept;
     [[nodiscard]] FreeSpaceMap* free_space_map() const noexcept;
+    void set_checkpoint_index_metadata(std::span<const CheckpointIndexMetadata> metadata);
+    [[nodiscard]] const std::vector<CheckpointIndexMetadata>& checkpoint_index_metadata() const noexcept;
     void record_index_metadata(std::span<const WalCompactionEntry> entries);
     [[nodiscard]] const std::vector<WalCompactionEntry>& index_metadata() const noexcept;
 
@@ -31,6 +33,7 @@ private:
     PageType default_page_type_;
     std::unordered_map<std::uint32_t, std::array<std::byte, kPageSize>> pages_;
     FreeSpaceMap* free_space_map_ = nullptr;
+    std::vector<CheckpointIndexMetadata> checkpoint_index_metadata_{};
     std::vector<WalCompactionEntry> index_metadata_events_{};
 };
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/storage/index_btree_page.hpp"
+#include "bored/storage/index_checkpoint_registry.hpp"
 #include "bored/storage/index_comparator_registry.hpp"
 #include "bored/storage/page_latch.hpp"
 
@@ -47,6 +48,8 @@ struct IndexBtreeManagerConfig final {
     PageLatchCallbacks latch_callbacks{};
     TempResourceRegistry* temp_registry = nullptr;
     std::string scratch_tag{"index"};
+    std::uint64_t index_id = 0U;
+    IndexCheckpointRegistry* checkpoint_registry = nullptr;
 };
 
 class IndexBtreeManager final {
@@ -97,10 +100,13 @@ private:
     TempResourceRegistry* temp_registry_ = nullptr;
     std::filesystem::path scratch_directory_{};
     std::uint64_t scratch_sequence_ = 0U;
+    std::uint64_t index_id_ = 0U;
+    IndexCheckpointRegistry* checkpoint_registry_ = nullptr;
 
     std::error_code validate_leaf_page(std::span<const std::byte> page) const noexcept;
     std::error_code ensure_scratch_directory();
     void maybe_record_scratch(std::uint32_t page_id, std::span<const std::byte> payload);
+    void register_checkpoint(std::uint32_t page_id, std::uint64_t lsn) const;
 };
 
 std::error_code initialize_index_page(std::span<std::byte> page,

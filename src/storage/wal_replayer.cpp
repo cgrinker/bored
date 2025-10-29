@@ -658,6 +658,16 @@ FreeSpaceMap* WalReplayContext::free_space_map() const noexcept
     return free_space_map_;
 }
 
+void WalReplayContext::set_checkpoint_index_metadata(std::span<const CheckpointIndexMetadata> metadata)
+{
+    checkpoint_index_metadata_.assign(metadata.begin(), metadata.end());
+}
+
+const std::vector<CheckpointIndexMetadata>& WalReplayContext::checkpoint_index_metadata() const noexcept
+{
+    return checkpoint_index_metadata_;
+}
+
 void WalReplayContext::record_index_metadata(std::span<const WalCompactionEntry> entries)
 {
     index_metadata_events_.insert(index_metadata_events_.end(), entries.begin(), entries.end());
@@ -675,6 +685,9 @@ WalReplayer::WalReplayer(WalReplayContext& context)
 
 std::error_code WalReplayer::apply_redo(const WalRecoveryPlan& plan)
 {
+    context_.set_checkpoint_index_metadata(std::span<const CheckpointIndexMetadata>(plan.checkpoint_index_metadata.data(),
+                                                                                    plan.checkpoint_index_metadata.size()));
+
     for (const auto& snapshot : plan.checkpoint_page_snapshots) {
         if (snapshot.entry.page_id == 0U) {
             return std::make_error_code(std::errc::invalid_argument);

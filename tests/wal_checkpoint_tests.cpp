@@ -18,6 +18,7 @@ using bored::storage::AsyncIoBackend;
 using bored::storage::AsyncIoConfig;
 using bored::storage::CheckpointManager;
 using bored::storage::WalCheckpointDirtyPageEntry;
+using bored::storage::WalCheckpointIndexEntry;
 using bored::storage::WalCheckpointTxnEntry;
 using bored::storage::WalRecordHeader;
 using bored::storage::WalRecordType;
@@ -88,12 +89,18 @@ TEST_CASE("CheckpointManager emits checkpoint record")
         WalCheckpointTxnEntry{.transaction_id = 55U, .state = 1U, .last_lsn = 16384U}
     }};
 
+    std::array<WalCheckpointIndexEntry, 2> index_metadata{{
+        WalCheckpointIndexEntry{.index_id = 77U, .high_water_lsn = 20480U},
+        WalCheckpointIndexEntry{.index_id = 88U, .high_water_lsn = 24576U}
+    }};
+
     bored::storage::WalAppendResult append_result{};
     auto ec = checkpoint_manager.emit_checkpoint(9001U,
                                                  12000U,
                                                  11000U,
                                                  dirty_pages,
                                                  active_transactions,
+                                                 index_metadata,
                                                  append_result);
     REQUIRE_FALSE(ec);
     REQUIRE(append_result.written_bytes > 0U);
@@ -123,6 +130,7 @@ TEST_CASE("CheckpointManager emits checkpoint record")
     REQUIRE(checkpoint_view->header.undo_lsn == 11000U);
     REQUIRE(checkpoint_view->dirty_pages.size() == dirty_pages.size());
     REQUIRE(checkpoint_view->active_transactions.size() == active_transactions.size());
+    REQUIRE(checkpoint_view->index_metadata.size() == index_metadata.size());
 
     for (std::size_t i = 0; i < dirty_pages.size(); ++i) {
         REQUIRE(checkpoint_view->dirty_pages[i].page_id == dirty_pages[i].page_id);
@@ -133,6 +141,11 @@ TEST_CASE("CheckpointManager emits checkpoint record")
         REQUIRE(checkpoint_view->active_transactions[i].transaction_id == active_transactions[i].transaction_id);
         REQUIRE(checkpoint_view->active_transactions[i].state == active_transactions[i].state);
         REQUIRE(checkpoint_view->active_transactions[i].last_lsn == active_transactions[i].last_lsn);
+    }
+
+    for (std::size_t i = 0; i < index_metadata.size(); ++i) {
+        REQUIRE(checkpoint_view->index_metadata[i].index_id == index_metadata[i].index_id);
+        REQUIRE(checkpoint_view->index_metadata[i].high_water_lsn == index_metadata[i].high_water_lsn);
     }
 
     REQUIRE_FALSE(wal_writer->close());

@@ -7,6 +7,7 @@
 #include "bored/storage/wal_format.hpp"
 
 #include <algorithm>
+#include <vector>
 #include <utility>
 
 namespace bored::storage {
@@ -243,11 +244,20 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     if (use_coordinator) {
         emit_ec = coordinator_->commit_checkpoint(coordinator_checkpoint, append_result);
     } else {
+        std::vector<WalCheckpointIndexEntry> wal_index_metadata;
+        wal_index_metadata.reserve(snapshot.index_metadata.size());
+        for (const auto& metadata : snapshot.index_metadata) {
+            WalCheckpointIndexEntry entry{};
+            entry.index_id = metadata.index_id;
+            entry.high_water_lsn = metadata.high_water_lsn;
+            wal_index_metadata.push_back(entry);
+        }
         emit_ec = checkpoint_manager_->emit_checkpoint(next_checkpoint_id_,
                                                        snapshot.redo_lsn,
                                                        snapshot.undo_lsn,
                                                        snapshot.dirty_pages,
                                                        snapshot.active_transactions,
+                                                       wal_index_metadata,
                                                        append_result);
     }
     const auto emit_end = std::chrono::steady_clock::now();

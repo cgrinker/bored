@@ -48,6 +48,7 @@ struct WalRecoveryPlan final {
     std::vector<WalUndoSpan> undo_spans{};
     std::vector<WalRecoveredTransaction> transactions{};
     std::vector<WalCheckpointDirtyPageEntry> checkpoint_dirty_pages{};
+    std::vector<CheckpointIndexMetadata> checkpoint_index_metadata{};
     std::vector<CheckpointPageSnapshot> checkpoint_page_snapshots{};
     TempResourceRegistry* temp_resource_registry = nullptr;
     bool truncated_tail = false;

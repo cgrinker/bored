@@ -19,6 +19,7 @@ public:
                                                   std::uint64_t undo_lsn,
                                                   std::span<const WalCheckpointDirtyPageEntry> dirty_pages,
                                                   std::span<const WalCheckpointTxnEntry> active_transactions,
+                                                  std::span<const WalCheckpointIndexEntry> index_metadata,
                                                   WalAppendResult& out_result) const;
 
     [[nodiscard]] std::shared_ptr<WalWriter> wal_writer() const noexcept;

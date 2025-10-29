@@ -113,6 +113,8 @@ IndexBtreeManager::IndexBtreeManager(IndexBtreeManagerConfig config)
     : config_{std::move(config)}
     , comparator_{config_.comparator}
     , temp_registry_{config_.temp_registry}
+    , index_id_{config_.index_id}
+    , checkpoint_registry_{config_.checkpoint_registry}
 {
 }
 
@@ -199,6 +201,16 @@ void IndexBtreeManager::maybe_record_scratch(std::uint32_t page_id, std::span<co
     temp_registry_->register_file(file_path);
 }
 
+void IndexBtreeManager::register_checkpoint(std::uint32_t page_id, std::uint64_t lsn) const
+{
+    if (checkpoint_registry_ == nullptr || index_id_ == 0U || page_id == 0U || lsn == 0U) {
+        return;
+    }
+
+    checkpoint_registry_->register_dirty_page(index_id_, page_id, lsn);
+    checkpoint_registry_->register_index_progress(index_id_, lsn);
+}
+
 std::error_code IndexBtreeManager::insert_leaf(std::span<std::byte> page,
                                                std::uint32_t page_id,
                                                IndexBtreeTuplePointer tuple_pointer,
@@ -256,6 +268,7 @@ std::error_code IndexBtreeManager::insert_leaf(std::span<std::byte> page,
     out_result.inserted = true;
 
     maybe_record_scratch(page_id, payload_span(page));
+    register_checkpoint(page_id, lsn);
 
     return {};
 }
@@ -326,6 +339,7 @@ std::error_code IndexBtreeManager::delete_leaf(std::span<std::byte> page,
     out_result.page_empty = entries.empty();
 
     maybe_record_scratch(page_id, payload_span(page));
+    register_checkpoint(page_id, lsn);
 
     return {};
 }
@@ -388,6 +402,7 @@ std::error_code IndexBtreeManager::update_leaf(std::span<std::byte> page,
     out_result.updated = true;
 
     maybe_record_scratch(page_id, payload_span(page));
+    register_checkpoint(page_id, lsn);
 
     return {};
 }

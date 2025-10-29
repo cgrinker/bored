@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "bored/storage/checksum.hpp"
+#include "bored/storage/checkpoint_page_registry.hpp"
 #include "bored/storage/page_latch_guard.hpp"
 #include "bored/storage/free_space_map_persistence.hpp"
 #include "bored/storage/wal_apply_helpers.hpp"
@@ -286,7 +287,9 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
             return std::make_error_code(std::errc::io_error);
         }
 
-        out_result.slot = *slot;
+        record_checkpoint(header.page_id, wal_result.lsn);
+
+    out_result.slot = *slot;
         out_result.wal = wal_result;
         out_result.used_overflow = false;
         out_result.logical_length = payload.size();
@@ -472,6 +475,8 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
             return chunk_ec;
         }
 
+        record_checkpoint(chunk_meta.overflow_page_id, chunk_result.lsn);
+
         chunk_offset += chunk_length;
     }
 
@@ -519,6 +524,8 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
     if (!slot) {
         return std::make_error_code(std::errc::io_error);
     }
+
+    record_checkpoint(header.page_id, wal_result.lsn);
 
     auto& page_header_ref = page_header(page);
     page_header_ref.flags |= static_cast<std::uint16_t>(PageFlag::HasOverflow);
@@ -682,6 +689,7 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
         }
 
         for (const auto& meta_entry : truncate_chunk_metas) {
+            record_checkpoint(meta_entry.overflow_page_id, truncate_result.lsn);
             overflow_cache_.erase(meta_entry.overflow_page_id);
         }
     }
@@ -712,6 +720,8 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
     if (!bored::storage::delete_tuple(page, slot_index, wal_result.lsn, fsm_)) {
         return std::make_error_code(std::errc::io_error);
     }
+
+    record_checkpoint(header.page_id, wal_result.lsn);
 
     if (txn != nullptr) {
         auto manager = const_cast<PageManager*>(this);
@@ -913,6 +923,7 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
         }
 
         for (const auto& meta_entry : truncate_chunk_metas) {
+            record_checkpoint(meta_entry.overflow_page_id, truncate_result.lsn);
             overflow_cache_.erase(meta_entry.overflow_page_id);
         }
     }
@@ -960,6 +971,8 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
     if (!appended) {
         return std::make_error_code(std::errc::io_error);
     }
+
+    record_checkpoint(header.page_id, wal_result.lsn);
 
     auto new_slot = *appended;
     if (new_slot.index != slot_index) {
@@ -1111,6 +1124,8 @@ std::error_code PageManager::compact_page(std::span<std::byte> page,
         return std::make_error_code(std::errc::io_error);
     }
 
+    record_checkpoint(header.page_id, wal_result.lsn);
+
     out_result.compaction_wal = wal_result;
     out_result.performed = true;
     out_result.relocations = entries;
@@ -1166,6 +1181,14 @@ void PageManager::record_operation(OperationKind kind,
     if (!success) {
         metrics.failures += 1U;
     }
+}
+
+void PageManager::record_checkpoint(std::uint32_t page_id, std::uint64_t page_lsn) const
+{
+    if (!config_.checkpoint_registry || page_id == 0U) {
+        return;
+    }
+    config_.checkpoint_registry->register_dirty_page(page_id, page_lsn);
 }
 
 OperationTelemetrySnapshot& PageManager::operation_metrics(OperationKind kind) const

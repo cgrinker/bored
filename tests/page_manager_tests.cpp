@@ -1,5 +1,6 @@
 #include "bored/storage/page_manager.hpp"
 #include "bored/storage/async_io.hpp"
+#include "bored/storage/checkpoint_page_registry.hpp"
 #include "bored/storage/free_space_map.hpp"
 #include "bored/storage/page_format.hpp"
 #include "bored/storage/page_operations.hpp"
@@ -19,18 +20,21 @@
 #include <memory>
 #include <cstring>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 using bored::storage::align_up_to_block;
 using bored::storage::AsyncIo;
 using bored::storage::AsyncIoBackend;
 using bored::storage::AsyncIoConfig;
+using bored::storage::CheckpointPageRegistry;
 using bored::storage::FreeSpaceMap;
 using bored::storage::PageManager;
 using bored::storage::PageLatchMode;
 using bored::storage::PageType;
 using bored::storage::TupleSlot;
 using bored::storage::WalAppendResult;
+using bored::storage::WalCheckpointDirtyPageEntry;
 using bored::storage::WalRecordHeader;
 using bored::storage::WalRecordType;
 using bored::storage::WalSegmentHeader;
@@ -250,6 +254,86 @@ TEST_CASE("PageManager delete tuple logs WAL record")
     REQUIRE(bored::storage::read_tuple(std::span<const std::byte>(page_span.data(), page_span.size()),
                                        insert_result.slot.index)
                 .empty());
+
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("PageManager registers dirty pages with checkpoint registry")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_page_manager_checkpoint_");
+
+    bored::storage::WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * bored::storage::kWalBlockSize;
+    wal_config.buffer_size = 2U * bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<bored::storage::WalWriter>(io, wal_config);
+    FreeSpaceMap fsm;
+    CheckpointPageRegistry checkpoint_registry;
+
+    PageManager::Config manager_config{};
+    manager_config.checkpoint_registry = &checkpoint_registry;
+
+    PageManager manager{&fsm, wal_writer, manager_config};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    constexpr std::uint32_t page_id = 501U;
+    auto init_ec = manager.initialize_page(page_span, PageType::Table, page_id);
+    REQUIRE_FALSE(init_ec);
+
+    const std::array<std::byte, 8> inline_tuple{
+        std::byte{'c'}, std::byte{'h'}, std::byte{'e'}, std::byte{'c'},
+        std::byte{'k'}, std::byte{'p'}, std::byte{'t'}, std::byte{'1'}};
+
+    PageManager::TupleInsertResult inline_result{};
+    auto inline_ec = manager.insert_tuple(page_span, inline_tuple, 1U, inline_result);
+    REQUIRE_FALSE(inline_ec);
+
+    std::vector<WalCheckpointDirtyPageEntry> entries;
+    checkpoint_registry.snapshot_into(entries);
+    std::unordered_map<std::uint32_t, std::uint64_t> page_map;
+    for (const auto& entry : entries) {
+        page_map.emplace(entry.page_id, entry.page_lsn);
+    }
+
+    REQUIRE(page_map.size() == 1U);
+    REQUIRE(page_map.at(page_id) == inline_result.wal.lsn);
+
+    checkpoint_registry.clear();
+    entries.clear();
+    page_map.clear();
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> overflow_page_buffer{};
+    auto overflow_span = std::span<std::byte>(overflow_page_buffer.data(), overflow_page_buffer.size());
+    constexpr std::uint32_t overflow_page_id = 777U;
+    auto overflow_init = manager.initialize_page(overflow_span, PageType::Table, overflow_page_id);
+    REQUIRE_FALSE(overflow_init);
+
+    std::vector<std::byte> overflow_payload(9000U, std::byte{'X'});
+    PageManager::TupleInsertResult overflow_result{};
+    auto overflow_ec = manager.insert_tuple(overflow_span,
+                                            std::span<const std::byte>(overflow_payload.data(), overflow_payload.size()),
+                                            2U,
+                                            overflow_result);
+    REQUIRE_FALSE(overflow_ec);
+    REQUIRE(overflow_result.used_overflow);
+
+    checkpoint_registry.snapshot_into(entries);
+    for (const auto& entry : entries) {
+        page_map[entry.page_id] = entry.page_lsn;
+    }
+
+    REQUIRE(page_map.contains(overflow_page_id));
+    REQUIRE(page_map.at(overflow_page_id) == overflow_result.wal.lsn);
+    REQUIRE(page_map.size() == overflow_result.overflow_page_ids.size() + 1U);
+    for (auto overflow_page_id : overflow_result.overflow_page_ids) {
+        REQUIRE(page_map.contains(overflow_page_id));
+        REQUIRE(page_map.at(overflow_page_id) >= overflow_result.wal.lsn);
+    }
 
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();

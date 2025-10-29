@@ -125,6 +125,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
     plan.undo_spans.clear();
     plan.transactions.clear();
     plan.checkpoint_dirty_pages.clear();
+    plan.checkpoint_index_metadata.clear();
     plan.checkpoint_page_snapshots.clear();
     plan.temp_resource_registry = temp_resource_registry_;
     plan.truncated_tail = false;
@@ -309,6 +310,14 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 plan.checkpoint_redo_lsn = checkpoint->header.redo_lsn;
                 plan.checkpoint_undo_lsn = checkpoint->header.undo_lsn;
                 plan.checkpoint_dirty_pages.assign(checkpoint->dirty_pages.begin(), checkpoint->dirty_pages.end());
+                plan.checkpoint_index_metadata.clear();
+                plan.checkpoint_index_metadata.reserve(checkpoint->index_metadata.size());
+                for (const auto& entry : checkpoint->index_metadata) {
+                    CheckpointIndexMetadata metadata{};
+                    metadata.index_id = entry.index_id;
+                    metadata.high_water_lsn = entry.high_water_lsn;
+                    plan.checkpoint_index_metadata.push_back(metadata);
+                }
                 plan.checkpoint_page_snapshots.clear();
                 if (auto snapshot_ec = load_checkpoint_snapshots(plan.checkpoint_id, plan.checkpoint_page_snapshots); snapshot_ec) {
                     if (snapshot_ec != std::make_error_code(std::errc::no_such_file_or_directory)) {

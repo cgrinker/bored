@@ -2,6 +2,8 @@
 #include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_undo_walker.hpp"
 #include "bored/storage/wal_writer.hpp"
+#include "bored/storage/checkpoint_manager.hpp"
+#include "bored/storage/wal_payloads.hpp"
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/page_manager.hpp"
 #include "bored/storage/free_space_map.hpp"
@@ -39,6 +41,10 @@ using bored::storage::WalUndoWalker;
 using bored::storage::WalWriter;
 using bored::storage::WalWriterConfig;
 using bored::storage::TempResourceRegistry;
+using bored::storage::CheckpointManager;
+using bored::storage::WalCheckpointIndexEntry;
+using bored::storage::WalCheckpointDirtyPageEntry;
+using bored::storage::WalCheckpointTxnEntry;
 
 namespace {
 
@@ -170,6 +176,50 @@ TEST_CASE("WalRecoveryDriver builds redo and undo plan")
     CHECK(aborted_tx->state == WalRecoveredTransactionState::Aborted);
     CHECK_FALSE(aborted_tx->commit_record.has_value());
     CHECK(aborted_tx->commit_lsn == 0U);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("WalRecoveryDriver captures checkpoint index metadata")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_recovery_index_metadata_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 2U * bored::storage::kWalBlockSize;
+    config.buffer_size = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    auto checkpoint_manager = std::make_shared<CheckpointManager>(wal_writer);
+
+    std::array<WalCheckpointIndexEntry, 2> index_entries{{
+        WalCheckpointIndexEntry{.index_id = 101U, .high_water_lsn = 4096U},
+        WalCheckpointIndexEntry{.index_id = 202U, .high_water_lsn = 8192U}
+    }};
+
+    const auto redo_lsn = wal_writer->next_lsn();
+    WalAppendResult append_result{};
+    REQUIRE_FALSE(checkpoint_manager->emit_checkpoint(77U,
+                                                      redo_lsn,
+                                                      redo_lsn,
+                                                      std::span<const WalCheckpointDirtyPageEntry>{},
+                                                      std::span<const WalCheckpointTxnEntry>{},
+                                                      index_entries,
+                                                      append_result));
+
+    REQUIRE_FALSE(wal_writer->flush());
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+    REQUIRE(plan.checkpoint_index_metadata.size() == index_entries.size());
+    for (std::size_t i = 0; i < index_entries.size(); ++i) {
+        CHECK(plan.checkpoint_index_metadata[i].index_id == index_entries[i].index_id);
+        CHECK(plan.checkpoint_index_metadata[i].high_water_lsn == index_entries[i].high_water_lsn);
+    }
 
     (void)std::filesystem::remove_all(wal_dir);
 }

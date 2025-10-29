@@ -217,11 +217,14 @@ std::size_t wal_overflow_truncate_payload_size(std::span<const WalOverflowChunkM
     return total;
 }
 
-std::size_t wal_checkpoint_payload_size(std::size_t dirty_page_count, std::size_t active_transaction_count)
+std::size_t wal_checkpoint_payload_size(std::size_t dirty_page_count,
+                                        std::size_t active_transaction_count,
+                                        std::size_t index_metadata_count)
 {
     return sizeof(WalCheckpointHeader)
         + (dirty_page_count * sizeof(WalCheckpointDirtyPageEntry))
-        + (active_transaction_count * sizeof(WalCheckpointTxnEntry));
+        + (active_transaction_count * sizeof(WalCheckpointTxnEntry))
+        + (index_metadata_count * sizeof(WalCheckpointIndexEntry));
 }
 
 std::size_t wal_compaction_payload_size(std::size_t entry_count)
@@ -310,12 +313,16 @@ bool encode_wal_commit(std::span<std::byte> buffer, const WalCommitHeader& heade
 bool encode_wal_checkpoint(std::span<std::byte> buffer,
                            const WalCheckpointHeader& header,
                            std::span<const WalCheckpointDirtyPageEntry> dirty_pages,
-                           std::span<const WalCheckpointTxnEntry> active_transactions)
+                           std::span<const WalCheckpointTxnEntry> active_transactions,
+                           std::span<const WalCheckpointIndexEntry> index_metadata)
 {
     if (dirty_pages.size() > std::numeric_limits<std::uint32_t>::max()) {
         return false;
     }
     if (active_transactions.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    if (index_metadata.size() > std::numeric_limits<std::uint32_t>::max()) {
         return false;
     }
 
@@ -325,8 +332,13 @@ bool encode_wal_checkpoint(std::span<std::byte> buffer,
     if (header.active_transaction_count != active_transactions.size()) {
         return false;
     }
+    if (header.index_metadata_count != index_metadata.size()) {
+        return false;
+    }
 
-    const auto required = wal_checkpoint_payload_size(dirty_pages.size(), active_transactions.size());
+    const auto required = wal_checkpoint_payload_size(dirty_pages.size(),
+                                                       active_transactions.size(),
+                                                       index_metadata.size());
     if (!fits(buffer, required)) {
         return false;
     }
@@ -344,6 +356,12 @@ bool encode_wal_checkpoint(std::span<std::byte> buffer,
     if (txn_bytes != 0U) {
         std::memcpy(buffer.data() + offset, active_transactions.data(), txn_bytes);
         offset += txn_bytes;
+    }
+
+    const auto index_bytes = index_metadata.size() * sizeof(WalCheckpointIndexEntry);
+    if (index_bytes != 0U) {
+        std::memcpy(buffer.data() + offset, index_metadata.data(), index_bytes);
+        offset += index_bytes;
     }
 
     (void)offset;
@@ -811,7 +829,9 @@ std::optional<WalCheckpointView> decode_wal_checkpoint(std::span<const std::byte
     WalCheckpointHeader header{};
     std::memcpy(&header, buffer.data(), sizeof(WalCheckpointHeader));
 
-    const auto required = wal_checkpoint_payload_size(header.dirty_page_count, header.active_transaction_count);
+    const auto required = wal_checkpoint_payload_size(header.dirty_page_count,
+                                                      header.active_transaction_count,
+                                                      header.index_metadata_count);
     if (!fits(buffer, required)) {
         return std::nullopt;
     }
@@ -833,6 +853,13 @@ std::optional<WalCheckpointView> decode_wal_checkpoint(std::span<const std::byte
         const auto txn_bytes = view.active_transactions.size() * sizeof(WalCheckpointTxnEntry);
         std::memcpy(view.active_transactions.data(), buffer.data() + offset, txn_bytes);
         offset += txn_bytes;
+    }
+
+    if (header.index_metadata_count != 0U) {
+        view.index_metadata.resize(header.index_metadata_count);
+        const auto index_bytes = view.index_metadata.size() * sizeof(WalCheckpointIndexEntry);
+        std::memcpy(view.index_metadata.data(), buffer.data() + offset, index_bytes);
+        offset += index_bytes;
     }
 
     return view;
