@@ -1,5 +1,6 @@
 #include "bored/storage/wal_recovery.hpp"
 
+#include "bored/storage/checkpoint_image_store.hpp"
 #include "bored/storage/temp_resource_registry.hpp"
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_payloads.hpp"
@@ -109,9 +110,11 @@ std::uint64_t last_valid_lsn(std::uint64_t start_lsn, const std::vector<WalRecor
 WalRecoveryDriver::WalRecoveryDriver(std::filesystem::path directory,
                                      std::string file_prefix,
                                      std::string file_extension,
-                                     TempResourceRegistry* temp_resource_registry)
+                                     TempResourceRegistry* temp_resource_registry,
+                                     std::filesystem::path checkpoint_directory)
     : reader_{std::move(directory), std::move(file_prefix), std::move(file_extension)}
     , temp_resource_registry_{temp_resource_registry}
+    , checkpoint_directory_{std::move(checkpoint_directory)}
 {
 }
 
@@ -121,6 +124,8 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
     plan.undo.clear();
     plan.undo_spans.clear();
     plan.transactions.clear();
+    plan.checkpoint_dirty_pages.clear();
+    plan.checkpoint_page_snapshots.clear();
     plan.temp_resource_registry = temp_resource_registry_;
     plan.truncated_tail = false;
     plan.truncated_segment_id = 0U;
@@ -128,6 +133,9 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
     plan.next_transaction_id_high_water = 0U;
     plan.oldest_active_transaction_id = 0U;
     plan.oldest_active_commit_lsn = 0U;
+    plan.checkpoint_id = 0U;
+    plan.checkpoint_redo_lsn = 0U;
+    plan.checkpoint_undo_lsn = 0U;
 
     std::vector<WalSegmentView> segments;
     if (auto ec = reader_.enumerate_segments(segments); ec) {
@@ -297,6 +305,16 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 if (!checkpoint) {
                     return std::make_error_code(std::errc::invalid_argument);
                 }
+                plan.checkpoint_id = checkpoint->header.checkpoint_id;
+                plan.checkpoint_redo_lsn = checkpoint->header.redo_lsn;
+                plan.checkpoint_undo_lsn = checkpoint->header.undo_lsn;
+                plan.checkpoint_dirty_pages.assign(checkpoint->dirty_pages.begin(), checkpoint->dirty_pages.end());
+                plan.checkpoint_page_snapshots.clear();
+                if (auto snapshot_ec = load_checkpoint_snapshots(plan.checkpoint_id, plan.checkpoint_page_snapshots); snapshot_ec) {
+                    if (snapshot_ec != std::make_error_code(std::errc::no_such_file_or_directory)) {
+                        return snapshot_ec;
+                    }
+                }
                 for (const auto& entry : checkpoint->active_transactions) {
                     if (entry.transaction_id == 0U) {
                         continue;
@@ -369,6 +387,19 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
     }
 
     return {};
+}
+
+std::error_code WalRecoveryDriver::load_checkpoint_snapshots(std::uint64_t checkpoint_id,
+                                                             std::vector<CheckpointPageSnapshot>& out) const
+{
+    out.clear();
+
+    if (checkpoint_directory_.empty() || checkpoint_id == 0U) {
+        return {};
+    }
+
+    CheckpointImageStore store{checkpoint_directory_};
+    return store.load(checkpoint_id, out);
 }
 
 }  // namespace bored::storage

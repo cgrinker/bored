@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bored/storage/checkpoint_types.hpp"
 #include "bored/storage/wal_reader.hpp"
 
 #include <cstddef>
@@ -46,6 +47,8 @@ struct WalRecoveryPlan final {
     std::vector<WalRecoveryRecord> undo{};
     std::vector<WalUndoSpan> undo_spans{};
     std::vector<WalRecoveredTransaction> transactions{};
+    std::vector<WalCheckpointDirtyPageEntry> checkpoint_dirty_pages{};
+    std::vector<CheckpointPageSnapshot> checkpoint_page_snapshots{};
     TempResourceRegistry* temp_resource_registry = nullptr;
     bool truncated_tail = false;
     std::uint64_t truncated_segment_id = 0U;
@@ -53,6 +56,9 @@ struct WalRecoveryPlan final {
     std::uint64_t next_transaction_id_high_water = 0U;
     std::uint64_t oldest_active_transaction_id = 0U;
     std::uint64_t oldest_active_commit_lsn = 0U;
+    std::uint64_t checkpoint_id = 0U;
+    std::uint64_t checkpoint_redo_lsn = 0U;
+    std::uint64_t checkpoint_undo_lsn = 0U;
 };
 
 class WalRecoveryDriver final {
@@ -60,13 +66,18 @@ public:
     WalRecoveryDriver(std::filesystem::path directory,
                       std::string file_prefix = "wal",
                       std::string file_extension = ".seg",
-                      TempResourceRegistry* temp_resource_registry = nullptr);
+                      TempResourceRegistry* temp_resource_registry = nullptr,
+                      std::filesystem::path checkpoint_directory = {});
 
     [[nodiscard]] std::error_code build_plan(WalRecoveryPlan& plan) const;
 
 private:
+    [[nodiscard]] std::error_code load_checkpoint_snapshots(std::uint64_t checkpoint_id,
+                                                            std::vector<CheckpointPageSnapshot>& out) const;
+
     WalReader reader_;
     TempResourceRegistry* temp_resource_registry_ = nullptr;
+    std::filesystem::path checkpoint_directory_{};
 };
 
 }  // namespace bored::storage

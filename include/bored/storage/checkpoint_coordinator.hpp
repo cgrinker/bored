@@ -14,6 +14,7 @@
 namespace bored::storage {
 
 class WalRetentionManager;
+class CheckpointImageStore;
 
 class CheckpointCoordinator final {
 public:
@@ -28,7 +29,8 @@ public:
 
     CheckpointCoordinator(std::shared_ptr<CheckpointManager> checkpoint_manager,
                           txn::TransactionManager& transaction_manager,
-                          WalRetentionManager& retention_manager) noexcept;
+                          WalRetentionManager& retention_manager,
+                          CheckpointImageStore* image_store = nullptr) noexcept;
 
     [[nodiscard]] std::error_code begin_checkpoint(std::uint64_t checkpoint_id,
                                                    ActiveCheckpoint& checkpoint);
@@ -45,6 +47,7 @@ private:
     std::shared_ptr<CheckpointManager> checkpoint_manager_{};
     txn::TransactionManager* transaction_manager_ = nullptr;
     WalRetentionManager* retention_manager_ = nullptr;
+    CheckpointImageStore* image_store_ = nullptr;
 };
 
 }  // namespace bored::storage

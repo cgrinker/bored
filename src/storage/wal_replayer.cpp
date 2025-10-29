@@ -675,6 +675,17 @@ WalReplayer::WalReplayer(WalReplayContext& context)
 
 std::error_code WalReplayer::apply_redo(const WalRecoveryPlan& plan)
 {
+    for (const auto& snapshot : plan.checkpoint_page_snapshots) {
+        if (snapshot.entry.page_id == 0U) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        if (snapshot.image.size() != kPageSize) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        context_.set_page(snapshot.entry.page_id,
+                          std::span<const std::byte>(snapshot.image.data(), snapshot.image.size()));
+    }
+
     for (const auto& record : plan.redo) {
         if (auto ec = apply_redo_record(record); ec) {
             return ec;

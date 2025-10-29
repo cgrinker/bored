@@ -133,7 +133,7 @@ TEST_CASE("WalRecoveryDriver builds redo and undo plan")
     REQUIRE_FALSE(writer.close());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     auto ec = driver.build_plan(plan);
     REQUIRE_FALSE(ec);
@@ -208,7 +208,7 @@ TEST_CASE("WalRecoveryDriver captures transaction allocator metadata")
     REQUIRE_FALSE(writer.close());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 
@@ -277,7 +277,7 @@ TEST_CASE("WalRecoveryDriver marks truncated tail")
     REQUIRE(new_size < truncated_size);
     std::filesystem::resize_file(segment_path, new_size);
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     auto ec = driver.build_plan(plan);
     REQUIRE_FALSE(ec);
@@ -325,7 +325,7 @@ TEST_CASE("WalRecoveryDriver flags in-flight transactions")
     REQUIRE_FALSE(writer.close());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 
@@ -378,7 +378,7 @@ TEST_CASE("WalReplayer purges executor temp resources after recovery")
     TempResourceRegistry registry;
     registry.register_directory(spill_dir);
 
-    WalRecoveryDriver driver{wal_dir, "wal", ".seg", &registry};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", &registry, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 
@@ -432,7 +432,7 @@ TEST_CASE("WalUndoWalker collates overflow undo records")
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 

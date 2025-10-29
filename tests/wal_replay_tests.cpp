@@ -27,6 +27,7 @@
 #include <memory>
 #include <system_error>
 #include <sstream>
+#include <span>
 #include <vector>
 
 using bored::storage::AsyncIo;
@@ -122,6 +123,52 @@ bored::storage::WalCommitHeader make_commit_header(const std::shared_ptr<WalWrit
 }
 
 }  // namespace
+
+TEST_CASE("WalReplayer rehydrates checkpoint page snapshots before redo", "[storage][wal][replay]")
+{
+    using namespace bored::storage;
+
+    constexpr std::uint32_t page_id = 4242U;
+
+    std::array<std::byte, kPageSize> snapshot_image{};
+    auto snapshot_span = std::span<std::byte>(snapshot_image.data(), snapshot_image.size());
+    REQUIRE(initialize_page(snapshot_span, PageType::Table, page_id, 0U, nullptr));
+    snapshot_span[128] = std::byte{0xAA};
+    snapshot_span[409] = std::byte{0xBC};
+
+    SECTION("rehydrates valid snapshot")
+    {
+        WalRecoveryPlan plan{};
+        WalCheckpointDirtyPageSnapshot snapshot{};
+        snapshot.entry.page_id = page_id;
+        snapshot.entry.page_lsn = 8192U;
+        snapshot.page_type = PageType::Table;
+        snapshot.image.assign(snapshot_image.begin(), snapshot_image.end());
+    plan.checkpoint_page_snapshots.push_back(snapshot);
+
+        WalReplayContext context{};
+        WalReplayer replayer{context};
+        REQUIRE_FALSE(replayer.apply_redo(plan));
+
+        auto hydrated = context.get_page(page_id);
+        REQUIRE(hydrated.size() == snapshot_image.size());
+        CHECK(std::memcmp(hydrated.data(), snapshot_image.data(), snapshot_image.size()) == 0);
+    }
+
+    SECTION("rejects snapshot with invalid image length")
+    {
+        WalRecoveryPlan plan{};
+        WalCheckpointDirtyPageSnapshot snapshot{};
+        snapshot.entry.page_id = page_id;
+        snapshot.image.resize(kPageSize - 1U, std::byte{0});
+    plan.checkpoint_page_snapshots.push_back(snapshot);
+
+        WalReplayContext context{};
+        WalReplayer replayer{context};
+        auto ec = replayer.apply_redo(plan);
+        CHECK(ec == std::make_error_code(std::errc::invalid_argument));
+    }
+}
 
 TEST_CASE("WalReplayer rebuilds index leaf split pages")
 {
@@ -298,6 +345,7 @@ TEST_CASE("WalReplayer rebuilds index leaf split pages")
     };
 
     verify_page(split_header.left_page_id, left_slots, left_payload, split_header.right_page_id);
+
     verify_page(split_header.right_page_id, right_slots, right_payload, split_header.right_sibling_page_id);
 
     {
@@ -518,7 +566,7 @@ TEST_CASE("WalReplayer replays committed tuple changes")
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
     REQUIRE_FALSE(plan.truncated_tail);
@@ -834,7 +882,7 @@ TEST_CASE("WalReplayer undoes uncommitted update using before image")
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 
@@ -910,7 +958,7 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
 
     auto baseline_page = page_buffer;
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 
@@ -1046,7 +1094,7 @@ TEST_CASE("WalReplayer undo overflow insert removes stub")
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 
@@ -1123,7 +1171,7 @@ TEST_CASE("Wal crash drill restores overflow before image")
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 
@@ -1282,7 +1330,7 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 
@@ -1475,7 +1523,7 @@ TEST_CASE("Wal crash drill restores catalog tuple before image")
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
     REQUIRE_FALSE(plan.redo.empty());
@@ -1582,7 +1630,7 @@ TEST_CASE("Wal crash drill restores index descriptor before image")
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
     REQUIRE_FALSE(plan.redo.empty());
@@ -1730,7 +1778,7 @@ TEST_CASE("Wal crash drill rolls back catalog id allocator counters")
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
     REQUIRE_FALSE(plan.redo.empty());
@@ -1854,7 +1902,7 @@ TEST_CASE("Wal crash drill preserves committed allocator counters during concurr
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
     REQUIRE_FALSE(plan.redo.empty());
@@ -1998,7 +2046,7 @@ TEST_CASE("Wal crash drill detects catalog before image corruption")
     REQUIRE_FALSE(manager.close_wal());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
     REQUIRE_FALSE(plan.redo.empty());
@@ -2111,7 +2159,7 @@ TEST_CASE("WalReplayer replays page compaction")
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 
@@ -2327,7 +2375,7 @@ TEST_CASE("Wal recovery replays mixed heap and index workloads across restart")
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
 
-    WalRecoveryDriver driver{wal_dir};
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
 

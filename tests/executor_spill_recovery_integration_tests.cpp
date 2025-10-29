@@ -115,7 +115,11 @@ TEST_CASE("Executor spill retention and recovery purge staged artifacts", "[exec
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
 
-    WalRecoveryDriver recovery_driver{wal_dir, wal_config.file_prefix, wal_config.file_extension, &manager.registry()};
+    WalRecoveryDriver recovery_driver{wal_dir,
+                                      wal_config.file_prefix,
+                                      wal_config.file_extension,
+                                      &manager.registry(),
+                                      wal_dir / "checkpoints"};
     WalRecoveryPlan recovery_plan{};
     REQUIRE_FALSE(recovery_driver.build_plan(recovery_plan));
     REQUIRE(recovery_plan.temp_resource_registry == &manager.registry());

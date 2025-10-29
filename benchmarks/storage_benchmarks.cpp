@@ -410,7 +410,7 @@ OverflowFixture build_overflow_fixture(const BenchmarkOptions& options)
     throw_if_error(manager.close_wal(), "close_wal");
     io->shutdown();
 
-    bs::WalRecoveryDriver driver{wal_dir};
+    bs::WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     throw_if_error(driver.build_plan(fixture.plan), "build_plan");
 
     for (const auto& record : fixture.plan.undo) {

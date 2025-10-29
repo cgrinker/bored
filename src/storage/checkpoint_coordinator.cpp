@@ -1,15 +1,20 @@
 #include "bored/storage/checkpoint_coordinator.hpp"
 
+#include "bored/storage/checkpoint_image_store.hpp"
+
+#include <span>
 #include <utility>
 
 namespace bored::storage {
 
 CheckpointCoordinator::CheckpointCoordinator(std::shared_ptr<CheckpointManager> checkpoint_manager,
                                              txn::TransactionManager& transaction_manager,
-                                             WalRetentionManager& retention_manager) noexcept
+                                             WalRetentionManager& retention_manager,
+                                             CheckpointImageStore* image_store) noexcept
     : checkpoint_manager_{std::move(checkpoint_manager)}
     , transaction_manager_{&transaction_manager}
     , retention_manager_{&retention_manager}
+    , image_store_{image_store}
 {
 }
 
@@ -58,6 +63,18 @@ std::error_code CheckpointCoordinator::commit_checkpoint(ActiveCheckpoint& check
                                                    checkpoint.snapshot.dirty_pages,
                                                    checkpoint.snapshot.active_transactions,
                                                    out_result);
+
+    if (!ec && image_store_ != nullptr) {
+        auto persist_ec = image_store_->persist(checkpoint.checkpoint_id,
+                                                std::span<const CheckpointPageSnapshot>(checkpoint.snapshot.page_snapshots.data(),
+                                                                                         checkpoint.snapshot.page_snapshots.size()));
+        if (!persist_ec) {
+            persist_ec = image_store_->discard_older_than(checkpoint.checkpoint_id);
+        }
+        if (persist_ec) {
+            ec = persist_ec;
+        }
+    }
 
     checkpoint.transaction_fence.release();
     checkpoint.retention_pin.release();

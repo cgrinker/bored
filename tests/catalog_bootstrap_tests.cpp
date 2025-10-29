@@ -165,7 +165,7 @@ TEST_CASE("Catalog bootstrap WAL replay rehydrates pages")
     auto ec = bootstrapper.run(artifacts);
     REQUIRE_FALSE(ec);
 
-    storage::WalRecoveryDriver driver{wal_dir, wal_config.file_prefix, wal_config.file_extension};
+    storage::WalRecoveryDriver driver{wal_dir, wal_config.file_prefix, wal_config.file_extension, nullptr, wal_dir / "checkpoints"};
     storage::WalRecoveryPlan plan;
     REQUIRE_FALSE(driver.build_plan(plan));
     INFO("redo_count=" << plan.redo.size());

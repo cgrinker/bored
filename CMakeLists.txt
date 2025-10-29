@@ -30,6 +30,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/page_operations.cpp
     src/storage/free_space_map.cpp
     src/storage/checkpoint_manager.cpp
+    src/storage/checkpoint_image_store.cpp
     src/storage/checkpoint_coordinator.cpp
     src/storage/checkpoint_scheduler.cpp
     src/storage/wal_payloads.cpp

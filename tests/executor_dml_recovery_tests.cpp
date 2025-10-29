@@ -572,7 +572,7 @@ TEST_CASE("DML executors recover committed work and rollback in-flight deletes",
     CHECK(count_type(WalRecordType::Commit) == 1);
 
     // Build recovery plan
-    WalRecoveryDriver recovery_driver{wal_dir};
+    WalRecoveryDriver recovery_driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(recovery_driver.build_plan(plan));
 

@@ -18,11 +18,12 @@ The checkpoint and recovery coordination layer integrates relational components 
 ## Milestone 1: Catalog & Data Page Snapshots
 - **Goals:** Capture consistent catalog and heap page images during checkpoints and restore them on restart.
 - **Key Tasks:**
-  - [ ] Wire catalog bootstrapper and page manager to the coordination contract to flush dirty catalog and heap pages.
-  - [ ] Persist transaction-visible catalog snapshots alongside checkpoint metadata.
-  - [ ] Update recovery driver to hydrate catalog and heap pages from the most recent checkpoint before replaying WAL.
+  - [x] Wire catalog bootstrapper and page manager to the coordination contract to flush dirty catalog and heap pages.
+  - [x] Persist transaction-visible catalog snapshots alongside checkpoint metadata.
+  - [x] Update recovery driver to hydrate catalog and heap pages from the most recent checkpoint before replaying WAL.
 - **Exit Criteria:**
-  - [ ] End-to-end test demonstrates catalog mutations committed before the checkpoint survive restart without replaying WAL past the checkpoint LSN.
+  - [x] End-to-end test demonstrates catalog mutations committed before the checkpoint survive restart without replaying WAL past the checkpoint LSN.
+- **Status:** Complete — catalog bootstrapper and page manager feed checkpoint snapshots into `CheckpointImageStore`, recovery plans hydrate them prior to redo, and restart drills confirm catalog mutations survive without replaying beyond the checkpoint LSN.
 
 ## Milestone 2: Index Integration
 - **Goals:** Extend checkpoint capture and recovery to cover B+Tree index segments and associated WAL ownership metadata.

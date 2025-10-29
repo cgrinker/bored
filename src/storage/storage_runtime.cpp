@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <exception>
+#include <filesystem>
 #include <span>
 #include <utility>
 
@@ -206,10 +207,12 @@ IndexRetentionManager* StorageRuntime::index_retention_manager() const noexcept
 
 WalRecoveryDriver StorageRuntime::make_recovery_driver() const
 {
+    const auto checkpoint_directory = wal_writer_config_.directory / "checkpoints";
     return WalRecoveryDriver{wal_writer_config_.directory,
                              wal_writer_config_.file_prefix,
                              wal_writer_config_.file_extension,
-                             const_cast<TempResourceRegistry*>(&temp_registry())};
+                             const_cast<TempResourceRegistry*>(&temp_registry()),
+                             checkpoint_directory};
 }
 
 }  // namespace bored::storage

@@ -167,7 +167,7 @@ TEST_CASE("Crash recovery preserves committed changes and rolls back aborting tr
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
 
-    WalRecoveryDriver recovery_driver{wal_dir};
+    WalRecoveryDriver recovery_driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan recovery_plan{};
     REQUIRE_FALSE(recovery_driver.build_plan(recovery_plan));
 
