@@ -1,18 +1,20 @@
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
-#include "bored/storage/index_btree_manager.hpp"
-#include "bored/storage/index_btree_page.hpp"
-#include "bored/storage/index_btree_leaf_ops.hpp"
-#include "bored/storage/wal_replayer.hpp"
-#include "bored/storage/wal_recovery.hpp"
-#include "bored/storage/wal_undo_walker.hpp"
-#include "bored/storage/wal_writer.hpp"
-#include "bored/storage/wal_payloads.hpp"
-#include "bored/storage/page_operations.hpp"
-#include "bored/storage/page_manager.hpp"
+#include "bored/storage/async_io.hpp"
+#include "bored/storage/checkpoint_image_store.hpp"
+#include "bored/storage/checkpoint_manager.hpp"
 #include "bored/storage/free_space_map.hpp"
 #include "bored/storage/free_space_map_persistence.hpp"
-#include "bored/storage/async_io.hpp"
+#include "bored/storage/index_btree_leaf_ops.hpp"
+#include "bored/storage/index_btree_manager.hpp"
+#include "bored/storage/index_btree_page.hpp"
+#include "bored/storage/page_manager.hpp"
+#include "bored/storage/page_operations.hpp"
+#include "bored/storage/wal_payloads.hpp"
+#include "bored/storage/wal_recovery.hpp"
+#include "bored/storage/wal_replayer.hpp"
+#include "bored/storage/wal_undo_walker.hpp"
+#include "bored/storage/wal_writer.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -28,6 +30,7 @@
 #include <system_error>
 #include <sstream>
 #include <span>
+#include <string>
 #include <vector>
 
 using bored::storage::AsyncIo;
@@ -37,6 +40,7 @@ using bored::storage::FreeSpaceMap;
 using bored::storage::FreeSpaceMapPersistence;
 using bored::storage::PageManager;
 using bored::storage::PageType;
+using bored::storage::CheckpointIndexMetadata;
 using bored::storage::WalRecoveryDriver;
 using bored::storage::WalRecoveryPlan;
 using bored::storage::WalRecoveryRecord;
@@ -138,8 +142,8 @@ TEST_CASE("WalReplayer rehydrates checkpoint page snapshots before redo", "[stor
 
     SECTION("rehydrates valid snapshot")
     {
-        WalRecoveryPlan plan{};
-        WalCheckpointDirtyPageSnapshot snapshot{};
+    WalRecoveryPlan plan{};
+    CheckpointPageSnapshot snapshot{};
         snapshot.entry.page_id = page_id;
         snapshot.entry.page_lsn = 8192U;
         snapshot.page_type = PageType::Table;
@@ -157,8 +161,8 @@ TEST_CASE("WalReplayer rehydrates checkpoint page snapshots before redo", "[stor
 
     SECTION("rejects snapshot with invalid image length")
     {
-        WalRecoveryPlan plan{};
-        WalCheckpointDirtyPageSnapshot snapshot{};
+    WalRecoveryPlan plan{};
+    CheckpointPageSnapshot snapshot{};
         snapshot.entry.page_id = page_id;
         snapshot.image.resize(kPageSize - 1U, std::byte{0});
     plan.checkpoint_page_snapshots.push_back(snapshot);
@@ -167,6 +171,47 @@ TEST_CASE("WalReplayer rehydrates checkpoint page snapshots before redo", "[stor
         WalReplayer replayer{context};
         auto ec = replayer.apply_redo(plan);
         CHECK(ec == std::make_error_code(std::errc::invalid_argument));
+    }
+
+    SECTION("rehydrates index snapshot and checkpoint metadata")
+    {
+        WalRecoveryPlan plan{};
+
+        std::array<std::byte, kPageSize> index_image{};
+        auto index_span = std::span<std::byte>(index_image.data(), index_image.size());
+        const std::uint64_t snapshot_lsn = 12288U;
+        REQUIRE(bored::storage::initialize_page(index_span, PageType::Index, page_id, snapshot_lsn, nullptr));
+        auto* index_header_ptr = reinterpret_cast<bored::storage::IndexBtreePageHeader*>(index_span.data() + kIndexHeaderOffset);
+        index_header_ptr->magic = bored::storage::kIndexPageMagic;
+        index_header_ptr->version = bored::storage::kIndexPageVersion;
+        index_header_ptr->flags = bored::storage::kIndexPageFlagLeaf;
+        index_span[256] = std::byte{0x44};
+        index_span[512] = std::byte{0x99};
+
+        CheckpointPageSnapshot snapshot{};
+        snapshot.entry.page_id = page_id;
+        snapshot.entry.page_lsn = snapshot_lsn;
+        snapshot.page_type = PageType::Index;
+        snapshot.image.assign(index_image.begin(), index_image.end());
+        plan.checkpoint_page_snapshots.push_back(snapshot);
+
+        CheckpointIndexMetadata metadata{};
+        metadata.index_id = 55U;
+        metadata.high_water_lsn = snapshot_lsn;
+        plan.checkpoint_index_metadata.push_back(metadata);
+
+        WalReplayContext context{};
+        WalReplayer replayer{context};
+        REQUIRE_FALSE(replayer.apply_redo(plan));
+
+        auto hydrated = context.get_page(page_id);
+        REQUIRE(hydrated.size() == index_image.size());
+        CHECK(std::memcmp(hydrated.data(), index_image.data(), index_image.size()) == 0);
+
+        const auto& checkpoint_metadata = context.checkpoint_index_metadata();
+        REQUIRE(checkpoint_metadata.size() == 1U);
+        CHECK(checkpoint_metadata.front().index_id == metadata.index_id);
+        CHECK(checkpoint_metadata.front().high_water_lsn == metadata.high_water_lsn);
     }
 }
 
@@ -2405,6 +2450,162 @@ TEST_CASE("Wal recovery replays mixed heap and index workloads across restart")
     auto replay_right = context.get_page(split_header.right_page_id);
     auto expected_right_const = std::span<const std::byte>(expected_right_page.data(), expected_right_page.size());
     REQUIRE(std::equal(replay_right.begin(), replay_right.end(), expected_right_const.begin(), expected_right_const.end()));
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("Wal crash drill rehydrates checkpointed heap and index pages")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_checkpoint_heap_index_crash_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 128U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+
+    constexpr std::uint32_t heap_page_id = 81'000U;
+    constexpr std::uint32_t index_page_id = 91'000U;
+    constexpr std::uint64_t checkpoint_id = 11'500U;
+    constexpr std::uint64_t index_identifier = 61'500U;
+    constexpr std::uint64_t checkpoint_lsn = bored::storage::kWalBlockSize * 6U;
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> heap_snapshot{};
+    auto heap_span = std::span<std::byte>(heap_snapshot.data(), heap_snapshot.size());
+    REQUIRE(bored::storage::initialize_page(heap_span, PageType::Table, heap_page_id, checkpoint_lsn));
+
+    struct HeapTuple final {
+        std::string label{};
+        std::uint64_t key = 0U;
+        std::uint16_t slot = 0U;
+    };
+
+    std::array<HeapTuple, 3> tuples{{
+        HeapTuple{"order_100", 100U, 0U},
+        HeapTuple{"order_200", 200U, 0U},
+        HeapTuple{"order_300", 300U, 0U}
+    }};
+
+    for (auto& tuple : tuples) {
+        std::vector<std::byte> payload(tuple.label.size());
+        std::memcpy(payload.data(), tuple.label.data(), tuple.label.size());
+        auto slot = bored::storage::append_tuple(heap_span,
+                                                 std::span<const std::byte>(payload.data(), payload.size()),
+                                                 checkpoint_lsn);
+        REQUIRE(slot);
+        tuple.slot = slot->index;
+    }
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> index_snapshot{};
+    auto index_span = std::span<std::byte>(index_snapshot.data(), index_snapshot.size());
+    REQUIRE_FALSE(bored::storage::initialize_index_page(index_span, index_page_id, 0U, true, checkpoint_lsn, nullptr));
+
+    std::vector<bored::storage::IndexBtreeLeafEntry> leaf_entries;
+    leaf_entries.reserve(tuples.size());
+    for (const auto& tuple : tuples) {
+        bored::storage::IndexBtreeLeafEntry entry{};
+        entry.pointer.heap_page_id = heap_page_id;
+        entry.pointer.heap_slot_id = tuple.slot;
+        std::array<std::byte, sizeof(tuple.key)> key_buffer{};
+        std::memcpy(key_buffer.data(), &tuple.key, sizeof(tuple.key));
+        entry.key.assign(key_buffer.begin(), key_buffer.end());
+        leaf_entries.push_back(std::move(entry));
+    }
+
+    REQUIRE(bored::storage::rebuild_index_leaf_page(index_span,
+                                                    std::span<const bored::storage::IndexBtreeLeafEntry>(leaf_entries.data(), leaf_entries.size()),
+                                                    checkpoint_lsn));
+
+    bored::storage::CheckpointPageSnapshot heap_page_snapshot{};
+    heap_page_snapshot.entry.page_id = heap_page_id;
+    heap_page_snapshot.entry.page_lsn = checkpoint_lsn;
+    heap_page_snapshot.page_type = PageType::Table;
+    heap_page_snapshot.image.assign(heap_snapshot.begin(), heap_snapshot.end());
+
+    bored::storage::CheckpointPageSnapshot index_page_snapshot{};
+    index_page_snapshot.entry.page_id = index_page_id;
+    index_page_snapshot.entry.page_lsn = checkpoint_lsn;
+    index_page_snapshot.page_type = PageType::Index;
+    index_page_snapshot.image.assign(index_snapshot.begin(), index_snapshot.end());
+
+    std::array<bored::storage::CheckpointPageSnapshot, 2> snapshots{{heap_page_snapshot, index_page_snapshot}};
+
+    bored::storage::CheckpointImageStore image_store{wal_dir / "checkpoints"};
+    auto persist_ec = image_store.persist(checkpoint_id,
+                                          std::span<const bored::storage::CheckpointPageSnapshot>(snapshots.data(), snapshots.size()));
+    REQUIRE_FALSE(persist_ec);
+
+    std::array<bored::storage::WalCheckpointDirtyPageEntry, 2> dirty_pages{{
+        bored::storage::WalCheckpointDirtyPageEntry{.page_id = heap_page_id, .reserved = 0U, .page_lsn = checkpoint_lsn},
+        bored::storage::WalCheckpointDirtyPageEntry{.page_id = index_page_id, .reserved = 0U, .page_lsn = checkpoint_lsn}
+    }};
+
+    std::array<bored::storage::WalCheckpointIndexEntry, 1> index_entries{{
+        bored::storage::WalCheckpointIndexEntry{.index_id = index_identifier, .high_water_lsn = checkpoint_lsn}
+    }};
+
+    bored::storage::CheckpointManager checkpoint_manager{wal_writer};
+    bored::storage::WalAppendResult checkpoint_append{};
+    auto emit_ec = checkpoint_manager.emit_checkpoint(checkpoint_id,
+                                                      checkpoint_lsn,
+                                                      checkpoint_lsn,
+                                                      std::span<const bored::storage::WalCheckpointDirtyPageEntry>(dirty_pages.data(), dirty_pages.size()),
+                                                      std::span<const bored::storage::WalCheckpointTxnEntry>{},
+                                                      std::span<const bored::storage::WalCheckpointIndexEntry>(index_entries.data(), index_entries.size()),
+                                                      checkpoint_append);
+    REQUIRE_FALSE(emit_ec);
+    REQUIRE(checkpoint_append.written_bytes > 0U);
+
+    REQUIRE_FALSE(wal_writer->flush());
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+    REQUIRE(plan.checkpoint_id == checkpoint_id);
+    REQUIRE(plan.checkpoint_page_snapshots.size() == snapshots.size());
+    REQUIRE(plan.checkpoint_index_metadata.size() == index_entries.size());
+
+    // The replayer seeds checkpoint snapshots up front and ignores checkpoint records, so drop them here.
+    plan.redo.erase(std::remove_if(plan.redo.begin(),
+                                   plan.redo.end(),
+                                   [](const WalRecoveryRecord& record) {
+                                       return static_cast<WalRecordType>(record.header.type) == WalRecordType::Checkpoint;
+                                   }),
+                    plan.redo.end());
+
+    REQUIRE(plan.redo.empty());
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Table, &replay_fsm};
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> crash_heap{};
+    crash_heap.fill(std::byte{0xAB});
+    context.set_page(heap_page_id, std::span<const std::byte>(crash_heap.data(), crash_heap.size()));
+
+    alignas(8) std::array<std::byte, bored::storage::kPageSize> crash_index{};
+    crash_index.fill(std::byte{0xCD});
+    context.set_page(index_page_id, std::span<const std::byte>(crash_index.data(), crash_index.size()));
+
+    WalReplayer replayer{context};
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+
+    auto restored_heap = context.get_page(heap_page_id);
+    auto expected_heap = std::span<const std::byte>(heap_snapshot.data(), heap_snapshot.size());
+    REQUIRE(std::equal(restored_heap.begin(), restored_heap.end(), expected_heap.begin(), expected_heap.end()));
+
+    auto restored_index = context.get_page(index_page_id);
+    auto expected_index = std::span<const std::byte>(index_snapshot.data(), index_snapshot.size());
+    REQUIRE(std::equal(restored_index.begin(), restored_index.end(), expected_index.begin(), expected_index.end()));
+
+    const auto& metadata = context.checkpoint_index_metadata();
+    REQUIRE(metadata.size() == index_entries.size());
+    CHECK(metadata.front().index_id == index_identifier);
+    CHECK(metadata.front().high_water_lsn == checkpoint_lsn);
 
     (void)std::filesystem::remove_all(wal_dir);
 }

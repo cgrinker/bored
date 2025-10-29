@@ -28,11 +28,12 @@ The checkpoint and recovery coordination layer integrates relational components 
 ## Milestone 2: Index Integration
 - **Goals:** Extend checkpoint capture and recovery to cover B+Tree index segments and associated WAL ownership metadata.
 - **Key Tasks:**
-  - [ ] Teach index maintenance operators to register dirty index pages with the checkpoint coordinator.
-  - [ ] Capture per-index high-water marks for WAL ownership so retention pruning honours index replay requirements.
-  - [ ] Rehydrate index structures from checkpoint images, falling back to WAL replay for tail segments as needed.
+  - [x] Teach index maintenance operators to register dirty index pages with the checkpoint coordinator.
+  - [x] Capture per-index high-water marks for WAL ownership so retention pruning honours index replay requirements.
+  - [x] Rehydrate index structures from checkpoint images, falling back to WAL replay for tail segments as needed.
 - **Exit Criteria:**
-  - [ ] Crash-restart drill with mixed heap/index workload recovers to checkpoint state, including secondary index integrity.
+  - [x] Crash-restart drill with mixed heap/index workload recovers to checkpoint state, including secondary index integrity.
+- **Status:** Complete — `IndexBtreeManager` publishes dirty page and ownership LSNs into `IndexCheckpointRegistry`, recovery hydrates checkpointed index pages and metadata, and `Wal crash drill rehydrates checkpointed heap and index pages` confirms mixed workloads restart cleanly with index high-water constraints enforced.
 
 ## Milestone 3: Incremental & Concurrent Checkpoints
 - **Goals:** Support incremental checkpoints and overlap checkpoint preparation with ongoing workload under isolation guarantees.
