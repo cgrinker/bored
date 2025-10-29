@@ -49,6 +49,8 @@ struct CatalogIndexView final {
     RelationId relation_id{};
     CatalogIndexType index_type = CatalogIndexType::Unknown;
     std::uint32_t root_page_id = 0U;
+    std::uint16_t max_fanout = 0U;
+    std::string_view comparator{};
     std::string_view name{};
 };
 
@@ -56,7 +58,7 @@ struct CatalogIndexView final {
 [[nodiscard]] std::size_t catalog_schema_tuple_size(std::string_view name) noexcept;
 [[nodiscard]] std::size_t catalog_table_tuple_size(std::string_view name) noexcept;
 [[nodiscard]] std::size_t catalog_column_tuple_size(std::string_view name) noexcept;
-[[nodiscard]] std::size_t catalog_index_tuple_size(std::string_view name) noexcept;
+[[nodiscard]] std::size_t catalog_index_tuple_size(std::string_view name, std::string_view comparator) noexcept;
 
 [[nodiscard]] std::vector<std::byte> serialize_catalog_database(const CatalogDatabaseDescriptor& descriptor);
 [[nodiscard]] std::vector<std::byte> serialize_catalog_schema(const CatalogSchemaDescriptor& descriptor);

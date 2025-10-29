@@ -122,6 +122,8 @@ struct CatalogIndexDescriptor final {
     RelationId relation_id{};
     CatalogIndexType index_type = CatalogIndexType::Unknown;
     std::uint32_t root_page_id = 0U;
+    std::uint16_t max_fanout = 0U;
+    std::string_view comparator{};
     std::string_view name{};
 
     constexpr CatalogIndexDescriptor() = default;
@@ -130,12 +132,16 @@ struct CatalogIndexDescriptor final {
                                      RelationId relation,
                                      CatalogIndexType type,
                                      std::uint32_t root_page,
+                                     std::uint16_t fanout,
+                                     std::string_view comparator_view,
                                      std::string_view name_view) noexcept
         : tuple{tuple_descriptor}
         , index_id{index}
         , relation_id{relation}
         , index_type{type}
         , root_page_id{root_page}
+        , max_fanout{fanout}
+        , comparator{comparator_view}
         , name{name_view}
     {}
 };

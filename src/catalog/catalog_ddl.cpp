@@ -1,6 +1,7 @@
 #include "bored/catalog/catalog_ddl.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace bored::catalog {
 
@@ -151,6 +152,18 @@ std::error_code stage_create_index(CatalogMutator& mutator,
         return invalid_argument();
     }
 
+    if (request.max_fanout == 0U) {
+        return invalid_argument();
+    }
+
+    if (request.comparator.empty()) {
+        return invalid_argument();
+    }
+
+    if (request.comparator.size() > std::numeric_limits<std::uint16_t>::max()) {
+        return invalid_argument();
+    }
+
     CatalogTupleDescriptor tuple = CatalogTupleBuilder::for_insert(mutator.transaction());
 
     CatalogIndexDescriptor descriptor{};
@@ -159,6 +172,8 @@ std::error_code stage_create_index(CatalogMutator& mutator,
     descriptor.relation_id = request.relation_id;
     descriptor.index_type = request.index_type;
     descriptor.root_page_id = root_page_id;
+    descriptor.max_fanout = request.max_fanout;
+    descriptor.comparator = request.comparator;
     descriptor.name = request.name;
 
     auto payload = serialize_catalog_index(descriptor);
@@ -166,6 +181,8 @@ std::error_code stage_create_index(CatalogMutator& mutator,
 
     result.index_id = index_id;
     result.root_page_id = root_page_id;
+    result.max_fanout = request.max_fanout;
+    result.comparator = request.comparator;
     return {};
 }
 

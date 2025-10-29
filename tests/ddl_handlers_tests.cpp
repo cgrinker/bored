@@ -206,10 +206,15 @@ std::vector<std::byte> make_column_payload(catalog::ColumnId column_id,
     return catalog::serialize_catalog_column(descriptor);
 }
 
+constexpr std::uint16_t kTestDefaultFanout = 96U;
+constexpr std::string_view kTestDefaultComparator = "int64_ascending";
+
 std::vector<std::byte> make_index_payload(catalog::IndexId index_id,
                                           catalog::RelationId relation_id,
                                           std::string_view name,
-                                          std::uint32_t root_page_id)
+                                          std::uint32_t root_page_id,
+                                          std::uint16_t max_fanout,
+                                          std::string_view comparator)
 {
     catalog::CatalogIndexDescriptor descriptor{};
     descriptor.tuple = make_seed_descriptor();
@@ -217,6 +222,8 @@ std::vector<std::byte> make_index_payload(catalog::IndexId index_id,
     descriptor.relation_id = relation_id;
     descriptor.index_type = catalog::CatalogIndexType::BTree;
     descriptor.root_page_id = root_page_id;
+    descriptor.max_fanout = max_fanout;
+    descriptor.comparator = comparator;
     descriptor.name = name;
     return catalog::serialize_catalog_index(descriptor);
 }
@@ -271,6 +278,8 @@ CatalogIndexDescriptor decode_index(const std::vector<std::byte>& payload)
     descriptor.relation_id = view->relation_id;
     descriptor.index_type = view->index_type;
     descriptor.root_page_id = view->root_page_id;
+    descriptor.max_fanout = view->max_fanout;
+    descriptor.comparator = view->comparator;
     descriptor.name = view->name;
     return descriptor;
 }
@@ -320,9 +329,16 @@ struct DispatcherHarness final {
         storage_.seed(catalog::kCatalogColumnsRelationId, column_id.value, make_column_payload(column_id, relation_id, name, ordinal));
     }
 
-    void seed_index(catalog::IndexId index_id, catalog::RelationId relation_id, std::string_view name, std::uint32_t root_page_id)
+    void seed_index(catalog::IndexId index_id,
+                    catalog::RelationId relation_id,
+                    std::string_view name,
+                    std::uint32_t root_page_id,
+                    std::uint16_t max_fanout = kTestDefaultFanout,
+                    std::string_view comparator = kTestDefaultComparator)
     {
-        storage_.seed(catalog::kCatalogIndexesRelationId, index_id.value, make_index_payload(index_id, relation_id, name, root_page_id));
+        storage_.seed(catalog::kCatalogIndexesRelationId,
+                      index_id.value,
+                      make_index_payload(index_id, relation_id, name, root_page_id, max_fanout, comparator));
     }
 
     [[nodiscard]] const InMemoryCatalogStorage::Relation& schemas() const
@@ -756,6 +772,8 @@ TEST_CASE("Index telemetry tracks build durations and failures")
         CHECK(column.name == "id");
         std::this_thread::sleep_for(50us);
         plan.root_page_id = 9'999U;
+        plan.max_fanout = 142U;
+        plan.comparator = "int64_ascending";
         plan.finalize = [](const catalog::CreateIndexResult&, catalog::CatalogMutator&) -> std::error_code {
             return {};
         };
@@ -910,9 +928,13 @@ TEST_CASE("Create index storage hook reserves root page")
         CHECK(table.name == "metrics");
         CHECK(column.name == "id");
         plan.root_page_id = expected_root_page;
+        plan.max_fanout = 150U;
+        plan.comparator = "int64_ascending";
         plan.finalize = [&, expected_root_page](const catalog::CreateIndexResult& result, catalog::CatalogMutator&) -> std::error_code {
             finalize_invoked = true;
             CHECK(result.root_page_id == expected_root_page);
+            CHECK(result.max_fanout == plan.max_fanout);
+            CHECK(result.comparator == plan.comparator);
             return {};
         };
         return {};
@@ -942,6 +964,8 @@ TEST_CASE("Create index storage hook reserves root page")
     const auto indexes = harness.list_indexes();
     REQUIRE(indexes.size() == 1U);
     CHECK(indexes.front().root_page_id == expected_root_page);
+    CHECK(indexes.front().max_fanout == 150U);
+    CHECK(indexes.front().comparator == "int64_ascending");
 }
 
 TEST_CASE("Drop index removes catalog metadata")

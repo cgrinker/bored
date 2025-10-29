@@ -147,7 +147,7 @@ std::error_code CatalogBootstrapper::bootstrap_tables(std::span<std::byte> page)
 std::error_code CatalogBootstrapper::bootstrap_columns(std::span<std::byte> page) const
 {
     const CatalogTupleDescriptor tuple = bootstrap_tuple();
-    const std::array<CatalogColumnDescriptor, 19> columns{
+    const std::array<CatalogColumnDescriptor, 22> columns{
         CatalogColumnDescriptor{tuple, kCatalogDatabasesIdColumnId, kCatalogDatabasesRelationId, CatalogColumnType::Int64, 1U, "database_id"},
         CatalogColumnDescriptor{tuple, kCatalogDatabasesNameColumnId, kCatalogDatabasesRelationId, CatalogColumnType::Utf8, 2U, "name"},
         CatalogColumnDescriptor{tuple, kCatalogSchemasIdColumnId, kCatalogSchemasRelationId, CatalogColumnType::Int64, 1U, "schema_id"},
@@ -166,7 +166,10 @@ std::error_code CatalogBootstrapper::bootstrap_columns(std::span<std::byte> page
         CatalogColumnDescriptor{tuple, kCatalogIndexesIdColumnId, kCatalogIndexesRelationId, CatalogColumnType::Int64, 1U, "index_id"},
         CatalogColumnDescriptor{tuple, kCatalogIndexesTableColumnId, kCatalogIndexesRelationId, CatalogColumnType::Int64, 2U, "table_id"},
         CatalogColumnDescriptor{tuple, kCatalogIndexesTypeColumnId, kCatalogIndexesRelationId, CatalogColumnType::UInt16, 3U, "index_type"},
-        CatalogColumnDescriptor{tuple, kCatalogIndexesNameColumnId, kCatalogIndexesRelationId, CatalogColumnType::Utf8, 4U, "name"}
+        CatalogColumnDescriptor{tuple, kCatalogIndexesRootPageColumnId, kCatalogIndexesRelationId, CatalogColumnType::UInt32, 4U, "root_page_id"},
+        CatalogColumnDescriptor{tuple, kCatalogIndexesComparatorColumnId, kCatalogIndexesRelationId, CatalogColumnType::Utf8, 5U, "comparator"},
+        CatalogColumnDescriptor{tuple, kCatalogIndexesFanoutColumnId, kCatalogIndexesRelationId, CatalogColumnType::UInt16, 6U, "max_fanout"},
+        CatalogColumnDescriptor{tuple, kCatalogIndexesNameColumnId, kCatalogIndexesRelationId, CatalogColumnType::Utf8, 7U, "name"}
     };
 
     for (const auto& column : columns) {
@@ -183,11 +186,11 @@ std::error_code CatalogBootstrapper::bootstrap_indexes(std::span<std::byte> page
 {
     const CatalogTupleDescriptor tuple = bootstrap_tuple();
     const std::array<CatalogIndexDescriptor, 5> indexes{
-        CatalogIndexDescriptor{tuple, kCatalogDatabasesNameIndexId, kCatalogDatabasesRelationId, CatalogIndexType::BTree, 0U, "catalog_databases_name"},
-        CatalogIndexDescriptor{tuple, kCatalogSchemasNameIndexId, kCatalogSchemasRelationId, CatalogIndexType::BTree, 0U, "catalog_schemas_name"},
-        CatalogIndexDescriptor{tuple, kCatalogTablesNameIndexId, kCatalogTablesRelationId, CatalogIndexType::BTree, 0U, "catalog_tables_name"},
-        CatalogIndexDescriptor{tuple, kCatalogColumnsNameIndexId, kCatalogColumnsRelationId, CatalogIndexType::BTree, 0U, "catalog_columns_name"},
-        CatalogIndexDescriptor{tuple, kCatalogIndexesNameIndexId, kCatalogIndexesRelationId, CatalogIndexType::BTree, 0U, "catalog_indexes_name"}
+        CatalogIndexDescriptor{tuple, kCatalogDatabasesNameIndexId, kCatalogDatabasesRelationId, CatalogIndexType::BTree, 0U, 0U, {}, "catalog_databases_name"},
+        CatalogIndexDescriptor{tuple, kCatalogSchemasNameIndexId, kCatalogSchemasRelationId, CatalogIndexType::BTree, 0U, 0U, {}, "catalog_schemas_name"},
+        CatalogIndexDescriptor{tuple, kCatalogTablesNameIndexId, kCatalogTablesRelationId, CatalogIndexType::BTree, 0U, 0U, {}, "catalog_tables_name"},
+        CatalogIndexDescriptor{tuple, kCatalogColumnsNameIndexId, kCatalogColumnsRelationId, CatalogIndexType::BTree, 0U, 0U, {}, "catalog_columns_name"},
+        CatalogIndexDescriptor{tuple, kCatalogIndexesNameIndexId, kCatalogIndexesRelationId, CatalogIndexType::BTree, 0U, 0U, {}, "catalog_indexes_name"}
     };
 
     for (const auto& index : indexes) {

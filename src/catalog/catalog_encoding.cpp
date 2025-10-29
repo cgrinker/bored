@@ -56,10 +56,11 @@ struct CatalogIndexPrefix final {
     std::uint64_t index_id = 0U;
     std::uint64_t relation_id = 0U;
     std::uint16_t index_type = 0U;
-    std::uint16_t reserved = 0U;
+    std::uint16_t max_fanout = 0U;
     std::uint32_t root_page_id = 0U;
     std::uint16_t name_length = 0U;
-    std::uint16_t padding = 0U;
+    std::uint16_t comparator_length = 0U;
+    std::uint32_t padding = 0U;
 };
 
 static_assert(sizeof(CatalogDatabasePrefix) == 48U, "CatalogDatabasePrefix expected to be 48 bytes");
@@ -100,9 +101,9 @@ std::size_t catalog_column_tuple_size(std::string_view name) noexcept
     return align8(sizeof(CatalogColumnPrefix) + name.size());
 }
 
-std::size_t catalog_index_tuple_size(std::string_view name) noexcept
+std::size_t catalog_index_tuple_size(std::string_view name, std::string_view comparator) noexcept
 {
-    return align8(sizeof(CatalogIndexPrefix) + name.size());
+    return align8(sizeof(CatalogIndexPrefix) + name.size() + comparator.size());
 }
 
 std::vector<std::byte> serialize_catalog_database(const CatalogDatabaseDescriptor& descriptor)
@@ -155,14 +156,25 @@ std::vector<std::byte> serialize_catalog_column(const CatalogColumnDescriptor& d
 
 std::vector<std::byte> serialize_catalog_index(const CatalogIndexDescriptor& descriptor)
 {
-    auto buffer = serialize_prefixed_tuple(sizeof(CatalogIndexPrefix), descriptor.name);
+    const auto name_length = static_cast<std::uint16_t>(descriptor.name.size());
+    const auto comparator_length = static_cast<std::uint16_t>(descriptor.comparator.size());
+    const auto prefix_size = sizeof(CatalogIndexPrefix);
+    auto buffer = std::vector<std::byte>(align8(prefix_size + descriptor.name.size() + descriptor.comparator.size()), std::byte{0});
     auto* prefix = reinterpret_cast<CatalogIndexPrefix*>(buffer.data());
     prefix->tuple = descriptor.tuple;
     prefix->index_id = descriptor.index_id.value;
     prefix->relation_id = descriptor.relation_id.value;
     prefix->index_type = static_cast<std::uint16_t>(descriptor.index_type);
+    prefix->max_fanout = descriptor.max_fanout;
     prefix->root_page_id = descriptor.root_page_id;
-    prefix->name_length = static_cast<std::uint16_t>(descriptor.name.size());
+    prefix->name_length = name_length;
+    prefix->comparator_length = comparator_length;
+    if (name_length > 0U) {
+        std::memcpy(buffer.data() + prefix_size, descriptor.name.data(), descriptor.name.size());
+    }
+    if (comparator_length > 0U) {
+        std::memcpy(buffer.data() + prefix_size + descriptor.name.size(), descriptor.comparator.data(), descriptor.comparator.size());
+    }
     return buffer;
 }
 
@@ -250,13 +262,26 @@ std::optional<CatalogIndexView> decode_catalog_index(std::span<const std::byte> 
         return std::nullopt;
     }
     const auto* prefix = reinterpret_cast<const CatalogIndexPrefix*>(tuple.data());
+    const auto prefix_size = sizeof(CatalogIndexPrefix);
+    const auto total_length = static_cast<std::size_t>(prefix->name_length) + static_cast<std::size_t>(prefix->comparator_length);
+    if (tuple.size() < prefix_size + total_length) {
+        return std::nullopt;
+    }
     CatalogIndexView view{};
     view.tuple = prefix->tuple;
     view.index_id = IndexId{prefix->index_id};
     view.relation_id = RelationId{prefix->relation_id};
     view.index_type = static_cast<CatalogIndexType>(prefix->index_type);
+    view.max_fanout = prefix->max_fanout;
     view.root_page_id = prefix->root_page_id;
-    view.name = read_name(*prefix, tuple);
+    if (prefix->name_length > 0U) {
+        const auto* name_data = reinterpret_cast<const char*>(tuple.data() + prefix_size);
+        view.name = {name_data, prefix->name_length};
+    }
+    if (prefix->comparator_length > 0U) {
+        const auto* comparator_data = reinterpret_cast<const char*>(tuple.data() + prefix_size + prefix->name_length);
+        view.comparator = {comparator_data, prefix->comparator_length};
+    }
     return view;
 }
 

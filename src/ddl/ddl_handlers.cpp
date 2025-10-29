@@ -9,6 +9,7 @@
 #include "bored/ddl/ddl_validation.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -134,8 +135,33 @@ std::vector<std::byte> serialize_index(const CatalogIndexDescriptor& index)
     descriptor.relation_id = index.relation_id;
     descriptor.index_type = index.index_type;
     descriptor.root_page_id = index.root_page_id;
+    descriptor.max_fanout = index.max_fanout;
+    descriptor.comparator = index.comparator;
     descriptor.name = index.name;
     return catalog::serialize_catalog_index(descriptor);
+}
+
+constexpr std::uint16_t kDefaultBtreeFanout = 128U;
+
+[[nodiscard]] std::string default_comparator_for(catalog::CatalogColumnType column_type)
+{
+    switch (column_type) {
+    case catalog::CatalogColumnType::Int64:
+        return "int64_ascending";
+    case catalog::CatalogColumnType::Utf8:
+        return "utf8_ascending";
+    case catalog::CatalogColumnType::UInt16:
+        return "uint16_ascending";
+    case catalog::CatalogColumnType::UInt32:
+        return "uint32_ascending";
+    default:
+        return "bytelex_ascending";
+    }
+}
+
+[[nodiscard]] std::uint16_t default_fanout_for(catalog::CatalogColumnType) noexcept
+{
+    return kDefaultBtreeFanout;
 }
 
 [[nodiscard]] std::size_t max_column_ordinal(const std::vector<CatalogColumnDescriptor>& columns) noexcept
@@ -784,10 +810,28 @@ DdlCommandResponse handle_create_index(DdlCommandContext& context, const CreateI
         return make_failure(make_error_code(DdlErrc::ExecutionFailed), "index storage plan missing root page reservation");
     }
 
+    if (storage_plan.max_fanout == 0U) {
+        storage_plan.max_fanout = default_fanout_for(column->column_type);
+    }
+
+    if (storage_plan.comparator.empty()) {
+        storage_plan.comparator = default_comparator_for(column->column_type);
+    }
+
+    if (storage_plan.max_fanout == 0U || storage_plan.comparator.empty()) {
+        return make_failure(make_error_code(DdlErrc::ExecutionFailed), "index storage plan missing comparator metadata");
+    }
+
+    if (storage_plan.comparator.size() > std::numeric_limits<std::uint16_t>::max()) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "index comparator name exceeds supported length");
+    }
+
     catalog::CreateIndexRequest stage_request{};
     stage_request.relation_id = table_opt->relation_id;
     stage_request.name = request.index_name;
     stage_request.index_type = catalog::CatalogIndexType::BTree;
+    stage_request.max_fanout = storage_plan.max_fanout;
+    stage_request.comparator = storage_plan.comparator;
     stage_request.root_page_id = storage_plan.root_page_id;
 
     catalog::CreateIndexResult stage_result{};

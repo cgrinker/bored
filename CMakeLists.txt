@@ -35,6 +35,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/page_manager.cpp
     src/storage/lock_manager.cpp
     src/storage/free_space_map_persistence.cpp
+    src/storage/index_btree_manager.cpp
     src/storage/index_comparator_registry.cpp
     src/storage/wal_apply_helpers.cpp
     src/storage/wal_writer.cpp
@@ -165,6 +166,7 @@ if(BORED_ENABLE_TESTS)
         tests/ddl_validation_tests.cpp
         tests/ddl_dispatcher_tests.cpp
     tests/ddl_handlers_tests.cpp
+        tests/index_btree_manager_tests.cpp
         tests/page_manager_tests.cpp
         tests/free_space_map_tests.cpp
         tests/wal_writer_tests.cpp

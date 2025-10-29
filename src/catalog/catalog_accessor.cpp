@@ -151,7 +151,14 @@ std::optional<CatalogIndexDescriptor> CatalogAccessor::index(IndexId id) const
         return std::nullopt;
     }
     const auto& entry = indexes_[it->second];
-    return CatalogIndexDescriptor{entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.root_page_id, entry.name};
+    return CatalogIndexDescriptor{entry.tuple,
+                                  entry.index_id,
+                                  entry.relation_id,
+                                  entry.index_type,
+                                  entry.root_page_id,
+                                  entry.max_fanout,
+                                  entry.comparator,
+                                  entry.name};
 }
 
 std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes(RelationId relation_id) const
@@ -164,7 +171,14 @@ std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes(RelationId relation
     }
     for (auto index : it->second) {
         const auto& entry = indexes_[index];
-        result.emplace_back(entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.root_page_id, entry.name);
+        result.emplace_back(entry.tuple,
+                            entry.index_id,
+                            entry.relation_id,
+                            entry.index_type,
+                            entry.root_page_id,
+                            entry.max_fanout,
+                            entry.comparator,
+                            entry.name);
     }
     return result;
 }
@@ -179,7 +193,14 @@ std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes_for_schema(SchemaId
     }
     for (auto index : it->second) {
         const auto& entry = indexes_[index];
-        result.emplace_back(entry.tuple, entry.index_id, entry.relation_id, entry.index_type, entry.root_page_id, entry.name);
+        result.emplace_back(entry.tuple,
+                            entry.index_id,
+                            entry.relation_id,
+                            entry.index_type,
+                            entry.root_page_id,
+                            entry.max_fanout,
+                            entry.comparator,
+                            entry.name);
     }
     return result;
 }
@@ -404,6 +425,8 @@ void CatalogAccessor::ensure_indexes_loaded() const
             entry.relation_id = view->relation_id;
             entry.index_type = view->index_type;
             entry.root_page_id = view->root_page_id;
+            entry.max_fanout = view->max_fanout;
+            entry.comparator = make_string(view->comparator);
             entry.name = make_string(view->name);
 
             auto table_it = table_index_.find(entry.relation_id.value);

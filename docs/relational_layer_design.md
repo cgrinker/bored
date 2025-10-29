@@ -66,7 +66,7 @@ The storage engine now provides durable write-ahead logging, crash-safe page rep
      - Implement base operators (seq scan, index scan stub, nested-loop join, projection, aggregation).
      - Ensure DML operators emit WAL records via page manager hooks.
 
-8. **Index Management Infrastructure**
+8. **Index Management Infrastructure** _(Milestones tracked in [index_milestones.md](index_milestones.md))_
    - **Responsibilities:** Provide secondary index structures (initially B+Tree) with maintenance, lookup, and recovery support.
    - **Prerequisites:** Catalog entries for index metadata; executor framework for scan operators; transaction manager for concurrency.
    - **Key Tasks:**

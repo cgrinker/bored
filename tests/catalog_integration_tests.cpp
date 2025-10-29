@@ -220,6 +220,8 @@ TEST_CASE("Catalog DDL integration applies create operations on commit")
     index_request.index_id = IndexId{2'000U};
     index_request.name = "events_id_idx";
     index_request.root_page_id = 501U;
+    index_request.max_fanout = 96U;
+    index_request.comparator = "int64_ascending";
     CreateIndexResult index_result{};
     REQUIRE_FALSE(stage_create_index(mutator, id_allocator, index_request, index_result));
 
@@ -251,6 +253,11 @@ TEST_CASE("Catalog DDL integration applies create operations on commit")
     REQUIRE(columns.size() == table_request.columns.size());
     CHECK(columns[0].name == "id");
     CHECK(columns[1].name == "payload");
+
+    auto indexes = accessor.indexes(table_result.relation_id);
+    REQUIRE(indexes.size() == 1U);
+    CHECK(indexes.front().max_fanout == index_request.max_fanout);
+    CHECK(indexes.front().comparator == index_request.comparator);
 
     auto index_span = accessor.columns(table_result.relation_id);
     (void)index_span;  // sanity coverage for repeated column access

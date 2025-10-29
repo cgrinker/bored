@@ -1184,6 +1184,8 @@ TEST_CASE("Wal crash drill restores index descriptor before image")
     pending_descriptor.relation_id = RelationId{4'200U};
     pending_descriptor.index_type = CatalogIndexType::BTree;
     pending_descriptor.root_page_id = 7'000U;
+    pending_descriptor.max_fanout = 120U;
+    pending_descriptor.comparator = "int64_ascending";
     pending_descriptor.name = "metrics_idx_pending";
     auto pending_payload = serialize_catalog_index(pending_descriptor);
 
@@ -1203,6 +1205,8 @@ TEST_CASE("Wal crash drill restores index descriptor before image")
     updated_descriptor.tuple.xmin = pending_descriptor.tuple.xmin + 5U;
     updated_descriptor.tuple.visibility_flags = 0x02U;
     updated_descriptor.root_page_id = pending_descriptor.root_page_id + 1U;
+    updated_descriptor.max_fanout = pending_descriptor.max_fanout;
+    updated_descriptor.comparator = pending_descriptor.comparator;
     updated_descriptor.name = "metrics_idx_ready";
     auto updated_payload = serialize_catalog_index(updated_descriptor);
 

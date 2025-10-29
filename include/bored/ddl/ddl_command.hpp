@@ -115,6 +115,8 @@ struct DropIndexRequest;
 
 struct CreateIndexStoragePlan final {
     std::uint32_t root_page_id = 0U;
+    std::uint16_t max_fanout = 0U;
+    std::string comparator{};
     std::function<std::error_code(const catalog::CreateIndexResult&, catalog::CatalogMutator&)> finalize{};
 };
 
@@ -132,6 +134,8 @@ struct CreateIndexRequest final {
     std::string table_name{};
     std::string index_name{};
     std::vector<std::string> column_names{};
+    std::uint16_t max_fanout = 0U;
+    std::string comparator{};
     bool unique = false;
     bool if_not_exists = false;
 };

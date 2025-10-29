@@ -167,12 +167,16 @@ TEST_CASE("Catalog DDL stages create index with provided identifier")
     request.index_type = CatalogIndexType::BTree;
     request.index_id = IndexId{9876U};
     request.root_page_id = 4096U;
+    request.max_fanout = 120U;
+    request.comparator = "int64_ascending";
 
     CreateIndexResult result{};
     REQUIRE_FALSE(stage_create_index(mutator, id_allocator, request, result));
 
     CHECK(result.index_id.value == request.index_id->value);
     CHECK(result.root_page_id == *request.root_page_id);
+    CHECK(result.max_fanout == request.max_fanout);
+    CHECK(result.comparator == request.comparator);
     CHECK(id_allocator.index_calls == 0U);
 
     const auto& mutations = mutator.staged_mutations();
@@ -189,4 +193,6 @@ TEST_CASE("Catalog DDL stages create index with provided identifier")
     CHECK(view->index_type == request.index_type);
     CHECK(view->root_page_id == *request.root_page_id);
     CHECK(view->name == request.name);
+    CHECK(view->max_fanout == request.max_fanout);
+    CHECK(view->comparator == request.comparator);
 }

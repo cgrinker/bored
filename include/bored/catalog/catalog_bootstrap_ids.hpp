@@ -37,7 +37,10 @@ inline constexpr ColumnId kCatalogColumnsNameColumnId{4110U};
 inline constexpr ColumnId kCatalogIndexesIdColumnId{4111U};
 inline constexpr ColumnId kCatalogIndexesTableColumnId{4112U};
 inline constexpr ColumnId kCatalogIndexesTypeColumnId{4113U};
-inline constexpr ColumnId kCatalogIndexesNameColumnId{4114U};
+inline constexpr ColumnId kCatalogIndexesRootPageColumnId{4114U};
+inline constexpr ColumnId kCatalogIndexesComparatorColumnId{4115U};
+inline constexpr ColumnId kCatalogIndexesFanoutColumnId{4116U};
+inline constexpr ColumnId kCatalogIndexesNameColumnId{4117U};
 
 inline constexpr IndexId kCatalogDatabasesNameIndexId{8192U};
 inline constexpr IndexId kCatalogSchemasNameIndexId{8193U};
