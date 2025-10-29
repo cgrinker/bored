@@ -1,5 +1,7 @@
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
+#include "bored/storage/index_btree_manager.hpp"
+#include "bored/storage/index_btree_page.hpp"
 #include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_recovery.hpp"
 #include "bored/storage/wal_undo_walker.hpp"
@@ -23,6 +25,7 @@
 #include <limits>
 #include <memory>
 #include <system_error>
+#include <sstream>
 #include <vector>
 
 using bored::storage::AsyncIo;
@@ -47,6 +50,9 @@ using bored::storage::WalIndexMaintenanceAction;
 using bored::storage::any;
 
 namespace {
+
+constexpr std::size_t kIndexHeaderOffset = sizeof(bored::storage::PageHeader);
+constexpr std::size_t kIndexPayloadBase = sizeof(bored::storage::PageHeader) + sizeof(bored::storage::IndexBtreePageHeader);
 
 struct alignas(8) CatalogAllocatorState final {
     std::uint64_t next_schema_id = 0U;
@@ -115,6 +121,358 @@ bored::storage::WalCommitHeader make_commit_header(const std::shared_ptr<WalWrit
 }
 
 }  // namespace
+
+TEST_CASE("WalReplayer rebuilds index leaf split pages")
+{
+    using bored::storage::IndexBtreeSlotEntry;
+    using bored::storage::IndexBtreeTuplePointer;
+    using bored::storage::IndexBtreePageHeader;
+    using bored::storage::IndexBtreeChildPointer;
+    using bored::storage::WalIndexSplitFlag;
+    using bored::storage::WalIndexSplitHeader;
+    using bored::storage::WalRecordHeader;
+    using bored::storage::WalRecoveryPlan;
+    using bored::storage::WalRecoveryRecord;
+    using bored::storage::WalRecordType;
+
+    constexpr std::size_t pointer_size = sizeof(IndexBtreeTuplePointer);
+    STATIC_REQUIRE(pointer_size == 8U);
+
+    auto make_key_bytes = [](std::uint64_t value) {
+        std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+        std::memcpy(bytes.data(), &value, sizeof(value));
+        return bytes;
+    };
+
+    auto append_leaf_entry = [&](std::vector<IndexBtreeSlotEntry>& slots,
+                                 std::vector<std::byte>& payload,
+                                 std::uint32_t heap_page,
+                                 std::uint16_t heap_slot,
+                                 std::uint64_t key_value) {
+        IndexBtreeTuplePointer pointer{};
+        pointer.heap_page_id = heap_page;
+        pointer.heap_slot_id = heap_slot;
+
+        const auto* pointer_bytes = reinterpret_cast<const std::byte*>(&pointer);
+        payload.insert(payload.end(), pointer_bytes, pointer_bytes + pointer_size);
+
+        auto key_bytes = make_key_bytes(key_value);
+        const auto key_offset = static_cast<std::uint16_t>(kIndexPayloadBase + payload.size());
+        payload.insert(payload.end(), key_bytes.begin(), key_bytes.end());
+
+        IndexBtreeSlotEntry slot{};
+        slot.key_offset = key_offset;
+        slot.key_length = static_cast<std::uint16_t>(key_bytes.size());
+        slots.push_back(slot);
+    };
+
+    std::vector<IndexBtreeSlotEntry> left_slots;
+    std::vector<std::byte> left_payload;
+    append_leaf_entry(left_slots, left_payload, 11'001U, 4U, 10U);
+    append_leaf_entry(left_slots, left_payload, 11'001U, 5U, 20U);
+
+    std::vector<IndexBtreeSlotEntry> right_slots;
+    std::vector<std::byte> right_payload;
+    append_leaf_entry(right_slots, right_payload, 11'002U, 7U, 30U);
+    append_leaf_entry(right_slots, right_payload, 11'002U, 8U, 40U);
+
+    auto pivot_key_array = make_key_bytes(30U);
+    auto pivot_key = std::span<const std::byte>(pivot_key_array.data(), pivot_key_array.size());
+
+    WalIndexSplitHeader split_header{};
+    split_header.index_id = 9'900U;
+    split_header.left_page_id = 5'100U;
+    split_header.right_page_id = 5'101U;
+    split_header.parent_page_id = 4'000U;
+    split_header.right_sibling_page_id = 5'010U;
+    split_header.level = 0U;
+    split_header.flags = static_cast<std::uint16_t>(WalIndexSplitFlag::Leaf);
+    split_header.parent_insert_slot = 1U;
+
+    const auto buffer_size = bored::storage::wal_index_split_payload_size(left_slots.size(),
+                                                                          left_payload.size(),
+                                                                          right_slots.size(),
+                                                                          right_payload.size(),
+                                                                          pivot_key.size());
+    std::vector<std::byte> payload(buffer_size);
+    REQUIRE(bored::storage::encode_wal_index_split(std::span<std::byte>(payload.data(), payload.size()),
+                                                   split_header,
+                                                   std::span<const IndexBtreeSlotEntry>(left_slots.data(), left_slots.size()),
+                                                   std::span<const std::byte>(left_payload.data(), left_payload.size()),
+                                                   std::span<const IndexBtreeSlotEntry>(right_slots.data(), right_slots.size()),
+                                                   std::span<const std::byte>(right_payload.data(), right_payload.size()),
+                                                   pivot_key));
+
+    WalRecoveryRecord record{};
+    record.header.type = static_cast<std::uint16_t>(WalRecordType::IndexSplit);
+    record.header.lsn = 0xABCD'0001ULL;
+    record.header.page_id = split_header.left_page_id;
+    record.header.total_length = static_cast<std::uint32_t>(sizeof(WalRecordHeader) + payload.size());
+    record.payload = payload;
+
+    WalRecoveryPlan plan{};
+    plan.redo.push_back(record);
+
+    bored::storage::WalReplayContext context{bored::storage::PageType::Table, nullptr};
+    bored::storage::WalReplayer replayer{context};
+
+    auto parent_page = context.get_page(split_header.parent_page_id);
+    REQUIRE_FALSE(bored::storage::initialize_index_page(parent_page, split_header.parent_page_id, split_header.level + 1U, false));
+
+    std::vector<std::byte> parent_payload;
+    std::vector<IndexBtreeSlotEntry> parent_slots;
+
+    auto append_internal_entry = [&](std::uint32_t child_page_id, std::span<const std::byte> key_bytes, bool infinite) {
+        IndexBtreeChildPointer child_ptr{};
+        child_ptr.page_id = child_page_id;
+        const auto* child_bytes = reinterpret_cast<const std::byte*>(&child_ptr);
+        parent_payload.insert(parent_payload.end(), child_bytes, child_bytes + sizeof(IndexBtreeChildPointer));
+
+        IndexBtreeSlotEntry slot{};
+        slot.key_offset = static_cast<std::uint16_t>(kIndexPayloadBase + parent_payload.size());
+        if (!key_bytes.empty()) {
+            parent_payload.insert(parent_payload.end(), key_bytes.begin(), key_bytes.end());
+            slot.key_length = static_cast<std::uint16_t>(key_bytes.size());
+        }
+        if (infinite) {
+            slot.key_length |= static_cast<std::uint16_t>(bored::storage::kIndexBtreeSlotInfiniteKeyMask);
+        }
+        parent_slots.push_back(slot);
+    };
+
+    auto key10 = make_key_bytes(10U);
+    auto key45 = make_key_bytes(45U);
+
+    append_internal_entry(4'900U, std::span<const std::byte>(key10.data(), key10.size()), false);
+    append_internal_entry(split_header.left_page_id, std::span<const std::byte>(key45.data(), key45.size()), false);
+    append_internal_entry(5'500U, std::span<const std::byte>(), true);
+
+    if (!parent_payload.empty()) {
+        std::memcpy(parent_page.data() + kIndexPayloadBase, parent_payload.data(), parent_payload.size());
+    }
+
+    const auto slot_bytes = parent_slots.size() * sizeof(IndexBtreeSlotEntry);
+    const auto slot_start = bored::storage::kPageSize - slot_bytes;
+    std::memcpy(parent_page.data() + slot_start, parent_slots.data(), slot_bytes);
+
+    auto& parent_header = bored::storage::page_header(std::span<std::byte>(parent_page.data(), parent_page.size()));
+    parent_header.free_start = static_cast<std::uint16_t>(kIndexPayloadBase + parent_payload.size());
+    parent_header.free_end = static_cast<std::uint16_t>(slot_start);
+    parent_header.tuple_count = static_cast<std::uint16_t>(parent_slots.size());
+
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+
+    auto verify_page = [&](std::uint32_t page_id,
+                           const std::vector<IndexBtreeSlotEntry>& expected_slots,
+                           const std::vector<std::byte>& expected_payload,
+                           std::uint32_t expected_right_sibling) {
+        auto page = context.get_page(page_id);
+        auto page_view = std::span<const std::byte>(page.data(), page.size());
+
+        const auto& header = bored::storage::page_header(page_view);
+        CHECK(header.page_id == page_id);
+        CHECK(static_cast<bored::storage::PageType>(header.type) == bored::storage::PageType::Index);
+        CHECK(header.tuple_count == expected_slots.size());
+        CHECK(header.free_start == kIndexPayloadBase + expected_payload.size());
+        const auto slot_bytes = expected_slots.size() * sizeof(IndexBtreeSlotEntry);
+        CHECK(header.free_end == static_cast<std::uint16_t>(bored::storage::kPageSize - slot_bytes));
+
+        const auto& index_header = *reinterpret_cast<const IndexBtreePageHeader*>(page_view.data() + kIndexHeaderOffset);
+        CHECK(bored::storage::index_page_is_leaf(index_header));
+        CHECK(index_header.level == split_header.level);
+        CHECK(index_header.parent_page_id == split_header.parent_page_id);
+        CHECK(index_header.right_sibling_page_id == expected_right_sibling);
+
+        auto payload_view = page_view.subspan(kIndexPayloadBase, expected_payload.size());
+        REQUIRE(payload_view.size() == expected_payload.size());
+        CHECK(std::equal(payload_view.begin(), payload_view.end(), expected_payload.begin()));
+
+        auto slot_view = std::span<const IndexBtreeSlotEntry>(reinterpret_cast<const IndexBtreeSlotEntry*>(page_view.data() + header.free_end), expected_slots.size());
+        REQUIRE(slot_view.size() == expected_slots.size());
+        for (std::size_t i = 0; i < expected_slots.size(); ++i) {
+            CHECK(slot_view[i].key_offset == expected_slots[i].key_offset);
+            CHECK(slot_view[i].key_length == expected_slots[i].key_length);
+        }
+    };
+
+    verify_page(split_header.left_page_id, left_slots, left_payload, split_header.right_page_id);
+    verify_page(split_header.right_page_id, right_slots, right_payload, split_header.right_sibling_page_id);
+
+    {
+        auto parent_view = context.get_page(split_header.parent_page_id);
+        auto const_parent_view = std::span<const std::byte>(parent_view.data(), parent_view.size());
+
+        const auto& post_header = bored::storage::page_header(const_parent_view);
+        CHECK(post_header.page_id == split_header.parent_page_id);
+        CHECK(post_header.tuple_count == 4U);
+        CHECK(post_header.free_start > kIndexPayloadBase);
+
+        const auto& post_index_header = *reinterpret_cast<const IndexBtreePageHeader*>(const_parent_view.data() + kIndexHeaderOffset);
+        CHECK_FALSE(bored::storage::index_page_is_leaf(post_index_header));
+        CHECK(post_index_header.level == split_header.level + 1U);
+
+        const auto parent_slots_view = reinterpret_cast<const IndexBtreeSlotEntry*>(const_parent_view.data() + post_header.free_end);
+
+        auto decode_pointer = [&](const IndexBtreeSlotEntry& slot) {
+            IndexBtreeChildPointer child_ptr{};
+            const auto pointer_offset = static_cast<std::size_t>(slot.key_offset) - sizeof(IndexBtreeChildPointer);
+            std::memcpy(&child_ptr, const_parent_view.data() + pointer_offset, sizeof(IndexBtreeChildPointer));
+            return child_ptr.page_id;
+        };
+
+        auto decode_key = [&](const IndexBtreeSlotEntry& slot) -> std::uint64_t {
+            std::uint64_t value = 0U;
+            if (slot.effective_length() != 0U) {
+                std::memcpy(&value, const_parent_view.data() + slot.key_offset, sizeof(value));
+            }
+            return value;
+        };
+
+        std::ostringstream parent_dump;
+        for (std::size_t i = 0; i < post_header.tuple_count; ++i) {
+            parent_dump << "[" << i << ": ptr=" << decode_pointer(parent_slots_view[i])
+                        << ", key=" << decode_key(parent_slots_view[i])
+                        << ", inf=" << (parent_slots_view[i].infinite_key() ? "true" : "false") << "]";
+        }
+        INFO("parent entries: " << parent_dump.str());
+
+        REQUIRE(post_header.tuple_count >= 4U);
+        CHECK(decode_pointer(parent_slots_view[0]) == 4'900U);
+        CHECK(decode_key(parent_slots_view[0]) == 10U);
+        CHECK_FALSE(parent_slots_view[0].infinite_key());
+
+        CHECK(decode_pointer(parent_slots_view[1]) == split_header.left_page_id);
+        CHECK(decode_key(parent_slots_view[1]) == 30U);
+        CHECK_FALSE(parent_slots_view[1].infinite_key());
+
+        CHECK(decode_pointer(parent_slots_view[2]) == split_header.right_page_id);
+        CHECK(decode_key(parent_slots_view[2]) == 45U);
+        CHECK_FALSE(parent_slots_view[2].infinite_key());
+
+        CHECK(decode_pointer(parent_slots_view[3]) == 5'500U);
+        CHECK(parent_slots_view[3].infinite_key());
+        CHECK(decode_key(parent_slots_view[3]) == 0U);
+    }
+}
+
+TEST_CASE("WalReplayer rebuilds index root split parent page")
+{
+            using bored::storage::IndexBtreeSlotEntry;
+            using bored::storage::IndexBtreeTuplePointer;
+            using bored::storage::IndexBtreePageHeader;
+            using bored::storage::IndexBtreeChildPointer;
+
+            auto make_key_bytes = [](std::uint64_t value) {
+                std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+                std::memcpy(bytes.data(), &value, sizeof(value));
+                return bytes;
+            };
+
+            std::vector<IndexBtreeSlotEntry> left_slots;
+            std::vector<std::byte> left_payload;
+
+            auto append_leaf_entry = [&](std::vector<IndexBtreeSlotEntry>& slots,
+                                         std::vector<std::byte>& payload,
+                                         std::uint32_t heap_page,
+                                         std::uint16_t heap_slot,
+                                         std::uint64_t key_value) {
+                IndexBtreeTuplePointer pointer{};
+                pointer.heap_page_id = heap_page;
+                pointer.heap_slot_id = heap_slot;
+
+                const auto* pointer_bytes = reinterpret_cast<const std::byte*>(&pointer);
+                payload.insert(payload.end(), pointer_bytes, pointer_bytes + sizeof(IndexBtreeTuplePointer));
+
+                auto key_bytes = make_key_bytes(key_value);
+                const auto key_offset = static_cast<std::uint16_t>(kIndexPayloadBase + payload.size());
+                payload.insert(payload.end(), key_bytes.begin(), key_bytes.end());
+
+                IndexBtreeSlotEntry slot{};
+                slot.key_offset = key_offset;
+                slot.key_length = static_cast<std::uint16_t>(key_bytes.size());
+                slots.push_back(slot);
+            };
+
+            append_leaf_entry(left_slots, left_payload, 21'000U, 1U, 5U);
+            append_leaf_entry(left_slots, left_payload, 21'000U, 2U, 15U);
+
+            std::vector<IndexBtreeSlotEntry> right_slots;
+            std::vector<std::byte> right_payload;
+
+            append_leaf_entry(right_slots, right_payload, 21'001U, 1U, 25U);
+            append_leaf_entry(right_slots, right_payload, 21'001U, 2U, 35U);
+
+            auto pivot_bytes = make_key_bytes(25U);
+            auto pivot_key = std::span<const std::byte>(pivot_bytes.data(), pivot_bytes.size());
+
+            bored::storage::WalIndexSplitHeader split_header{};
+            split_header.index_id = 9'901U;
+            split_header.left_page_id = 6'500U;
+            split_header.right_page_id = 6'501U;
+            split_header.parent_page_id = 6'000U;
+            split_header.level = 0U;
+            split_header.flags = static_cast<std::uint16_t>(bored::storage::WalIndexSplitFlag::Leaf | bored::storage::WalIndexSplitFlag::Root);
+            split_header.parent_insert_slot = 0U;
+
+            const auto buffer_size = bored::storage::wal_index_split_payload_size(left_slots.size(),
+                                                                                  left_payload.size(),
+                                                                                  right_slots.size(),
+                                                                                  right_payload.size(),
+                                                                                  pivot_key.size());
+            std::vector<std::byte> payload(buffer_size);
+            REQUIRE(bored::storage::encode_wal_index_split(std::span<std::byte>(payload.data(), payload.size()),
+                                                           split_header,
+                                                           std::span<const IndexBtreeSlotEntry>(left_slots.data(), left_slots.size()),
+                                                           std::span<const std::byte>(left_payload.data(), left_payload.size()),
+                                                           std::span<const IndexBtreeSlotEntry>(right_slots.data(), right_slots.size()),
+                                                           std::span<const std::byte>(right_payload.data(), right_payload.size()),
+                                                           pivot_key));
+
+            bored::storage::WalRecoveryRecord record{};
+            record.header.type = static_cast<std::uint16_t>(bored::storage::WalRecordType::IndexSplit);
+            record.header.lsn = 0xABCD'1001ULL;
+            record.header.page_id = split_header.left_page_id;
+            record.header.total_length = static_cast<std::uint32_t>(sizeof(bored::storage::WalRecordHeader) + payload.size());
+            record.payload = payload;
+
+            bored::storage::WalRecoveryPlan plan{};
+            plan.redo.push_back(record);
+
+            bored::storage::WalReplayContext context{bored::storage::PageType::Table, nullptr};
+            bored::storage::WalReplayer replayer{context};
+
+            REQUIRE_FALSE(replayer.apply_redo(plan));
+
+            auto parent_page = context.get_page(split_header.parent_page_id);
+            auto parent_view = std::span<const std::byte>(parent_page.data(), parent_page.size());
+
+            const auto& header = bored::storage::page_header(parent_view);
+            CHECK(header.tuple_count == 2U);
+
+            const auto& index_header = *reinterpret_cast<const IndexBtreePageHeader*>(parent_view.data() + kIndexHeaderOffset);
+            CHECK_FALSE(bored::storage::index_page_is_leaf(index_header));
+            CHECK(index_header.level == split_header.level + 1U);
+
+            const auto slot_ptr = reinterpret_cast<const IndexBtreeSlotEntry*>(parent_view.data() + header.free_end);
+
+            auto decode_pointer = [&](const IndexBtreeSlotEntry& slot) {
+                IndexBtreeChildPointer child_ptr{};
+                const auto pointer_offset = static_cast<std::size_t>(slot.key_offset) - sizeof(IndexBtreeChildPointer);
+                std::memcpy(&child_ptr, parent_view.data() + pointer_offset, sizeof(IndexBtreeChildPointer));
+                return child_ptr.page_id;
+            };
+
+            CHECK(decode_pointer(slot_ptr[0]) == split_header.left_page_id);
+            CHECK_FALSE(slot_ptr[0].infinite_key());
+
+            std::uint64_t pivot_value = 0U;
+            std::memcpy(&pivot_value, parent_view.data() + slot_ptr[0].key_offset, sizeof(pivot_value));
+            CHECK(pivot_value == 25U);
+
+    CHECK(decode_pointer(slot_ptr[1]) == split_header.right_page_id);
+    CHECK(slot_ptr[1].infinite_key());
+}
 
 TEST_CASE("WalReplayer replays committed tuple changes")
 {

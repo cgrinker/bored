@@ -1,6 +1,7 @@
 #include "bored/storage/wal_replayer.hpp"
 
 #include "bored/storage/free_space_map.hpp"
+#include "bored/storage/index_btree_page.hpp"
 #include "bored/storage/page_operations.hpp"
 #include "bored/storage/temp_resource_registry.hpp"
 #include "bored/storage/wal_apply_helpers.hpp"
@@ -8,19 +9,30 @@
 #include "bored/storage/wal_undo_walker.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <cstring>
 #include <stdexcept>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace bored::storage {
 
 namespace {
 
+constexpr std::size_t kIndexHeaderOffset = sizeof(PageHeader);
+constexpr std::size_t kIndexPayloadBase = sizeof(PageHeader) + sizeof(IndexBtreePageHeader);
+
 std::span<const std::byte> as_const_span(std::span<std::byte> buffer)
 {
     return {buffer.data(), buffer.size()};
 }
+
+struct IndexInternalEntry final {
+    IndexBtreeChildPointer child{};
+    std::vector<std::byte> key{};
+    bool infinite = false;
+};
 
 constexpr PageType replay_page_type(WalRecordType type) noexcept
 {
@@ -235,6 +247,370 @@ std::error_code undo_page_compaction(std::span<std::byte> page,
     return {};
 }
 
+[[nodiscard]] bool has_flag(WalIndexSplitFlag value, WalIndexSplitFlag flag) noexcept
+{
+    return any(value & flag);
+}
+
+std::error_code rebuild_index_page(std::span<std::byte> page,
+                                   FreeSpaceMap* fsm,
+                                   const WalRecordHeader& wal_header,
+                                   std::uint32_t page_id,
+                                   std::uint16_t level,
+                                   bool is_leaf,
+                                   std::uint32_t parent_page_id,
+                                   std::uint32_t right_sibling_page_id,
+                                   std::span<const IndexBtreeSlotEntry> slots,
+                                   std::span<const std::byte> payload)
+{
+    const auto slot_bytes = slots.size() * sizeof(IndexBtreeSlotEntry);
+    if (slots.size() > std::numeric_limits<std::uint16_t>::max()) {
+        return std::make_error_code(std::errc::value_too_large);
+    }
+
+    if (kIndexPayloadBase > kPageSize) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    if (kIndexPayloadBase + payload.size() > kPageSize) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    if (slot_bytes > kPageSize - (kIndexPayloadBase + payload.size())) {
+        return std::make_error_code(std::errc::no_buffer_space);
+    }
+
+    if (!initialize_page(page, PageType::Index, page_id, wal_header.lsn, fsm)) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    auto& header = page_header(page);
+    auto& index_header = *reinterpret_cast<IndexBtreePageHeader*>(page.data() + kIndexHeaderOffset);
+
+    index_header.magic = kIndexPageMagic;
+    index_header.version = kIndexPageVersion;
+    index_header.flags = 0U;
+    if (is_leaf) {
+        index_header.flags |= kIndexPageFlagLeaf;
+    }
+    index_header.level = level;
+    index_header.parent_page_id = parent_page_id;
+    index_header.right_sibling_page_id = right_sibling_page_id;
+
+    if (!payload.empty()) {
+        std::memcpy(page.data() + kIndexPayloadBase, payload.data(), payload.size());
+    }
+
+    const auto slot_start = kPageSize - slot_bytes;
+    if (!slots.empty()) {
+        std::memcpy(page.data() + slot_start, slots.data(), slot_bytes);
+    }
+
+    if (slot_start > kIndexPayloadBase + payload.size()) {
+        const auto gap = slot_start - (kIndexPayloadBase + payload.size());
+        std::memset(page.data() + kIndexPayloadBase + payload.size(), 0, gap);
+    }
+
+    header.flags |= static_cast<std::uint16_t>(PageFlag::Dirty);
+    header.lsn = wal_header.lsn;
+    header.free_start = static_cast<std::uint16_t>(kIndexPayloadBase + payload.size());
+    header.free_end = static_cast<std::uint16_t>(slot_start);
+    header.tuple_count = static_cast<std::uint16_t>(slots.size());
+    header.fragment_count = 0U;
+
+    if (fsm != nullptr) {
+        sync_free_space(*fsm, as_const_span(page));
+    }
+
+    return {};
+}
+
+std::error_code read_internal_entries(std::span<const std::byte> page, std::vector<IndexInternalEntry>& out_entries)
+{
+    out_entries.clear();
+
+    const auto& header = page_header(page);
+    if (!is_valid(header) || static_cast<PageType>(header.type) != PageType::Index) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    const auto& index = *reinterpret_cast<const IndexBtreePageHeader*>(page.data() + kIndexHeaderOffset);
+    if (index_page_is_leaf(index)) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    const auto slot_count = static_cast<std::size_t>(header.tuple_count);
+    if (slot_count == 0U) {
+        return {};
+    }
+
+    const auto pointer_size = sizeof(IndexBtreeChildPointer);
+    const auto slot_ptr = reinterpret_cast<const IndexBtreeSlotEntry*>(page.data() + header.free_end);
+
+    out_entries.reserve(slot_count);
+
+    for (std::size_t index_slot = 0; index_slot < slot_count; ++index_slot) {
+        const auto& slot = slot_ptr[index_slot];
+        if (slot.key_offset < kIndexPayloadBase || slot.key_offset > page.size()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        if (slot.key_offset < pointer_size) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        const auto pointer_offset = static_cast<std::size_t>(slot.key_offset) - pointer_size;
+        if (pointer_offset < kIndexPayloadBase || pointer_offset + pointer_size > static_cast<std::size_t>(header.free_start)) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        IndexInternalEntry entry{};
+        std::memcpy(&entry.child, page.data() + pointer_offset, pointer_size);
+
+        const auto key_length = static_cast<std::size_t>(slot.effective_length());
+        if (key_length != 0U) {
+            if (static_cast<std::size_t>(slot.key_offset) + key_length > static_cast<std::size_t>(header.free_start)) {
+                return std::make_error_code(std::errc::invalid_argument);
+            }
+            entry.key.resize(key_length);
+            std::memcpy(entry.key.data(), page.data() + slot.key_offset, key_length);
+        }
+
+        entry.infinite = slot.infinite_key();
+        out_entries.push_back(std::move(entry));
+    }
+
+    return {};
+}
+
+std::error_code write_internal_entries(std::span<std::byte> page,
+                                       FreeSpaceMap* fsm,
+                                       const WalRecordHeader& wal_header,
+                                       std::uint32_t page_id,
+                                       std::uint16_t level,
+                                       std::uint32_t parent_page_id,
+                                       std::uint32_t right_sibling_page_id,
+                                       std::span<const IndexInternalEntry> entries)
+{
+    const auto pointer_size = sizeof(IndexBtreeChildPointer);
+    std::size_t payload_bytes = 0U;
+    for (const auto& entry : entries) {
+        payload_bytes += pointer_size + entry.key.size();
+    }
+
+    std::vector<std::byte> payload(payload_bytes);
+    std::vector<IndexBtreeSlotEntry> slots(entries.size());
+
+    std::size_t cursor = 0U;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto& entry = entries[i];
+        std::memcpy(payload.data() + cursor, &entry.child, pointer_size);
+        cursor += pointer_size;
+
+        const auto key_offset = cursor;
+        if (!entry.key.empty()) {
+            std::memcpy(payload.data() + cursor, entry.key.data(), entry.key.size());
+            cursor += entry.key.size();
+        }
+
+        slots[i].key_offset = static_cast<std::uint16_t>(kIndexPayloadBase + key_offset);
+
+        std::uint16_t key_length = static_cast<std::uint16_t>(entry.key.size());
+        if (entry.infinite) {
+            key_length |= kIndexBtreeSlotInfiniteKeyMask;
+        }
+        slots[i].key_length = key_length;
+    }
+
+    return rebuild_index_page(page,
+                              fsm,
+                              wal_header,
+                              page_id,
+                              level,
+                              false,
+                              parent_page_id,
+                              right_sibling_page_id,
+                              std::span<const IndexBtreeSlotEntry>(slots.data(), slots.size()),
+                              std::span<const std::byte>(payload.data(), payload.size()));
+}
+
+std::error_code apply_index_split_parent(std::span<std::byte> page,
+                                         FreeSpaceMap* fsm,
+                                         const WalRecordHeader& wal_header,
+                                         const WalIndexSplitView& view)
+{
+    std::vector<IndexInternalEntry> entries;
+
+    auto parent_view = std::span<const std::byte>(page.data(), page.size());
+    auto& header = page_header(parent_view);
+    std::uint32_t parent_parent_page_id = 0U;
+    std::uint32_t parent_right_sibling = 0U;
+    bool existing_internal = false;
+
+    if (is_valid(header) && static_cast<PageType>(header.type) == PageType::Index) {
+        const auto& index_header = *reinterpret_cast<const IndexBtreePageHeader*>(parent_view.data() + kIndexHeaderOffset);
+        parent_parent_page_id = index_header.parent_page_id;
+        parent_right_sibling = index_header.right_sibling_page_id;
+        if (!index_page_is_leaf(index_header) && header.tuple_count != 0U) {
+            if (auto ec = read_internal_entries(parent_view, entries); ec) {
+                return ec;
+            }
+            existing_internal = true;
+        } else if (!index_page_is_leaf(index_header) && header.tuple_count == 0U) {
+            existing_internal = true;
+        }
+    }
+
+    const auto parent_level = static_cast<std::uint16_t>(view.header.level + 1U);
+
+    if (entries.empty() && !existing_internal) {
+        if (view.pivot_key.empty()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        IndexInternalEntry left_entry{};
+        left_entry.child.page_id = view.header.left_page_id;
+        left_entry.key.assign(view.pivot_key.begin(), view.pivot_key.end());
+        left_entry.infinite = false;
+
+        IndexInternalEntry sentinel{};
+        sentinel.child.page_id = view.header.right_page_id;
+        sentinel.infinite = true;
+
+        entries.push_back(std::move(left_entry));
+        entries.push_back(std::move(sentinel));
+
+        return write_internal_entries(page,
+                                      fsm,
+                                      wal_header,
+                                      view.header.parent_page_id,
+                                      parent_level,
+                                      parent_parent_page_id,
+                                      parent_right_sibling,
+                                      std::span<const IndexInternalEntry>(entries.data(), entries.size()));
+    }
+
+    if (view.header.parent_insert_slot >= entries.size()) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    auto keys_equal = [&](const std::vector<std::byte>& lhs, std::span<const std::byte> rhs) {
+        if (lhs.size() != rhs.size()) {
+            return false;
+        }
+        return std::memcmp(lhs.data(), rhs.data(), lhs.size()) == 0;
+    };
+
+    auto& target = entries[view.header.parent_insert_slot];
+
+    const bool already_applied = !view.pivot_key.empty()
+        && target.child.page_id == view.header.left_page_id
+        && !target.infinite
+        && keys_equal(target.key, view.pivot_key)
+        && (view.header.parent_insert_slot + 1U) < entries.size()
+        && entries[view.header.parent_insert_slot + 1U].child.page_id == view.header.right_page_id;
+
+    if (already_applied) {
+        bool sentinel_present = false;
+        for (const auto& entry : entries) {
+            if (entry.infinite) {
+                sentinel_present = true;
+                break;
+            }
+        }
+        if (sentinel_present) {
+            return {};
+        }
+    }
+
+    const auto displaced_key = target.key;
+    const bool displaced_infinite = target.infinite;
+
+    if (view.pivot_key.empty()) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    target.child.page_id = view.header.left_page_id;
+    target.key.assign(view.pivot_key.begin(), view.pivot_key.end());
+    target.infinite = false;
+
+    IndexInternalEntry new_entry{};
+    new_entry.child.page_id = view.header.right_page_id;
+    new_entry.key = displaced_key;
+    new_entry.infinite = displaced_infinite;
+
+    entries.insert(entries.begin() + static_cast<std::ptrdiff_t>(view.header.parent_insert_slot + 1U), std::move(new_entry));
+
+    return write_internal_entries(page,
+                                  fsm,
+                                  wal_header,
+                                  view.header.parent_page_id,
+                                  parent_level,
+                                  parent_parent_page_id,
+                                  parent_right_sibling,
+                                  std::span<const IndexInternalEntry>(entries.data(), entries.size()));
+}
+
+std::error_code apply_index_split(WalReplayContext& context, const WalRecoveryRecord& record)
+{
+    auto payload = std::span<const std::byte>(record.payload.data(), record.payload.size());
+    auto view = decode_wal_index_split(payload);
+    if (!view) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    const auto split_flags = static_cast<WalIndexSplitFlag>(view->header.flags);
+    const bool is_leaf_split = has_flag(split_flags, WalIndexSplitFlag::Leaf);
+
+    if (view->header.left_page_id == 0U || view->header.right_page_id == 0U) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    auto fsm = context.free_space_map();
+
+    {
+        auto left_page = context.get_page(view->header.left_page_id);
+        if (auto ec = rebuild_index_page(left_page,
+                                         fsm,
+                                         record.header,
+                                         view->header.left_page_id,
+                                         view->header.level,
+                                         is_leaf_split,
+                                         view->header.parent_page_id,
+                                         view->header.right_page_id,
+                                         view->left_slots,
+                                         view->left_payload);
+            ec) {
+            return ec;
+        }
+    }
+
+    {
+        auto right_page = context.get_page(view->header.right_page_id);
+        if (auto ec = rebuild_index_page(right_page,
+                                         fsm,
+                                         record.header,
+                                         view->header.right_page_id,
+                                         view->header.level,
+                                         is_leaf_split,
+                                         view->header.parent_page_id,
+                                         view->header.right_sibling_page_id,
+                                         view->right_slots,
+                                         view->right_payload);
+            ec) {
+            return ec;
+        }
+    }
+
+    if (view->header.parent_page_id != 0U) {
+        auto parent_page = context.get_page(view->header.parent_page_id);
+        if (auto ec = apply_index_split_parent(parent_page, fsm, record.header, *view); ec) {
+            return ec;
+        }
+    }
+
+    return {};
+}
+
 }  // namespace
 
 WalReplayContext::WalReplayContext(PageType default_page_type, FreeSpaceMap* fsm)
@@ -430,6 +806,12 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         }
         return {};
     }
+    case WalRecordType::IndexSplit:
+        return apply_index_split(context_, record);
+    case WalRecordType::IndexMerge:
+        return std::make_error_code(std::errc::not_supported);
+    case WalRecordType::IndexBulkCheckpoint:
+        return {};
     default:
         return std::make_error_code(std::errc::not_supported);
     }
@@ -535,6 +917,10 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         context_.record_index_metadata(std::span<const WalCompactionEntry>(view->entries.data(), view->entries.size()));
         return {};
     }
+    case WalRecordType::IndexSplit:
+    case WalRecordType::IndexMerge:
+    case WalRecordType::IndexBulkCheckpoint:
+        return std::make_error_code(std::errc::not_supported);
     default:
         return std::make_error_code(std::errc::not_supported);
     }

@@ -8,7 +8,7 @@
 ## Milestone 1: Core CRUD & Recovery
 - [x] Implement index insert/delete/update operations with latch discipline and TempResourceRegistry hooks for scratch space.
 - [x] Extend executor scan operators with index probes and fallback to heap when predicates miss.
-- [ ] Teach `WalRecoveryDriver`/`WalReplayer` to reconstruct B+Tree structure, including split replay and orphan cleanup.
+- [x] Teach `WalRecoveryDriver`/`WalReplayer` to reconstruct B+Tree structure, including split replay and orphan cleanup.
 
 ## Milestone 2: Maintenance & Telemetry
 - [ ] Build background compaction/prune routines plus checkpoint integration for index retention windows.
