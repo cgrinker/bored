@@ -135,6 +135,37 @@ WalRetentionTelemetrySnapshot make_retention_snapshot(std::uint64_t base)
     return snapshot;
 }
 
+RecoveryTelemetrySnapshot make_recovery_snapshot(std::uint64_t base)
+{
+    RecoveryTelemetrySnapshot snapshot{};
+    snapshot.plan_invocations = base + 1U;
+    snapshot.plan_failures = base % 2U;
+    snapshot.total_enumerate_duration_ns = (base + 2U) * 3U;
+    snapshot.last_enumerate_duration_ns = (base + 3U) * 2U;
+    snapshot.max_enumerate_duration_ns = (base + 4U) * 4U;
+    snapshot.total_plan_duration_ns = (base + 5U) * 7U;
+    snapshot.last_plan_duration_ns = (base + 6U) * 5U;
+    snapshot.max_plan_duration_ns = (base + 7U) * 6U;
+    snapshot.redo_invocations = base + 8U;
+    snapshot.redo_failures = base % 3U;
+    snapshot.total_redo_duration_ns = (base + 9U) * 11U;
+    snapshot.last_redo_duration_ns = (base + 10U) * 9U;
+    snapshot.max_redo_duration_ns = (base + 11U) * 12U;
+    snapshot.undo_invocations = base + 12U;
+    snapshot.undo_failures = base % 5U;
+    snapshot.total_undo_duration_ns = (base + 13U) * 13U;
+    snapshot.last_undo_duration_ns = (base + 14U) * 7U;
+    snapshot.max_undo_duration_ns = (base + 15U) * 14U;
+    snapshot.cleanup_invocations = base + 16U;
+    snapshot.cleanup_failures = base % 7U;
+    snapshot.total_cleanup_duration_ns = (base + 17U) * 17U;
+    snapshot.last_cleanup_duration_ns = (base + 18U) * 8U;
+    snapshot.max_cleanup_duration_ns = (base + 19U) * 18U;
+    snapshot.last_replay_backlog_bytes = (base + 20U) * 100U;
+    snapshot.max_replay_backlog_bytes = (base + 21U) * 120U;
+    return snapshot;
+}
+
 TempCleanupTelemetrySnapshot make_temp_cleanup_snapshot(std::uint64_t base)
 {
     TempCleanupTelemetrySnapshot snapshot{};
@@ -379,6 +410,27 @@ TEST_CASE("StorageTelemetryRegistry aggregates WAL retention samplers")
     REQUIRE(total.archived_segments == ((3U + 5U) + (7U + 5U)));
     REQUIRE(total.total_duration_ns == ((3U + 6U) * 50U + (7U + 6U) * 50U));
     REQUIRE(total.last_duration_ns == ((7U + 7U) * 5U));
+}
+
+TEST_CASE("StorageTelemetryRegistry aggregates recovery samplers")
+{
+    StorageTelemetryRegistry registry;
+    registry.register_recovery("rec_a", [] { return make_recovery_snapshot(2U); });
+    registry.register_recovery("rec_b", [] { return make_recovery_snapshot(5U); });
+
+    const auto total = registry.aggregate_recovery();
+
+    REQUIRE(total.plan_invocations == ((2U + 1U) + (5U + 1U)));
+    REQUIRE(total.plan_failures == (2U % 2U + 5U % 2U));
+    REQUIRE(total.total_plan_duration_ns == ((2U + 5U) * 7U + (5U + 5U) * 7U));
+    REQUIRE(total.last_plan_duration_ns == ((5U + 6U) * 5U));
+    REQUIRE(total.max_plan_duration_ns == ((5U + 7U) * 6U));
+    REQUIRE(total.redo_invocations == ((2U + 8U) + (5U + 8U)));
+    REQUIRE(total.total_redo_duration_ns == ((2U + 9U) * 11U + (5U + 9U) * 11U));
+    REQUIRE(total.last_redo_duration_ns == ((5U + 10U) * 9U));
+    REQUIRE(total.max_redo_duration_ns == ((5U + 11U) * 12U));
+    REQUIRE(total.last_replay_backlog_bytes == std::max((2U + 20U) * 100U, (5U + 20U) * 100U));
+    REQUIRE(total.max_replay_backlog_bytes == std::max((2U + 21U) * 120U, (5U + 21U) * 120U));
 }
 
 TEST_CASE("StorageTelemetryRegistry aggregates temp cleanup samplers")

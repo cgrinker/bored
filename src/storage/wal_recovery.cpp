@@ -23,7 +23,10 @@ RecoveryTelemetrySnapshot RecoveryTelemetryState::sample() const
     return snapshot;
 }
 
-void RecoveryTelemetryState::record_plan(std::uint64_t enumerate_ns, std::uint64_t total_ns, bool success)
+void RecoveryTelemetryState::record_plan(std::uint64_t enumerate_ns,
+                                         std::uint64_t total_ns,
+                                         std::uint64_t backlog_bytes,
+                                         bool success)
 {
     std::lock_guard guard{mutex};
     snapshot.plan_invocations += 1U;
@@ -36,6 +39,8 @@ void RecoveryTelemetryState::record_plan(std::uint64_t enumerate_ns, std::uint64
     snapshot.total_plan_duration_ns += total_ns;
     snapshot.last_plan_duration_ns = total_ns;
     snapshot.max_plan_duration_ns = std::max(snapshot.max_plan_duration_ns, total_ns);
+    snapshot.last_replay_backlog_bytes = backlog_bytes;
+    snapshot.max_replay_backlog_bytes = std::max(snapshot.max_replay_backlog_bytes, backlog_bytes);
 }
 
 void RecoveryTelemetryState::record_redo(std::uint64_t duration_ns, bool success)
@@ -208,6 +213,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
 {
     const auto plan_start = std::chrono::steady_clock::now();
     std::uint64_t enumerate_duration_ns = 0U;
+    std::uint64_t highest_replay_lsn = 0U;
     auto record_plan_metrics = [&](bool success) {
         if (!telemetry_state_) {
             return;
@@ -215,7 +221,12 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
         const auto plan_end = std::chrono::steady_clock::now();
         const auto plan_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(plan_end - plan_start);
         const auto total_ns = plan_ns.count() > 0 ? static_cast<std::uint64_t>(plan_ns.count()) : 0ULL;
-        telemetry_state_->record_plan(enumerate_duration_ns, total_ns, success);
+        std::uint64_t backlog_bytes = 0U;
+        const auto checkpoint_lsn = plan.checkpoint_redo_lsn;
+        if (highest_replay_lsn > checkpoint_lsn) {
+            backlog_bytes = highest_replay_lsn - checkpoint_lsn;
+        }
+        telemetry_state_->record_plan(enumerate_duration_ns, total_ns, backlog_bytes, success);
     };
 
     plan.redo.clear();
@@ -308,6 +319,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 plan.truncated_tail = true;
                 plan.truncated_segment_id = segment.header.segment_id;
                 plan.truncated_lsn = last_valid_lsn(segment.header.start_lsn, records);
+                highest_replay_lsn = std::max(highest_replay_lsn, plan.truncated_lsn);
             } else {
                 record_plan_metrics(false);
                 return ec;
@@ -315,6 +327,9 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
         }
 
         for (const auto& record_view : records) {
+            const auto aligned_length = align_up_to_block(static_cast<std::size_t>(record_view.header.total_length));
+            const auto record_end_lsn = record_view.header.lsn + static_cast<std::uint64_t>(aligned_length);
+            highest_replay_lsn = std::max(highest_replay_lsn, record_end_lsn);
             const auto type = static_cast<WalRecordType>(record_view.header.type);
 
             if (type == WalRecordType::CatalogInsert || type == WalRecordType::CatalogDelete || type == WalRecordType::CatalogUpdate) {
@@ -420,6 +435,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 plan.checkpoint_id = checkpoint->header.checkpoint_id;
                 plan.checkpoint_redo_lsn = checkpoint->header.redo_lsn;
                 plan.checkpoint_undo_lsn = checkpoint->header.undo_lsn;
+                highest_replay_lsn = std::max(highest_replay_lsn, plan.checkpoint_redo_lsn);
                 plan.checkpoint_dirty_pages.assign(checkpoint->dirty_pages.begin(), checkpoint->dirty_pages.end());
                 plan.checkpoint_index_metadata.clear();
                 plan.checkpoint_index_metadata.reserve(checkpoint->index_metadata.size());

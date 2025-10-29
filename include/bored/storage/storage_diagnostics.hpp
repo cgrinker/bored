@@ -15,6 +15,7 @@ struct StorageDiagnosticsOptions final {
     bool include_page_manager_details = true;
     bool include_checkpoint_details = true;
     bool include_retention_details = true;
+    bool include_recovery_details = true;
     bool include_index_retention_details = true;
     bool include_index_details = true;
     bool include_temp_cleanup_details = true;
@@ -41,6 +42,11 @@ struct StorageDiagnosticsCheckpointEntry final {
 struct StorageDiagnosticsRetentionEntry final {
     std::string identifier;
     WalRetentionTelemetrySnapshot snapshot;
+};
+
+struct StorageDiagnosticsRecoveryEntry final {
+    std::string identifier;
+    RecoveryTelemetrySnapshot snapshot;
 };
 
 struct StorageDiagnosticsIndexRetentionEntry final {
@@ -113,6 +119,11 @@ struct StorageDiagnosticsRetentionSection final {
     std::vector<StorageDiagnosticsRetentionEntry> details{};
 };
 
+struct StorageDiagnosticsRecoverySection final {
+    RecoveryTelemetrySnapshot total{};
+    std::vector<StorageDiagnosticsRecoveryEntry> details{};
+};
+
 struct StorageDiagnosticsIndexRetentionSection final {
     IndexRetentionTelemetrySnapshot total{};
     std::vector<StorageDiagnosticsIndexRetentionEntry> details{};
@@ -170,9 +181,12 @@ struct StorageDiagnosticsExecutorSection final {
 
 struct StorageDiagnosticsDocument final {
     std::chrono::system_clock::time_point collected_at{};
+    std::uint64_t last_checkpoint_lsn = 0U;
+    std::uint64_t outstanding_replay_backlog_bytes = 0U;
     StorageDiagnosticsPageManagerSection page_managers{};
     StorageDiagnosticsCheckpointSection checkpoints{};
     StorageDiagnosticsRetentionSection retention{};
+    StorageDiagnosticsRecoverySection recovery{};
     StorageDiagnosticsIndexRetentionSection index_retention{};
     StorageDiagnosticsIndexSection indexes{};
     StorageDiagnosticsTempCleanupSection temp_cleanup{};

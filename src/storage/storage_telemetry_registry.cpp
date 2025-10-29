@@ -141,6 +141,8 @@ RecoveryTelemetrySnapshot& accumulate(RecoveryTelemetrySnapshot& target, const R
     target.total_cleanup_duration_ns += source.total_cleanup_duration_ns;
     target.last_cleanup_duration_ns = std::max(target.last_cleanup_duration_ns, source.last_cleanup_duration_ns);
     target.max_cleanup_duration_ns = std::max(target.max_cleanup_duration_ns, source.max_cleanup_duration_ns);
+    target.last_replay_backlog_bytes = std::max(target.last_replay_backlog_bytes, source.last_replay_backlog_bytes);
+    target.max_replay_backlog_bytes = std::max(target.max_replay_backlog_bytes, source.max_replay_backlog_bytes);
     return target;
 }
 

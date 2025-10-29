@@ -210,6 +210,38 @@ void append_retention_snapshot(std::string& out, const WalRetentionTelemetrySnap
     out.push_back('}');
 }
 
+void append_recovery_snapshot(std::string& out, const RecoveryTelemetrySnapshot& snapshot)
+{
+    out.push_back('{');
+    bool first = true;
+    append_field(out, "plan_invocations", snapshot.plan_invocations, first);
+    append_field(out, "plan_failures", snapshot.plan_failures, first);
+    append_field(out, "total_enumerate_duration_ns", snapshot.total_enumerate_duration_ns, first);
+    append_field(out, "last_enumerate_duration_ns", snapshot.last_enumerate_duration_ns, first);
+    append_field(out, "max_enumerate_duration_ns", snapshot.max_enumerate_duration_ns, first);
+    append_field(out, "total_plan_duration_ns", snapshot.total_plan_duration_ns, first);
+    append_field(out, "last_plan_duration_ns", snapshot.last_plan_duration_ns, first);
+    append_field(out, "max_plan_duration_ns", snapshot.max_plan_duration_ns, first);
+    append_field(out, "redo_invocations", snapshot.redo_invocations, first);
+    append_field(out, "redo_failures", snapshot.redo_failures, first);
+    append_field(out, "total_redo_duration_ns", snapshot.total_redo_duration_ns, first);
+    append_field(out, "last_redo_duration_ns", snapshot.last_redo_duration_ns, first);
+    append_field(out, "max_redo_duration_ns", snapshot.max_redo_duration_ns, first);
+    append_field(out, "undo_invocations", snapshot.undo_invocations, first);
+    append_field(out, "undo_failures", snapshot.undo_failures, first);
+    append_field(out, "total_undo_duration_ns", snapshot.total_undo_duration_ns, first);
+    append_field(out, "last_undo_duration_ns", snapshot.last_undo_duration_ns, first);
+    append_field(out, "max_undo_duration_ns", snapshot.max_undo_duration_ns, first);
+    append_field(out, "cleanup_invocations", snapshot.cleanup_invocations, first);
+    append_field(out, "cleanup_failures", snapshot.cleanup_failures, first);
+    append_field(out, "total_cleanup_duration_ns", snapshot.total_cleanup_duration_ns, first);
+    append_field(out, "last_cleanup_duration_ns", snapshot.last_cleanup_duration_ns, first);
+    append_field(out, "max_cleanup_duration_ns", snapshot.max_cleanup_duration_ns, first);
+    append_field(out, "last_replay_backlog_bytes", snapshot.last_replay_backlog_bytes, first);
+    append_field(out, "max_replay_backlog_bytes", snapshot.max_replay_backlog_bytes, first);
+    out.push_back('}');
+}
+
 void append_index_retention_snapshot(std::string& out, const IndexRetentionTelemetrySnapshot& snapshot)
 {
     out.push_back('{');
@@ -528,6 +560,29 @@ void append_retention_section(std::string& out, const StorageDiagnosticsRetentio
     out.push_back('}');
 }
 
+void append_recovery_section(std::string& out, const StorageDiagnosticsRecoverySection& section)
+{
+    out.push_back('{');
+    out.append("\"total\":");
+    append_recovery_snapshot(out, section.total);
+    out.append(",\"details\":[");
+    bool first = true;
+    for (const auto& entry : section.details) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out.push_back('{');
+        out.append("\"id\":");
+        append_json_string(out, entry.identifier);
+        out.append(",\"telemetry\":");
+        append_recovery_snapshot(out, entry.snapshot);
+        out.push_back('}');
+    }
+    out.push_back(']');
+    out.push_back('}');
+}
+
 void append_index_retention_section(std::string& out, const StorageDiagnosticsIndexRetentionSection& section)
 {
     out.push_back('{');
@@ -806,6 +861,7 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
         std::sort(document.checkpoints.details.begin(), document.checkpoints.details.end(),
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
+    document.last_checkpoint_lsn = document.checkpoints.total.last_checkpoint_lsn;
 
     document.retention.total = registry.aggregate_wal_retention();
     if (options.include_retention_details) {
@@ -815,6 +871,16 @@ StorageDiagnosticsDocument collect_storage_diagnostics(const StorageTelemetryReg
         std::sort(document.retention.details.begin(), document.retention.details.end(),
                   [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
     }
+
+    document.recovery.total = registry.aggregate_recovery();
+    if (options.include_recovery_details) {
+        registry.visit_recovery([&](const std::string& identifier, const RecoveryTelemetrySnapshot& snapshot) {
+            document.recovery.details.push_back(StorageDiagnosticsRecoveryEntry{identifier, snapshot});
+        });
+        std::sort(document.recovery.details.begin(), document.recovery.details.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.identifier < rhs.identifier; });
+    }
+    document.outstanding_replay_backlog_bytes = document.recovery.total.last_replay_backlog_bytes;
 
     document.index_retention.total = registry.aggregate_index_retention();
     if (options.include_index_retention_details) {
@@ -926,12 +992,18 @@ std::string storage_diagnostics_to_json(const StorageDiagnosticsDocument& docume
     out.append("\"collected_at_ns\":");
     const auto collected_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(document.collected_at.time_since_epoch()).count();
     out.append(std::to_string(static_cast<long long>(collected_ns)));
+    out.append(",\"last_checkpoint_lsn\":");
+    out.append(std::to_string(document.last_checkpoint_lsn));
+    out.append(",\"outstanding_replay_backlog_bytes\":");
+    out.append(std::to_string(document.outstanding_replay_backlog_bytes));
     out.append(",\"page_managers\":");
     append_page_manager_section(out, document.page_managers);
     out.append(",\"checkpoints\":");
     append_checkpoint_section(out, document.checkpoints);
     out.append(",\"retention\":");
     append_retention_section(out, document.retention);
+    out.append(",\"recovery\":");
+    append_recovery_section(out, document.recovery);
     out.append(",\"index_retention\":");
     append_index_retention_section(out, document.index_retention);
     out.append(",\"indexes\":");

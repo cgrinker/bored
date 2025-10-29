@@ -45,7 +45,10 @@ struct RecoveryTelemetryState final {
     mutable std::mutex mutex{};
 
     [[nodiscard]] RecoveryTelemetrySnapshot sample() const;
-    void record_plan(std::uint64_t enumerate_ns, std::uint64_t total_ns, bool success);
+    void record_plan(std::uint64_t enumerate_ns,
+                     std::uint64_t total_ns,
+                     std::uint64_t backlog_bytes,
+                     bool success);
     void record_redo(std::uint64_t duration_ns, bool success);
     void record_undo(std::uint64_t duration_ns, bool success);
     void record_cleanup(std::uint64_t duration_ns, bool success);

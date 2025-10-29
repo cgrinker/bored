@@ -50,8 +50,8 @@ The checkpoint and recovery coordination layer integrates relational components 
 - **Goals:** Provide visibility into checkpoint lag, recovery progress, and failure scenarios for operators.
 - **Key Tasks:**
   - [x] Emit telemetry for checkpoint queue depth, blocked transactions, and recovery phase timing through `StorageTelemetryRegistry`.
-  - [ ] Expand diagnostics surfaces to record last successful checkpoint LSN and outstanding replay backlog.
-  - [ ] Document playbook for troubleshooting failed checkpoints and slow recovery in `docs/storage.md`.
+  - [x] Expand diagnostics surfaces to record last successful checkpoint LSN and outstanding replay backlog.
+  - [x] Document playbook for troubleshooting failed checkpoints and slow recovery in `docs/storage.md`.
 - **Exit Criteria:**
-  - [ ] Integration tests verify telemetry emission, and documentation covers operator workflows for monitoring and remediation.
-**Current Status:** `CheckpointScheduler`, `TransactionManager`, and `WalRecoveryDriver/WalReplayer` publish queue depth, block duration, and plan/redo/undo/cleanup timings into `StorageTelemetryRegistry`; diagnostics and operator guides remain TODO.
+  - [x] Integration tests verify telemetry emission, and documentation covers operator workflows for monitoring and remediation.
+**Current Status:** `CheckpointScheduler`, `TransactionManager`, and `WalRecoveryDriver/WalReplayer` publish queue depth, block duration, and plan/redo/undo/cleanup timings into `StorageTelemetryRegistry`. Diagnostics now surface `last_checkpoint_lsn` and `outstanding_replay_backlog_bytes` alongside recovery snapshots, and the storage guide now ships a checkpoint/recovery troubleshooting playbook.

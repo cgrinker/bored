@@ -130,6 +130,8 @@ struct RecoveryTelemetrySnapshot final {
     std::uint64_t total_cleanup_duration_ns = 0U;
     std::uint64_t last_cleanup_duration_ns = 0U;
     std::uint64_t max_cleanup_duration_ns = 0U;
+    std::uint64_t last_replay_backlog_bytes = 0U;
+    std::uint64_t max_replay_backlog_bytes = 0U;
 };
 
 struct IndexRetentionTelemetrySnapshot final {

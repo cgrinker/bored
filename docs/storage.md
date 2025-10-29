@@ -66,7 +66,7 @@ This document captures the first pass at the on-disk layout for the experimental
 
 ### Diagnostics Entry Points
 
-- **Telemetry snapshots:** Call `storage::collect_storage_diagnostics()` (see `storage_diagnostics.hpp`) to obtain a JSON blob containing WAL writer throughput, checkpoint cadence, retention pruning counts, vacuum activity, and transaction horizon gauges. Surface this through an HTTP endpoint or CLI command; consumers should treat missing fields as component-disabled rather than failure.
+- **Telemetry snapshots:** Call `storage::collect_storage_diagnostics()` (see `storage_diagnostics.hpp`) to obtain a JSON blob containing WAL writer throughput, checkpoint cadence, retention pruning counts, vacuum activity, and transaction horizon gauges. The export now promotes `last_checkpoint_lsn` and `outstanding_replay_backlog_bytes` to top-level fields so operators can gauge restart readiness at a glance. Surface this through an HTTP endpoint or CLI command; consumers should treat missing fields as component-disabled rather than failure.
 - **Point-in-time probes:** The `bored_tests` harness exercises `WalRecoveryDriver`, `WalReplayer`, and `WalUndoWalker` end-to-end. Re-run `ctest -R wal_.*` during incident response to validate replay primitives after code or configuration changes.
 - **Log sampling:** Set `WalWriterConfig::telemetry_identifier` plus `WalWriterConfig::telemetry_registry` to register append/fail counters automatically. Pair this with `StorageTelemetryRegistry::snapshot()` to feed dashboards tracking write latency spikes and retention lag.
 - **Filesystem health:** When retention stalls, invoke `WalRetentionManager::collect_metrics()` (exposed through the diagnostics collector) to inspect archived segment counts, prune durations, and oldest-active transaction ids that are blocking reclamation.
@@ -93,6 +93,23 @@ This document captures the first pass at the on-disk layout for the experimental
   1. Snapshot the active data directory and WAL segment set.
   2. Run the replay harness offline; the final fragment/tuple assertions must match the latest durable state.
   3. Archive the diagnostics artefacts alongside the drill ticket for regression tracking.
+
+### Checkpoint & Recovery Troubleshooting Playbook
+
+- **Confirm checkpoint health**
+  1. Pull `storage::collect_storage_diagnostics()` and record `last_checkpoint_lsn`, `checkpoint_queue_depth`, `blocked_transactions`, and `outstanding_replay_backlog_bytes`.
+  2. Compare `last_checkpoint_lsn` with the current durable commit horizon; if drift exceeds policy, flag the window in the incident ticket.
+- **Diagnose failed checkpoints**
+  1. Inspect checkpoint scheduler logs for recent `emit_failures`, `flush_failures`, or coordinator phase errors; correlate timestamps with telemetry counters.
+  2. Re-run `ctest --output-on-failure -R checkpoint_scheduler` to confirm the control flow did not regress after recent changes.
+  3. If failures persist, invoke `CheckpointScheduler::request_force_checkpoint()` (via operator tooling) and capture fresh telemetry snapshots plus WAL writer stats for escalation.
+- **Triaging slow or stalled recovery**
+  1. Review diagnostics for rising `outstanding_replay_backlog_bytes` or repeated `plan_failures`; if backlog grows, inspect retention directories for missing or corrupt segments.
+  2. Execute `ctest --output-on-failure -R wal_recovery` and `-R wal_replay` locally to ensure the binaries can enumerate segments and replay plans with the current build.
+  3. Run `bored_tests "Wal crash drill"` filters to validate crash drills against production WAL archives if available; store outputs with the incident record.
+- **Escalation checklist**
+  1. Attach telemetry JSON before and after mitigation, plus the most recent `CheckpointScheduler` and `WalRecoveryDriver` logs.
+  2. Document operator actions (forced checkpoints, retention overrides, replay dry-runs) so follow-up teams can audit recovery state transitions.
 
 ### Redo/Undo State Flow
 
