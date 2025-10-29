@@ -100,4 +100,9 @@ void CheckpointCoordinator::abort_checkpoint(ActiveCheckpoint& checkpoint) noexc
     checkpoint.checkpoint_id = 0U;
 }
 
+txn::TransactionManager* CheckpointCoordinator::transaction_manager() const noexcept
+{
+    return transaction_manager_;
+}
+
 }  // namespace bored::storage

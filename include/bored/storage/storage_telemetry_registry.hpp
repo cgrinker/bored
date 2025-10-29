@@ -86,6 +86,13 @@ struct CheckpointTelemetrySnapshot final {
     std::uint64_t io_throttle_deferrals = 0U;
     std::uint64_t io_throttle_bytes_consumed = 0U;
     std::uint64_t io_throttle_budget = 0U;
+    std::uint64_t queue_waits = 0U;
+    std::uint64_t last_queue_depth = 0U;
+    std::uint64_t max_queue_depth = 0U;
+    std::uint64_t blocked_transactions = 0U;
+    std::uint64_t total_blocked_duration_ns = 0U;
+    std::uint64_t last_blocked_duration_ns = 0U;
+    std::uint64_t max_blocked_duration_ns = 0U;
 };
 
 struct WalRetentionTelemetrySnapshot final {
@@ -97,6 +104,32 @@ struct WalRetentionTelemetrySnapshot final {
     std::uint64_t archived_segments = 0U;
     std::uint64_t total_duration_ns = 0U;
     std::uint64_t last_duration_ns = 0U;
+};
+
+struct RecoveryTelemetrySnapshot final {
+    std::uint64_t plan_invocations = 0U;
+    std::uint64_t plan_failures = 0U;
+    std::uint64_t total_enumerate_duration_ns = 0U;
+    std::uint64_t last_enumerate_duration_ns = 0U;
+    std::uint64_t max_enumerate_duration_ns = 0U;
+    std::uint64_t total_plan_duration_ns = 0U;
+    std::uint64_t last_plan_duration_ns = 0U;
+    std::uint64_t max_plan_duration_ns = 0U;
+    std::uint64_t redo_invocations = 0U;
+    std::uint64_t redo_failures = 0U;
+    std::uint64_t total_redo_duration_ns = 0U;
+    std::uint64_t last_redo_duration_ns = 0U;
+    std::uint64_t max_redo_duration_ns = 0U;
+    std::uint64_t undo_invocations = 0U;
+    std::uint64_t undo_failures = 0U;
+    std::uint64_t total_undo_duration_ns = 0U;
+    std::uint64_t last_undo_duration_ns = 0U;
+    std::uint64_t max_undo_duration_ns = 0U;
+    std::uint64_t cleanup_invocations = 0U;
+    std::uint64_t cleanup_failures = 0U;
+    std::uint64_t total_cleanup_duration_ns = 0U;
+    std::uint64_t last_cleanup_duration_ns = 0U;
+    std::uint64_t max_cleanup_duration_ns = 0U;
 };
 
 struct IndexRetentionTelemetrySnapshot final {
@@ -176,6 +209,9 @@ public:
     using WalRetentionSampler = std::function<WalRetentionTelemetrySnapshot()>;
     using WalRetentionVisitor = std::function<void(const std::string&, const WalRetentionTelemetrySnapshot&)>;
 
+    using RecoverySampler = std::function<RecoveryTelemetrySnapshot()>;
+    using RecoveryVisitor = std::function<void(const std::string&, const RecoveryTelemetrySnapshot&)>;
+
     using IndexRetentionSampler = std::function<IndexRetentionTelemetrySnapshot()>;
     using IndexRetentionVisitor = std::function<void(const std::string&, const IndexRetentionTelemetrySnapshot&)>;
 
@@ -223,6 +259,11 @@ public:
     void unregister_wal_retention(const std::string& identifier);
     WalRetentionTelemetrySnapshot aggregate_wal_retention() const;
     void visit_wal_retention(const WalRetentionVisitor& visitor) const;
+
+    void register_recovery(std::string identifier, RecoverySampler sampler);
+    void unregister_recovery(const std::string& identifier);
+    RecoveryTelemetrySnapshot aggregate_recovery() const;
+    void visit_recovery(const RecoveryVisitor& visitor) const;
 
     void register_index_retention(std::string identifier, IndexRetentionSampler sampler);
     void unregister_index_retention(const std::string& identifier);
@@ -284,6 +325,7 @@ private:
     std::unordered_map<std::string, PageManagerSampler> page_manager_samplers_{};
     std::unordered_map<std::string, CheckpointSampler> checkpoint_samplers_{};
     std::unordered_map<std::string, WalRetentionSampler> wal_retention_samplers_{};
+    std::unordered_map<std::string, RecoverySampler> recovery_samplers_{};
     std::unordered_map<std::string, IndexRetentionSampler> index_retention_samplers_{};
     std::unordered_map<std::string, IndexSampler> index_samplers_{};
     std::unordered_map<std::string, TempCleanupSampler> temp_cleanup_samplers_{};

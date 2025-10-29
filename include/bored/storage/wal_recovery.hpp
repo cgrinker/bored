@@ -1,11 +1,14 @@
 #pragma once
 
 #include "bored/storage/checkpoint_types.hpp"
+#include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/wal_reader.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -15,6 +18,7 @@ namespace bored::storage {
 
 class TempResourceRegistry;
 enum class TempResourcePurgeReason : std::uint8_t;
+class StorageTelemetryRegistry;
 
 struct WalRecoveryRecord final {
     WalRecordHeader header{};
@@ -34,6 +38,17 @@ struct WalRecoveredTransaction final {
     std::uint64_t commit_lsn = 0U;
     WalRecoveredTransactionState state = WalRecoveredTransactionState::InFlight;
     std::optional<WalRecoveryRecord> commit_record{};
+};
+
+struct RecoveryTelemetryState final {
+    RecoveryTelemetrySnapshot snapshot{};
+    mutable std::mutex mutex{};
+
+    [[nodiscard]] RecoveryTelemetrySnapshot sample() const;
+    void record_plan(std::uint64_t enumerate_ns, std::uint64_t total_ns, bool success);
+    void record_redo(std::uint64_t duration_ns, bool success);
+    void record_undo(std::uint64_t duration_ns, bool success);
+    void record_cleanup(std::uint64_t duration_ns, bool success);
 };
 
 struct WalUndoSpan final {
@@ -60,6 +75,7 @@ struct WalRecoveryPlan final {
     std::uint64_t checkpoint_id = 0U;
     std::uint64_t checkpoint_redo_lsn = 0U;
     std::uint64_t checkpoint_undo_lsn = 0U;
+    std::shared_ptr<RecoveryTelemetryState> telemetry{};
 };
 
 class WalRecoveryDriver final {
@@ -68,9 +84,14 @@ public:
                       std::string file_prefix = "wal",
                       std::string file_extension = ".seg",
                       TempResourceRegistry* temp_resource_registry = nullptr,
-                      std::filesystem::path checkpoint_directory = {});
+                      std::filesystem::path checkpoint_directory = {},
+                      StorageTelemetryRegistry* telemetry_registry = nullptr,
+                      std::string telemetry_identifier = {});
+    ~WalRecoveryDriver();
 
     [[nodiscard]] std::error_code build_plan(WalRecoveryPlan& plan) const;
+
+    [[nodiscard]] std::shared_ptr<RecoveryTelemetryState> telemetry_state() const noexcept;
 
 private:
     [[nodiscard]] std::error_code load_checkpoint_snapshots(std::uint64_t checkpoint_id,
@@ -79,6 +100,9 @@ private:
     WalReader reader_;
     TempResourceRegistry* temp_resource_registry_ = nullptr;
     std::filesystem::path checkpoint_directory_{};
+    StorageTelemetryRegistry* telemetry_registry_ = nullptr;
+    std::string telemetry_identifier_{};
+    std::shared_ptr<RecoveryTelemetryState> telemetry_state_{};
 };
 
 }  // namespace bored::storage

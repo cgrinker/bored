@@ -9,6 +9,7 @@
 #include "bored/storage/page_format.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <vector>
 #include <utility>
 #include <limits>
@@ -136,6 +137,43 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
 {
     out_result.reset();
 
+    struct QueueGuard final {
+        explicit QueueGuard(std::atomic<std::size_t>& counter) noexcept
+            : counter_{counter}
+            , depth_{counter_.fetch_add(1U, std::memory_order_acq_rel) + 1U}
+        {
+        }
+
+        QueueGuard(const QueueGuard&) = delete;
+        QueueGuard& operator=(const QueueGuard&) = delete;
+
+        ~QueueGuard()
+        {
+            counter_.fetch_sub(1U, std::memory_order_acq_rel);
+        }
+
+        [[nodiscard]] std::size_t depth() const noexcept
+        {
+            return depth_;
+        }
+
+    private:
+        std::atomic<std::size_t>& counter_;
+        std::size_t depth_ = 0U;
+    };
+
+    QueueGuard queue_guard{queue_depth_counter_};
+    std::unique_lock<std::mutex> run_lock{run_mutex_};
+    {
+        const auto depth = static_cast<std::uint64_t>(queue_guard.depth());
+        std::lock_guard guard{telemetry_mutex_};
+    telemetry_.last_queue_depth = depth;
+        telemetry_.max_queue_depth = std::max(telemetry_.max_queue_depth, depth);
+        if (depth > 1U) {
+            telemetry_.queue_waits += 1U;
+        }
+    }
+
     if (!checkpoint_manager_) {
         return std::make_error_code(std::errc::operation_not_permitted);
     }
@@ -219,6 +257,31 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     const bool use_coordinator = coordinator_ != nullptr;
     const bool dry_run_only = config_.dry_run_only;
 
+    txn::TransactionManager* transaction_manager = nullptr;
+    if (use_coordinator && coordinator_ != nullptr) {
+        transaction_manager = coordinator_->transaction_manager();
+        if (transaction_manager != nullptr) {
+            transaction_manager->reset_checkpoint_block_metrics();
+        }
+    }
+
+    bool block_metrics_consumed = false;
+    auto consume_block_metrics = [&]() {
+        if (block_metrics_consumed || transaction_manager == nullptr) {
+            return;
+        }
+        auto metrics = transaction_manager->consume_checkpoint_block_metrics();
+        {
+            std::lock_guard guard{telemetry_mutex_};
+            telemetry_.blocked_transactions += metrics.blocked_transactions;
+            telemetry_.total_blocked_duration_ns += metrics.total_blocked_duration_ns;
+            telemetry_.last_blocked_duration_ns = metrics.last_blocked_duration_ns;
+            telemetry_.max_blocked_duration_ns = std::max(telemetry_.max_blocked_duration_ns,
+                                                          metrics.max_blocked_duration_ns);
+        }
+        block_metrics_consumed = true;
+    };
+
     std::chrono::steady_clock::time_point fence_start{};
     bool fence_active = false;
 
@@ -245,6 +308,7 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
                 std::lock_guard guard{telemetry_mutex_};
                 telemetry_.coordinator_abort_calls += 1U;
             }
+            consume_block_metrics();
             return begin_ec;
         }
 
@@ -273,6 +337,7 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
                 std::lock_guard guard{telemetry_mutex_};
                 telemetry_.coordinator_abort_calls += 1U;
             }
+            consume_block_metrics();
             return prepare_ec;
         }
 
@@ -283,6 +348,7 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
                 telemetry_.coordinator_abort_calls += 1U;
                 telemetry_.coordinator_dry_runs += 1U;
             }
+            consume_block_metrics();
             return {};
         }
     }
@@ -333,6 +399,7 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     }
 
     if (emit_ec) {
+        consume_block_metrics();
         return emit_ec;
     }
 
@@ -362,6 +429,7 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
                 telemetry_.last_flush_duration_ns = flush_duration_ns;
                 telemetry_.flush_failures += 1U;
             }
+            consume_block_metrics();
             return flush_ec;
         }
 
@@ -396,6 +464,7 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
                 retention_telemetry_.total_duration_ns += retention_duration_ns;
                 retention_telemetry_.last_duration_ns = retention_duration_ns;
             }
+            consume_block_metrics();
             return retention_ec;
         }
 
@@ -421,6 +490,7 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     if (index_retention_hook_) {
         IndexRetentionStats index_stats{};
         if (auto index_retention_ec = index_retention_hook_(now, append_result.lsn, &index_stats); index_retention_ec) {
+            consume_block_metrics();
             return index_retention_ec;
         }
     }
@@ -458,6 +528,7 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
     }
 
     out_result = append_result;
+    consume_block_metrics();
     return {};
 }
 

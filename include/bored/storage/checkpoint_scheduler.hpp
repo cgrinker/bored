@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -124,6 +125,8 @@ private:
     mutable std::size_t io_target_bytes_per_second_ = 0U;
     mutable std::chrono::steady_clock::time_point io_last_refill_{};
     mutable bool io_refill_initialized_ = false;
+    mutable std::mutex run_mutex_{};
+    mutable std::atomic<std::size_t> queue_depth_counter_{0U};
 };
 
 }  // namespace bored::storage

@@ -1,18 +1,78 @@
 #include "bored/storage/wal_recovery.hpp"
 
 #include "bored/storage/checkpoint_image_store.hpp"
+#include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/temp_resource_registry.hpp"
 #include "bored/storage/wal_format.hpp"
 #include "bored/storage/wal_payloads.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
 
 namespace bored::storage {
+
+RecoveryTelemetrySnapshot RecoveryTelemetryState::sample() const
+{
+    std::lock_guard guard{mutex};
+    return snapshot;
+}
+
+void RecoveryTelemetryState::record_plan(std::uint64_t enumerate_ns, std::uint64_t total_ns, bool success)
+{
+    std::lock_guard guard{mutex};
+    snapshot.plan_invocations += 1U;
+    if (!success) {
+        snapshot.plan_failures += 1U;
+    }
+    snapshot.total_enumerate_duration_ns += enumerate_ns;
+    snapshot.last_enumerate_duration_ns = enumerate_ns;
+    snapshot.max_enumerate_duration_ns = std::max(snapshot.max_enumerate_duration_ns, enumerate_ns);
+    snapshot.total_plan_duration_ns += total_ns;
+    snapshot.last_plan_duration_ns = total_ns;
+    snapshot.max_plan_duration_ns = std::max(snapshot.max_plan_duration_ns, total_ns);
+}
+
+void RecoveryTelemetryState::record_redo(std::uint64_t duration_ns, bool success)
+{
+    std::lock_guard guard{mutex};
+    snapshot.redo_invocations += 1U;
+    if (!success) {
+        snapshot.redo_failures += 1U;
+    }
+    snapshot.total_redo_duration_ns += duration_ns;
+    snapshot.last_redo_duration_ns = duration_ns;
+    snapshot.max_redo_duration_ns = std::max(snapshot.max_redo_duration_ns, duration_ns);
+}
+
+void RecoveryTelemetryState::record_undo(std::uint64_t duration_ns, bool success)
+{
+    std::lock_guard guard{mutex};
+    snapshot.undo_invocations += 1U;
+    if (!success) {
+        snapshot.undo_failures += 1U;
+    }
+    snapshot.total_undo_duration_ns += duration_ns;
+    snapshot.last_undo_duration_ns = duration_ns;
+    snapshot.max_undo_duration_ns = std::max(snapshot.max_undo_duration_ns, duration_ns);
+}
+
+void RecoveryTelemetryState::record_cleanup(std::uint64_t duration_ns, bool success)
+{
+    std::lock_guard guard{mutex};
+    snapshot.cleanup_invocations += 1U;
+    if (!success) {
+        snapshot.cleanup_failures += 1U;
+    }
+    snapshot.total_cleanup_duration_ns += duration_ns;
+    snapshot.last_cleanup_duration_ns = duration_ns;
+    snapshot.max_cleanup_duration_ns = std::max(snapshot.max_cleanup_duration_ns, duration_ns);
+}
 
 namespace {
 
@@ -111,15 +171,53 @@ WalRecoveryDriver::WalRecoveryDriver(std::filesystem::path directory,
                                      std::string file_prefix,
                                      std::string file_extension,
                                      TempResourceRegistry* temp_resource_registry,
-                                     std::filesystem::path checkpoint_directory)
+                                     std::filesystem::path checkpoint_directory,
+                                     StorageTelemetryRegistry* telemetry_registry,
+                                     std::string telemetry_identifier)
     : reader_{std::move(directory), std::move(file_prefix), std::move(file_extension)}
     , temp_resource_registry_{temp_resource_registry}
     , checkpoint_directory_{std::move(checkpoint_directory)}
+    , telemetry_registry_{telemetry_registry}
+    , telemetry_identifier_{std::move(telemetry_identifier)}
+    , telemetry_state_{std::make_shared<RecoveryTelemetryState>()}
 {
+    if (telemetry_registry_ && !telemetry_identifier_.empty()) {
+        std::weak_ptr<RecoveryTelemetryState> weak_state{telemetry_state_};
+        telemetry_registry_->register_recovery(telemetry_identifier_, [weak_state] {
+            if (auto state = weak_state.lock()) {
+                return state->sample();
+            }
+            return RecoveryTelemetrySnapshot{};
+        });
+    }
+}
+
+WalRecoveryDriver::~WalRecoveryDriver()
+{
+    if (telemetry_registry_ && !telemetry_identifier_.empty()) {
+        telemetry_registry_->unregister_recovery(telemetry_identifier_);
+    }
+}
+
+std::shared_ptr<RecoveryTelemetryState> WalRecoveryDriver::telemetry_state() const noexcept
+{
+    return telemetry_state_;
 }
 
 std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
 {
+    const auto plan_start = std::chrono::steady_clock::now();
+    std::uint64_t enumerate_duration_ns = 0U;
+    auto record_plan_metrics = [&](bool success) {
+        if (!telemetry_state_) {
+            return;
+        }
+        const auto plan_end = std::chrono::steady_clock::now();
+        const auto plan_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(plan_end - plan_start);
+        const auto total_ns = plan_ns.count() > 0 ? static_cast<std::uint64_t>(plan_ns.count()) : 0ULL;
+        telemetry_state_->record_plan(enumerate_duration_ns, total_ns, success);
+    };
+
     plan.redo.clear();
     plan.undo.clear();
     plan.undo_spans.clear();
@@ -137,10 +235,19 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
     plan.checkpoint_id = 0U;
     plan.checkpoint_redo_lsn = 0U;
     plan.checkpoint_undo_lsn = 0U;
+    plan.telemetry = telemetry_state_;
 
     std::vector<WalSegmentView> segments;
-    if (auto ec = reader_.enumerate_segments(segments); ec) {
-        return ec;
+    {
+        const auto enumerate_start = std::chrono::steady_clock::now();
+        auto enumerate_ec = reader_.enumerate_segments(segments);
+        const auto enumerate_end = std::chrono::steady_clock::now();
+        const auto enumerate_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(enumerate_end - enumerate_start);
+        enumerate_duration_ns = enumerate_ns.count() > 0 ? static_cast<std::uint64_t>(enumerate_ns.count()) : 0ULL;
+        if (enumerate_ec) {
+            record_plan_metrics(false);
+            return enumerate_ec;
+        }
     }
 
     std::unordered_map<std::uint32_t, TransactionState> transactions;
@@ -202,6 +309,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 plan.truncated_segment_id = segment.header.segment_id;
                 plan.truncated_lsn = last_valid_lsn(segment.header.start_lsn, records);
             } else {
+                record_plan_metrics(false);
                 return ec;
             }
         }
@@ -222,6 +330,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 auto payload = std::span<const std::byte>(record_view.payload.data(), record_view.payload.size());
                 auto commit = decode_wal_commit(payload);
                 if (!commit) {
+                    record_plan_metrics(false);
                     return std::make_error_code(std::errc::invalid_argument);
                 }
 
@@ -281,6 +390,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
             case WalRecordType::Abort: {
                 auto owner = owner_identifier(record_view);
                 if (!owner) {
+                    record_plan_metrics(false);
                     return std::make_error_code(std::errc::invalid_argument);
                 }
                 if (*owner != 0U) {
@@ -304,6 +414,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 auto payload = std::span<const std::byte>(record_view.payload.data(), record_view.payload.size());
                 auto checkpoint = decode_wal_checkpoint(payload);
                 if (!checkpoint) {
+                    record_plan_metrics(false);
                     return std::make_error_code(std::errc::invalid_argument);
                 }
                 plan.checkpoint_id = checkpoint->header.checkpoint_id;
@@ -321,6 +432,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 plan.checkpoint_page_snapshots.clear();
                 if (auto snapshot_ec = load_checkpoint_snapshots(plan.checkpoint_id, plan.checkpoint_page_snapshots); snapshot_ec) {
                     if (snapshot_ec != std::make_error_code(std::errc::no_such_file_or_directory)) {
+                        record_plan_metrics(false);
                         return snapshot_ec;
                     }
                 }
@@ -342,9 +454,11 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
             default: {
                 auto owner = owner_identifier(record_view);
                 if (!owner) {
+                    record_plan_metrics(false);
                     return std::make_error_code(std::errc::invalid_argument);
                 }
                 if (*owner == 0U || *owner > std::numeric_limits<std::uint32_t>::max()) {
+                    record_plan_metrics(false);
                     return std::make_error_code(std::errc::invalid_argument);
                 }
                 const auto owner_id = static_cast<std::uint32_t>(*owner);
@@ -395,6 +509,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
         plan.transactions.push_back(entry.second->transaction);
     }
 
+    record_plan_metrics(true);
     return {};
 }
 

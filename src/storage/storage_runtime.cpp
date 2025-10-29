@@ -212,7 +212,9 @@ WalRecoveryDriver StorageRuntime::make_recovery_driver() const
                              wal_writer_config_.file_prefix,
                              wal_writer_config_.file_extension,
                              const_cast<TempResourceRegistry*>(&temp_registry()),
-                             checkpoint_directory};
+                             checkpoint_directory,
+                             config_.storage_telemetry_registry,
+                             config_.storage_telemetry_registry ? std::string{"wal_recovery"} : std::string{}};
 }
 
 }  // namespace bored::storage

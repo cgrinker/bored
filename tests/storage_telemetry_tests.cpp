@@ -111,6 +111,13 @@ CheckpointTelemetrySnapshot make_checkpoint_snapshot(std::uint64_t base)
     snapshot.io_throttle_deferrals = base + 44U;
     snapshot.io_throttle_bytes_consumed = (base + 45U) * 70U;
     snapshot.io_throttle_budget = base + 46U;
+    snapshot.queue_waits = base + 47U;
+    snapshot.last_queue_depth = base + 48U;
+    snapshot.max_queue_depth = base + 49U;
+    snapshot.blocked_transactions = base + 50U;
+    snapshot.total_blocked_duration_ns = (base + 51U) * 80U;
+    snapshot.last_blocked_duration_ns = (base + 52U) * 8U;
+    snapshot.max_blocked_duration_ns = (base + 53U) * 9U;
     return snapshot;
 }
 
@@ -349,6 +356,13 @@ TEST_CASE("StorageTelemetryRegistry aggregates checkpoint schedulers")
     REQUIRE(total.io_throttle_deferrals == ((10U + 44U) + (20U + 44U)));
     REQUIRE(total.io_throttle_bytes_consumed == ((10U + 45U) * 70U + (20U + 45U) * 70U));
     REQUIRE(total.io_throttle_budget == (20U + 46U));
+    REQUIRE(total.queue_waits == ((10U + 47U) + (20U + 47U)));
+    REQUIRE(total.last_queue_depth == (20U + 48U));
+    REQUIRE(total.max_queue_depth == (20U + 49U));
+    REQUIRE(total.blocked_transactions == ((10U + 50U) + (20U + 50U)));
+    REQUIRE(total.total_blocked_duration_ns == ((10U + 51U) * 80U + (20U + 51U) * 80U));
+    REQUIRE(total.last_blocked_duration_ns == ((20U + 52U) * 8U));
+    REQUIRE(total.max_blocked_duration_ns == ((20U + 53U) * 9U));
 }
 
 TEST_CASE("StorageTelemetryRegistry aggregates WAL retention samplers")

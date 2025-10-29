@@ -9,8 +9,10 @@
 #include "bored/storage/wal_undo_walker.hpp"
 
 #include <algorithm>
-#include <limits>
+#include <chrono>
 #include <cstring>
+#include <limits>
+#include <span>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -685,15 +687,27 @@ WalReplayer::WalReplayer(WalReplayContext& context)
 
 std::error_code WalReplayer::apply_redo(const WalRecoveryPlan& plan)
 {
+    auto telemetry_state = plan.telemetry;
+    const auto redo_start = std::chrono::steady_clock::now();
+    auto record_redo = [&](std::error_code ec) -> std::error_code {
+        if (telemetry_state) {
+            const auto redo_end = std::chrono::steady_clock::now();
+            const auto redo_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(redo_end - redo_start);
+            const auto duration_ns = redo_ns.count() > 0 ? static_cast<std::uint64_t>(redo_ns.count()) : 0ULL;
+            telemetry_state->record_redo(duration_ns, !ec);
+        }
+        return ec;
+    };
+
     context_.set_checkpoint_index_metadata(std::span<const CheckpointIndexMetadata>(plan.checkpoint_index_metadata.data(),
                                                                                     plan.checkpoint_index_metadata.size()));
 
     for (const auto& snapshot : plan.checkpoint_page_snapshots) {
         if (snapshot.entry.page_id == 0U) {
-            return std::make_error_code(std::errc::invalid_argument);
+            return record_redo(std::make_error_code(std::errc::invalid_argument));
         }
         if (snapshot.image.size() != kPageSize) {
-            return std::make_error_code(std::errc::invalid_argument);
+            return record_redo(std::make_error_code(std::errc::invalid_argument));
         }
         context_.set_page(snapshot.entry.page_id,
                           std::span<const std::byte>(snapshot.image.data(), snapshot.image.size()));
@@ -701,22 +715,37 @@ std::error_code WalReplayer::apply_redo(const WalRecoveryPlan& plan)
 
     for (const auto& record : plan.redo) {
         if (auto ec = apply_redo_record(record); ec) {
-            return ec;
+            return record_redo(ec);
         }
     }
-    return {};
+    return record_redo({});
 }
 
 std::error_code WalReplayer::apply_undo(const WalRecoveryPlan& plan)
 {
+    auto telemetry_state = plan.telemetry;
+    const auto undo_start = std::chrono::steady_clock::now();
+    bool undo_recorded = false;
+    auto record_undo = [&](std::error_code ec) -> std::error_code {
+        if (!undo_recorded && telemetry_state) {
+            const auto undo_end = std::chrono::steady_clock::now();
+            const auto undo_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(undo_end - undo_start);
+            const auto duration_ns = undo_ns.count() > 0 ? static_cast<std::uint64_t>(undo_ns.count()) : 0ULL;
+            telemetry_state->record_undo(duration_ns, !ec);
+            undo_recorded = true;
+        }
+        return ec;
+    };
+
     if (plan.undo_spans.empty()) {
         for (const auto& record : plan.undo) {
             last_undo_type_ = static_cast<WalRecordType>(record.header.type);
             if (auto ec = apply_undo_record(record); ec) {
-                return ec;
+                return record_undo(ec);
             }
         }
         last_undo_type_.reset();
+        (void)record_undo({});
         return run_temp_cleanup(plan);
     }
 
@@ -743,12 +772,13 @@ std::error_code WalReplayer::apply_undo(const WalRecoveryPlan& plan)
         for (const auto& record : work_item->records) {
             last_undo_type_ = static_cast<WalRecordType>(record.header.type);
             if (auto ec = apply_undo_record(record); ec) {
-                return ec;
+                return record_undo(ec);
             }
         }
     }
 
     last_undo_type_.reset();
+    (void)record_undo({});
     return run_temp_cleanup(plan);
 }
 
@@ -957,12 +987,24 @@ std::optional<WalRecordType> WalReplayer::last_undo_type() const noexcept
 
 std::error_code WalReplayer::run_temp_cleanup(const WalRecoveryPlan& plan) const
 {
+    auto telemetry_state = plan.telemetry;
+    const auto cleanup_start = std::chrono::steady_clock::now();
+    auto record_cleanup = [&](std::error_code ec) -> std::error_code {
+        if (telemetry_state) {
+            const auto cleanup_end = std::chrono::steady_clock::now();
+            const auto cleanup_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(cleanup_end - cleanup_start);
+            const auto duration_ns = cleanup_ns.count() > 0 ? static_cast<std::uint64_t>(cleanup_ns.count()) : 0ULL;
+            telemetry_state->record_cleanup(duration_ns, !ec);
+        }
+        return ec;
+    };
+
     if (plan.temp_resource_registry == nullptr) {
-        return {};
+        return record_cleanup({});
     }
 
     TempResourcePurgeStats stats{};
-    return plan.temp_resource_registry->purge(TempResourcePurgeReason::Recovery, &stats);
+    return record_cleanup(plan.temp_resource_registry->purge(TempResourcePurgeReason::Recovery, &stats));
 }
 
 }  // namespace bored::storage

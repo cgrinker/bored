@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -175,7 +176,33 @@ TransactionContext TransactionManager::begin(const TransactionOptions& options)
 
     {
         std::unique_lock<std::mutex> lock{mutex_};
-        checkpoint_condition_.wait(lock, [this]() noexcept { return !checkpoint_guard_active_; });
+        std::chrono::steady_clock::time_point block_start{};
+        bool recorded_block = false;
+
+        while (checkpoint_guard_active_) {
+            if (!recorded_block) {
+                recorded_block = true;
+                block_start = std::chrono::steady_clock::now();
+                ++checkpoint_block_metrics_.blocked_transactions;
+                ++checkpoint_block_waiters_;
+            }
+            checkpoint_condition_.wait(lock);
+        }
+
+        if (recorded_block) {
+            const auto block_end = std::chrono::steady_clock::now();
+            const auto blocked_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(block_end - block_start);
+            const auto blocked_duration = blocked_ns.count() > 0 ? static_cast<std::uint64_t>(blocked_ns.count()) : 0ULL;
+            checkpoint_block_metrics_.total_blocked_duration_ns += blocked_duration;
+            checkpoint_block_metrics_.last_blocked_duration_ns = blocked_duration;
+            checkpoint_block_metrics_.max_blocked_duration_ns = std::max(checkpoint_block_metrics_.max_blocked_duration_ns,
+                                                                         blocked_duration);
+            if (checkpoint_block_waiters_ > 0U) {
+                --checkpoint_block_waiters_;
+                checkpoint_metrics_condition_.notify_all();
+            }
+        }
+
         state->id = id_allocator_->allocate();
         state->state = TransactionState::Active;
         last_allocated_id_ = state->id;
@@ -382,6 +409,23 @@ TransactionManager::CheckpointFence TransactionManager::acquire_checkpoint_fence
     const auto oldest_active = oldest_active_ != 0U ? oldest_active_ : external_low_water_mark_;
     const auto next_id = id_allocator_ != nullptr ? id_allocator_->peek_next() : 0U;
     return CheckpointFence{this, std::move(snapshot), oldest_active, next_id};
+}
+
+void TransactionManager::reset_checkpoint_block_metrics()
+{
+    std::scoped_lock lock{mutex_};
+    checkpoint_block_metrics_ = {};
+    checkpoint_block_waiters_ = 0U;
+    checkpoint_metrics_condition_.notify_all();
+}
+
+TransactionManager::CheckpointBlockMetrics TransactionManager::consume_checkpoint_block_metrics()
+{
+    std::unique_lock<std::mutex> lock{mutex_};
+    checkpoint_metrics_condition_.wait(lock, [this]() noexcept { return checkpoint_block_waiters_ == 0U; });
+    auto metrics = checkpoint_block_metrics_;
+    checkpoint_block_metrics_ = {};
+    return metrics;
 }
 
 void TransactionManager::complete_abort(TransactionContext& ctx)

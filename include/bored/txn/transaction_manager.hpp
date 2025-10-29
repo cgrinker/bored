@@ -54,6 +54,13 @@ private:
 
 class TransactionManager final : public SnapshotManager {
 public:
+    struct CheckpointBlockMetrics final {
+        std::uint64_t blocked_transactions = 0U;
+        std::uint64_t total_blocked_duration_ns = 0U;
+        std::uint64_t last_blocked_duration_ns = 0U;
+        std::uint64_t max_blocked_duration_ns = 0U;
+    };
+
     class CheckpointFence final {
     public:
         CheckpointFence() = default;
@@ -105,6 +112,8 @@ public:
 
     void advance_low_water_mark(TransactionId txn_id);
     CheckpointFence acquire_checkpoint_fence();
+    void reset_checkpoint_block_metrics();
+    CheckpointBlockMetrics consume_checkpoint_block_metrics();
 
 private:
     using StatePtr = std::shared_ptr<TransactionContext::State>;
@@ -139,6 +148,9 @@ private:
     mutable Telemetry telemetry_{};
     bool checkpoint_guard_active_ = false;
     mutable std::condition_variable checkpoint_condition_{};
+    mutable CheckpointBlockMetrics checkpoint_block_metrics_{};
+    mutable std::condition_variable checkpoint_metrics_condition_{};
+    mutable std::uint32_t checkpoint_block_waiters_ = 0U;
 };
 
 }  // namespace bored::txn

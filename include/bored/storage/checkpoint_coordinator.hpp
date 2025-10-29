@@ -43,6 +43,8 @@ public:
 
     void abort_checkpoint(ActiveCheckpoint& checkpoint) noexcept;
 
+    [[nodiscard]] txn::TransactionManager* transaction_manager() const noexcept;
+
 private:
     std::shared_ptr<CheckpointManager> checkpoint_manager_{};
     txn::TransactionManager* transaction_manager_ = nullptr;

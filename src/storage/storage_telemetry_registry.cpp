@@ -93,6 +93,13 @@ CheckpointTelemetrySnapshot& accumulate(CheckpointTelemetrySnapshot& target, con
     target.io_throttle_deferrals += source.io_throttle_deferrals;
     target.io_throttle_bytes_consumed += source.io_throttle_bytes_consumed;
     target.io_throttle_budget = std::max(target.io_throttle_budget, source.io_throttle_budget);
+    target.queue_waits += source.queue_waits;
+    target.last_queue_depth = std::max(target.last_queue_depth, source.last_queue_depth);
+    target.max_queue_depth = std::max(target.max_queue_depth, source.max_queue_depth);
+    target.blocked_transactions += source.blocked_transactions;
+    target.total_blocked_duration_ns += source.total_blocked_duration_ns;
+    target.last_blocked_duration_ns = std::max(target.last_blocked_duration_ns, source.last_blocked_duration_ns);
+    target.max_blocked_duration_ns = std::max(target.max_blocked_duration_ns, source.max_blocked_duration_ns);
     return target;
 }
 
@@ -106,6 +113,34 @@ WalRetentionTelemetrySnapshot& accumulate(WalRetentionTelemetrySnapshot& target,
     target.archived_segments += source.archived_segments;
     target.total_duration_ns += source.total_duration_ns;
     target.last_duration_ns = std::max(target.last_duration_ns, source.last_duration_ns);
+    return target;
+}
+
+RecoveryTelemetrySnapshot& accumulate(RecoveryTelemetrySnapshot& target, const RecoveryTelemetrySnapshot& source)
+{
+    target.plan_invocations += source.plan_invocations;
+    target.plan_failures += source.plan_failures;
+    target.total_enumerate_duration_ns += source.total_enumerate_duration_ns;
+    target.last_enumerate_duration_ns = std::max(target.last_enumerate_duration_ns, source.last_enumerate_duration_ns);
+    target.max_enumerate_duration_ns = std::max(target.max_enumerate_duration_ns, source.max_enumerate_duration_ns);
+    target.total_plan_duration_ns += source.total_plan_duration_ns;
+    target.last_plan_duration_ns = std::max(target.last_plan_duration_ns, source.last_plan_duration_ns);
+    target.max_plan_duration_ns = std::max(target.max_plan_duration_ns, source.max_plan_duration_ns);
+    target.redo_invocations += source.redo_invocations;
+    target.redo_failures += source.redo_failures;
+    target.total_redo_duration_ns += source.total_redo_duration_ns;
+    target.last_redo_duration_ns = std::max(target.last_redo_duration_ns, source.last_redo_duration_ns);
+    target.max_redo_duration_ns = std::max(target.max_redo_duration_ns, source.max_redo_duration_ns);
+    target.undo_invocations += source.undo_invocations;
+    target.undo_failures += source.undo_failures;
+    target.total_undo_duration_ns += source.total_undo_duration_ns;
+    target.last_undo_duration_ns = std::max(target.last_undo_duration_ns, source.last_undo_duration_ns);
+    target.max_undo_duration_ns = std::max(target.max_undo_duration_ns, source.max_undo_duration_ns);
+    target.cleanup_invocations += source.cleanup_invocations;
+    target.cleanup_failures += source.cleanup_failures;
+    target.total_cleanup_duration_ns += source.total_cleanup_duration_ns;
+    target.last_cleanup_duration_ns = std::max(target.last_cleanup_duration_ns, source.last_cleanup_duration_ns);
+    target.max_cleanup_duration_ns = std::max(target.max_cleanup_duration_ns, source.max_cleanup_duration_ns);
     return target;
 }
 
@@ -463,6 +498,57 @@ void StorageTelemetryRegistry::visit_wal_retention(const WalRetentionVisitor& vi
         std::lock_guard guard(mutex_);
         entries.reserve(wal_retention_samplers_.size());
         for (const auto& [identifier, sampler] : wal_retention_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        if (!sampler) {
+            continue;
+        }
+        visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_recovery(std::string identifier, RecoverySampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    recovery_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_recovery(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    recovery_samplers_.erase(identifier);
+}
+
+RecoveryTelemetrySnapshot StorageTelemetryRegistry::aggregate_recovery() const
+{
+    std::vector<RecoverySampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(recovery_samplers_.size());
+        for (const auto& [_, sampler] : recovery_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<RecoveryTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_recovery(const RecoveryVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, RecoverySampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(recovery_samplers_.size());
+        for (const auto& [identifier, sampler] : recovery_samplers_) {
             entries.emplace_back(identifier, sampler);
         }
     }

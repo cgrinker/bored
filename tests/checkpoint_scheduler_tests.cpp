@@ -520,6 +520,87 @@ TEST_CASE("CheckpointScheduler overlaps checkpoint with concurrent transactions"
     CHECK(telemetry.max_fence_duration_ns >= telemetry.last_fence_duration_ns);
     const auto blocked_ns = static_cast<std::uint64_t>(blocked_duration.count());
     CHECK(blocked_ns <= telemetry.last_fence_duration_ns + 100000U);
+    CHECK(telemetry.blocked_transactions >= 1U);
+    CHECK(telemetry.last_blocked_duration_ns > 0U);
+    CHECK(telemetry.total_blocked_duration_ns >= telemetry.last_blocked_duration_ns);
+    CHECK(telemetry.max_blocked_duration_ns >= telemetry.last_blocked_duration_ns);
+
+    REQUIRE_FALSE(wal_writer->close());
+    io->shutdown();
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("CheckpointScheduler telemetry tracks queue depth")
+{
+    using namespace bored::storage;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_checkpoint_scheduler_queue_");
+
+    WalWriterConfig wal_config{};
+    wal_config.directory = wal_dir;
+    wal_config.segment_size = 4U * kWalBlockSize;
+    wal_config.buffer_size = 2U * kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, wal_config);
+    auto checkpoint_manager = std::make_shared<CheckpointManager>(wal_writer);
+
+    CheckpointScheduler::Config scheduler_config{};
+    scheduler_config.min_interval = std::chrono::milliseconds(1);
+    scheduler_config.dirty_page_trigger = 1U;
+    scheduler_config.active_transaction_trigger = 100U;
+    scheduler_config.lsn_gap_trigger = kWalBlockSize;
+
+    CheckpointScheduler scheduler{checkpoint_manager, scheduler_config};
+
+    std::promise<void> first_provider_entered;
+    auto first_entered_future = first_provider_entered.get_future();
+    std::promise<void> release_first_provider;
+    auto release_future = release_first_provider.get_future().share();
+    std::atomic<int> provider_calls{0};
+
+    auto provider = [&](CheckpointSnapshot& snapshot) -> std::error_code {
+        snapshot.redo_lsn = wal_writer->next_lsn();
+        snapshot.undo_lsn = snapshot.redo_lsn;
+        snapshot.dirty_pages = {
+            WalCheckpointDirtyPageEntry{.page_id = 7U, .reserved = 0U, .page_lsn = 4096U}
+        };
+        snapshot.active_transactions.clear();
+
+        const auto call_index = provider_calls.fetch_add(1, std::memory_order_acq_rel);
+        if (call_index == 0) {
+            first_provider_entered.set_value();
+            release_future.wait();
+        }
+        return {};
+    };
+
+    std::optional<WalAppendResult> first_result;
+    auto first_future = std::async(std::launch::async, [&] {
+        return scheduler.maybe_run(std::chrono::steady_clock::now(), provider, false, first_result);
+    });
+
+    first_entered_future.wait();
+
+    std::optional<WalAppendResult> second_result;
+    auto second_future = std::async(std::launch::async, [&] {
+        return scheduler.maybe_run(std::chrono::steady_clock::now(), provider, true, second_result);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    release_first_provider.set_value();
+
+    REQUIRE_FALSE(first_future.get());
+    REQUIRE(first_result.has_value());
+    REQUIRE_FALSE(second_future.get());
+    REQUIRE(second_result.has_value());
+
+    const auto telemetry = scheduler.telemetry_snapshot();
+    CHECK(telemetry.emitted_checkpoints == 2U);
+    CHECK(telemetry.queue_waits == 1U);
+    CHECK(telemetry.max_queue_depth >= 2U);
+    CHECK(telemetry.last_queue_depth == 2U);
 
     REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
