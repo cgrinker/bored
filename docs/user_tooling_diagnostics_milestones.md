@@ -14,9 +14,9 @@
 - **Key Tasks:**
   - [x] Initialize shell binary (`bored_shell`) with basic REPL loop and command dispatch.
   - [x] Integrate parser front-end for statement tokenization and error reporting.
-  - [ ] Wire execution pipeline to route DDL/DML statements into the executor framework when enabled.
+  - [x] Wire execution pipeline to route DDL/DML statements into the executor framework when enabled.
   - [x] Surface per-command timing, rows touched, and WAL bytes via telemetry registry hooks.
-- **Progress (Oct 29, 2025):** Shell binary and telemetry overlays are live with parser-driven DDL scaffolding; executor wiring and full integration drills remain.
+- **Progress (Oct 29, 2025):** Shell binary and telemetry overlays now route DDL/DML statements through the executor configuration; integration drills and end-to-end coverage still pending.
 - **Exit Criteria:**
   - [ ] Shell supports multi-line statements, command history, and executes DDL operations end-to-end against the engine in integration tests.
 
