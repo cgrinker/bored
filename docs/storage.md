@@ -67,6 +67,18 @@ This document captures the first pass at the on-disk layout for the experimental
 ### Diagnostics Entry Points
 
 - **Telemetry snapshots:** Call `storage::collect_storage_diagnostics()` (see `storage_diagnostics.hpp`) to obtain a JSON blob containing WAL writer throughput, checkpoint cadence, retention pruning counts, vacuum activity, and transaction horizon gauges. The export now promotes `last_checkpoint_lsn` and `outstanding_replay_backlog_bytes` to top-level fields so operators can gauge restart readiness at a glance. Surface this through an HTTP endpoint or CLI command; consumers should treat missing fields as component-disabled rather than failure.
+
+### Alert thresholds
+
+Expose the OpenMetrics endpoint via `boredctl diagnostics metrics` to make the storage engine scrape-able. The following gauges/summary values are considered critical for day-to-day operations:
+
+| Metric | Recommended threshold | Primary knobs |
+| --- | --- | --- |
+| `bored_checkpoint_lag_seconds` | Warn at ≥120s, critical at ≥300s. | Tighten `CheckpointScheduler::Config::min_interval`, lower `dirty_page_trigger`, or enable the `lsn_gap_trigger` to force checkpoints sooner. |
+| `bored_wal_replay_backlog_bytes` | Warn once backlog exceeds two active segments, critical once it exceeds retention capacity. | Increase `WalRetentionConfig::retention_segments` or `retention_hours`, or force a checkpoint to advance pruning. |
+| `recovery.total.last_redo_duration_ns` / `last_undo_duration_ns` (from `boredctl diagnostics capture`) | Alert when either exceeds expected RPO (e.g., >30s). | Reduce replay window by increasing checkpoint frequency, or provision faster storage for WAL/replay staging. |
+
+Pair the metrics scrape with structured logs by launching the shell with `bored_shell --log-json /var/log/bored/sql.log`. Each command log entry carries a correlation id that can be joined with telemetry samples and the diagnostics export to trace long-running statements.
 - **CLI capture:** Invoke `boredctl diagnostics capture --format json --summary` to emit a fresh snapshot to stdout; pass `--mock` during development builds to exercise formatting without a running storage runtime. The command writes JSON and a checkpoint/recovery/transaction summary suitable for incident tickets.
 - **Point-in-time probes:** The `bored_tests` harness exercises `WalRecoveryDriver`, `WalReplayer`, and `WalUndoWalker` end-to-end. Re-run `ctest -R wal_.*` during incident response to validate replay primitives after code or configuration changes.
 - **Log sampling:** Set `WalWriterConfig::telemetry_identifier` plus `WalWriterConfig::telemetry_registry` to register append/fail counters automatically. Pair this with `StorageTelemetryRegistry::snapshot()` to feed dashboards tracking write latency spikes and retention lag.

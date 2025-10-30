@@ -56,6 +56,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/storage_runtime.cpp
     src/storage/storage_telemetry_registry.cpp
     src/storage/storage_diagnostics.cpp
+    src/storage/storage_metrics.cpp
     src/storage/lock_introspection.cpp
     src/shell/shell_engine.cpp
     src/storage/index_retention.cpp
@@ -232,6 +233,7 @@ if(BORED_ENABLE_TESTS)
         tests/lock_introspection_tests.cpp
         tests/storage_telemetry_tests.cpp
         tests/storage_diagnostics_tests.cpp
+    tests/storage_metrics_tests.cpp
         tests/catalog_introspection_tests.cpp
     tests/index_retention_tests.cpp
         tests/index_retention_pruner_tests.cpp

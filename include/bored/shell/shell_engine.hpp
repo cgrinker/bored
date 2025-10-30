@@ -4,6 +4,8 @@
 #include "bored/parser/grammar.hpp"
 #include "bored/storage/lock_manager.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -24,6 +26,11 @@ struct CommandMetrics final {
     std::uint64_t wal_bytes = 0U;
     std::vector<bored::parser::ParserDiagnostic> diagnostics{};
     std::vector<std::string> detail_lines{};
+    std::string command_text{};
+    std::string correlation_id{};
+    std::string command_category{};
+    std::chrono::system_clock::time_point started_at{};
+    std::chrono::system_clock::time_point finished_at{};
 };
 
 class ShellEngine final {
@@ -33,6 +40,7 @@ public:
         std::function<CommandMetrics(const std::string&)> dml_executor{};
         std::function<catalog::CatalogIntrospectionSnapshot()> catalog_snapshot{};
         std::function<std::vector<storage::LockManager::LockSnapshot>()> lock_snapshot{};
+        std::function<void(const CommandMetrics&)> command_logger{};
     };
 
     ShellEngine();
@@ -53,6 +61,7 @@ private:
     static std::string_view skip_leading_comments(std::string_view text);
     static std::string_view extract_first_token(std::string_view text);
     static CommandKind classify(std::string_view text);
+    static std::string_view command_kind_to_string(CommandKind kind) noexcept;
 
     CommandMetrics execute_ddl(const std::string& sql);
     CommandMetrics parse_only_ddl(const std::string& sql);
@@ -61,6 +70,7 @@ private:
     CommandMetrics unsupported_command(const std::string& sql);
 
     Config config_{};
+    std::atomic<std::uint64_t> correlation_counter_{1U};
 };
 
 }  // namespace bored::shell

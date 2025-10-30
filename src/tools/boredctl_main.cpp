@@ -1,6 +1,7 @@
 #include "bored/catalog/catalog_introspection.hpp"
 #include "bored/storage/lock_introspection.hpp"
 #include "bored/storage/storage_diagnostics.hpp"
+#include "bored/storage/storage_metrics.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 
 #include <CLI/CLI.hpp>
@@ -325,6 +326,27 @@ void export_lock_snapshot(const std::optional<std::filesystem::path>& output_pat
     }
 }
 
+void export_metrics(bool allow_mock, const std::optional<std::filesystem::path>& output_path)
+{
+    auto context = resolve_registry(allow_mock);
+    if (!context.registry) {
+        throw std::runtime_error("no storage telemetry registry available; run inside the server process");
+    }
+
+    const auto metrics = bored::storage::collect_storage_metrics(*context.registry);
+    const auto text = bored::storage::storage_metrics_to_openmetrics(metrics);
+
+    if (output_path) {
+        std::ofstream file{*output_path, std::ios::out | std::ios::trunc};
+        if (!file.is_open()) {
+            throw std::runtime_error("failed to open output file: " + output_path->string());
+        }
+        file << text;
+    } else {
+        std::cout << text;
+    }
+}
+
 void print_repl_help()
 {
     std::cout << "Commands:" << '\n';
@@ -448,6 +470,19 @@ int main(int argc, char** argv)
             output_path = std::filesystem::path(locks_output_path);
         }
         export_lock_snapshot(output_path);
+    });
+
+    bool metrics_allow_mock = false;
+    std::string metrics_output_path;
+    auto* metrics = diagnostics->add_subcommand("metrics", "Export storage metrics in OpenMetrics format");
+    metrics->add_flag("--mock", metrics_allow_mock, "Allow mock telemetry when no live registry is present");
+    metrics->add_option("-o,--output", metrics_output_path, "Write output to a file instead of stdout");
+    metrics->callback([&]() {
+        std::optional<std::filesystem::path> output_path;
+        if (!metrics_output_path.empty()) {
+            output_path = std::filesystem::path(metrics_output_path);
+        }
+        export_metrics(metrics_allow_mock, output_path);
     });
 
     bool repl_live_only = false;

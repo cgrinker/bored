@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <iomanip>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -323,29 +324,55 @@ ShellEngine::ShellEngine(Config config)
 
 CommandMetrics ShellEngine::execute_sql(const std::string& sql)
 {
-    CommandMetrics metrics{};
     const auto trimmed = trim(sql);
-    if (trimmed.empty()) {
-        metrics.success = true;
-        metrics.summary = "Empty command.";
-        return metrics;
-    }
+    auto make_correlation_id = [this]() {
+        const auto id = correlation_counter_.fetch_add(1U, std::memory_order_relaxed);
+        std::ostringstream stream;
+        stream << 'q' << std::hex << std::setw(16) << std::setfill('0') << id;
+        return stream.str();
+    };
+    const auto correlation_id = make_correlation_id();
+    const auto wall_start = std::chrono::system_clock::now();
 
-    switch (classify(trimmed)) {
+    CommandMetrics metrics{};
+    const auto kind = classify(trimmed);
+
+    switch (kind) {
     case CommandKind::Empty:
         metrics.success = true;
         metrics.summary = "Empty command.";
-        return metrics;
+        break;
     case CommandKind::Ddl:
-        return execute_ddl(trimmed);
+        metrics = execute_ddl(trimmed);
+        break;
     case CommandKind::Dml:
-        return execute_dml(trimmed);
+        metrics = execute_dml(trimmed);
+        break;
     case CommandKind::Meta:
-        return execute_meta(trimmed);
+        metrics = execute_meta(trimmed);
+        break;
     case CommandKind::Unknown:
     default:
-        return unsupported_command(trimmed);
+        metrics = unsupported_command(trimmed);
+        break;
     }
+
+    metrics.command_text = trimmed;
+    metrics.correlation_id = correlation_id;
+    metrics.command_category = std::string(command_kind_to_string(kind));
+    metrics.started_at = wall_start;
+    metrics.finished_at = std::chrono::system_clock::now();
+    if (metrics.duration_ms <= 0.0) {
+        const auto elapsed = metrics.finished_at - metrics.started_at;
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(elapsed);
+        metrics.duration_ms = elapsed_ms.count();
+    }
+
+    if (config_.command_logger && kind != CommandKind::Empty) {
+        config_.command_logger(metrics);
+    }
+
+    return metrics;
 }
 
 std::string ShellEngine::trim(std::string_view text)
@@ -400,6 +427,23 @@ ShellEngine::CommandKind ShellEngine::classify(std::string_view text)
     }
 
     return CommandKind::Unknown;
+}
+
+std::string_view ShellEngine::command_kind_to_string(CommandKind kind) noexcept
+{
+    switch (kind) {
+    case CommandKind::Empty:
+        return "empty";
+    case CommandKind::Ddl:
+        return "ddl";
+    case CommandKind::Dml:
+        return "dml";
+    case CommandKind::Meta:
+        return "meta";
+    case CommandKind::Unknown:
+    default:
+        return "unknown";
+    }
 }
 
 CommandMetrics ShellEngine::execute_ddl(const std::string& sql)

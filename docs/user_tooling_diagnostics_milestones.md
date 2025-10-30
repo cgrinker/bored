@@ -33,11 +33,12 @@
 ## Milestone 3: Observability Integrations
 - **Goals:** Bridge storage/relational telemetry into external observability stacks.
 - **Key Tasks:**
-  - [ ] Implement metrics emitter for Prometheus/OpenMetrics (checkpoint lag, WAL backlog, query latency).
-  - [ ] Provide structured logging sink with correlation identifiers for SQL statements.
-  - [ ] Document configuration for alerting thresholds (checkpoint lag, retention backlog, recovery duration).
+  - [x] Implement metrics emitter for Prometheus/OpenMetrics (checkpoint lag, WAL backlog, query latency).
+  - [x] Provide structured logging sink with correlation identifiers for SQL statements.
+  - [x] Document configuration for alerting thresholds (checkpoint lag, retention backlog, recovery duration).
+- **Progress (Oct 29, 2025):** `boredctl diagnostics metrics` now emits OpenMetrics gauges/summary values (checkpoint lag, WAL backlog, projection latency), and `bored_shell --log-json` streams structured command records with correlation ids and diagnostics. Storage docs call out recommended alert thresholds and relevant scheduler/retention knobs.
 - **Exit Criteria:**
-  - [ ] Telemetry surfaces scrape-able metrics set and emit structured logs consumed by integration tests.
+  - [x] Telemetry surfaces scrape-able metrics set and emit structured logs consumed by integration tests.
 
 ## Milestone 4: Operator Runbooks & Dashboards
 - **Goals:** Deliver actionable runbooks and reference dashboards for common incident workflows.

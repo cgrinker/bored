@@ -187,3 +187,30 @@ TEST_CASE("ShellEngine surfaces missing meta providers")
     CHECK_THAT(result.summary, ContainsSubstring("Catalog introspection"));
     REQUIRE_FALSE(result.diagnostics.empty());
 }
+
+TEST_CASE("ShellEngine emits correlation id and command logs")
+{
+    ShellEngine::Config config{};
+    config.catalog_snapshot = [] {
+        return bored::catalog::CatalogIntrospectionSnapshot{};
+    };
+
+    std::string captured_id;
+    std::string captured_category;
+    config.command_logger = [&](const CommandMetrics& metrics) {
+        captured_id = metrics.correlation_id;
+        captured_category = metrics.command_category;
+        CHECK(metrics.command_text == "\\dt");
+        CHECK(metrics.started_at.time_since_epoch().count() != 0);
+        CHECK(metrics.finished_at.time_since_epoch().count() != 0);
+    };
+
+    ShellEngine engine{config};
+    const auto result = engine.execute_sql("\\dt");
+
+    REQUIRE_FALSE(captured_id.empty());
+    CHECK(result.correlation_id == captured_id);
+    CHECK(result.command_category == "meta");
+    CHECK(captured_category == "meta");
+    CHECK(result.duration_ms > 0.0);
+}
