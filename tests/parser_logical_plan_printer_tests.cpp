@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cctype>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -86,25 +87,33 @@ relational::TableMetadata make_shipments_metadata()
     return metadata;
 }
 
-relational::LogicalOperatorPtr build_plan(std::string_view sql)
+struct PlanFixture final {
+    std::shared_ptr<bored::parser::SelectParseResult> parse;
+    relational::LogicalOperatorPtr plan;
+};
+
+PlanFixture build_plan(std::string_view sql)
 {
     StubCatalog catalog_adapter;
     catalog_adapter.add_table(make_inventory_metadata());
 
-    auto parse_result = bored::parser::parse_select(std::string(sql));
-    REQUIRE(parse_result.success());
-    REQUIRE(parse_result.statement != nullptr);
+    auto parse_result = std::make_shared<bored::parser::SelectParseResult>(bored::parser::parse_select(std::string(sql)));
+    REQUIRE(parse_result->success());
+    REQUIRE(parse_result->statement != nullptr);
 
     relational::BinderConfig config{};
     config.catalog = &catalog_adapter;
     config.default_schema = std::string{"sales"};
 
-    auto binding = relational::bind_select(config, *parse_result.statement);
+    auto binding = relational::bind_select(config, *parse_result->statement);
     REQUIRE(binding.success());
 
-    auto lowering = relational::lower_select(*parse_result.statement);
+    auto lowering = relational::lower_select(*parse_result->statement);
     REQUIRE(lowering.success());
-    return std::move(lowering.plan);
+    PlanFixture fixture{};
+    fixture.parse = std::move(parse_result);
+    fixture.plan = std::move(lowering.plan);
+    return fixture;
 }
 
 }  // namespace
@@ -114,13 +123,13 @@ TEST_CASE("plan printer renders linear pipeline", "[parser][logical_plan_printer
     const std::string sql =
         "SELECT inv.quantity AS qty FROM sales.inventory AS inv WHERE inv.quantity > 10 ORDER BY qty LIMIT 5;";
 
-    auto plan = build_plan(sql);
-    REQUIRE(plan != nullptr);
+    auto fixture = build_plan(sql);
+    REQUIRE(fixture.plan != nullptr);
 
-    const auto text = relational::describe_plan(*plan);
+    const auto text = relational::describe_plan(*fixture.plan);
     const std::string expected =
         "Limit row_count=5\n"
-        "  Sort keys=[<identifier> ASC]\n"
+    "  Sort keys=[qty ASC]\n"
         "    Project columns=[qty:UINT32?]\n"
         "      Filter predicate=(inv.quantity > 10)\n"
         "        Scan table=sales.inventory alias=inv\n";
@@ -133,10 +142,10 @@ TEST_CASE("plan printer handles bare projections", "[parser][logical_plan_printe
     const std::string sql =
         "SELECT inv.id, inv.name FROM sales.inventory AS inv;";
 
-    auto plan = build_plan(sql);
-    REQUIRE(plan != nullptr);
+    auto fixture = build_plan(sql);
+    REQUIRE(fixture.plan != nullptr);
 
-    const auto text = relational::describe_plan(*plan);
+    const auto text = relational::describe_plan(*fixture.plan);
     CHECK(text.find("Project columns=[inv.id:INT64?", 0) != std::string::npos);
     CHECK(text.find("Scan table=sales.inventory", 0) != std::string::npos);
 }

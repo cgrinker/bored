@@ -6,7 +6,6 @@
 #include "bored/catalog/catalog_transaction.hpp"
 #include "bored/parser/ddl_command_builder.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
-#include "bored/txn/transaction_manager.hpp"
 #include "bored/txn/transaction_types.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -53,9 +52,10 @@ struct DispatcherHarness final {
     DispatcherHarness()
         : transaction_factory{[this](txn::TransactionContext* ctx) {
               catalog::CatalogTransactionConfig cfg{&txn_allocator, &snapshot_manager};
-              auto transaction = std::make_unique<catalog::CatalogTransaction>(cfg);
-              transaction->bind_transaction_context(&txn_manager, ctx);
-              return transaction;
+              if (ctx != nullptr) {
+                  cfg.transaction_context = ctx;
+              }
+              return std::make_unique<catalog::CatalogTransaction>(cfg);
           }}
         , mutator_factory{[](catalog::CatalogTransaction& tx) {
               catalog::CatalogMutatorConfig cfg{};
@@ -73,7 +73,6 @@ struct DispatcherHarness final {
 
     txn::TransactionIdAllocatorStub txn_allocator{1'000U};
     txn::SnapshotManagerStub snapshot_manager{};
-    txn::TransactionManager txn_manager{txn_allocator};
     StubAllocator allocator{};
 
     std::function<std::unique_ptr<catalog::CatalogTransaction>(txn::TransactionContext*)> transaction_factory;
@@ -98,8 +97,7 @@ TEST_CASE("DdlScriptExecutor dispatches translated commands")
         .transaction_factory = harness.transaction_factory,
         .mutator_factory = harness.mutator_factory,
         .accessor_factory = harness.accessor_factory,
-        .identifier_allocator = &harness.allocator,
-        .transaction_manager = &harness.txn_manager
+        .identifier_allocator = &harness.allocator
     });
 
     storage::StorageTelemetryRegistry storage_registry;
@@ -169,8 +167,7 @@ TEST_CASE("DdlScriptExecutor skips dispatch when translation reports errors")
         .transaction_factory = harness.transaction_factory,
         .mutator_factory = harness.mutator_factory,
         .accessor_factory = harness.accessor_factory,
-        .identifier_allocator = &harness.allocator,
-        .transaction_manager = &harness.txn_manager
+        .identifier_allocator = &harness.allocator
     });
 
     bool handler_invoked = false;
