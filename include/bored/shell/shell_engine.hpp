@@ -1,6 +1,8 @@
 #pragma once
 
+#include "bored/catalog/catalog_introspection.hpp"
 #include "bored/parser/grammar.hpp"
+#include "bored/storage/lock_manager.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -21,6 +23,7 @@ struct CommandMetrics final {
     std::uint64_t rows_touched = 0U;
     std::uint64_t wal_bytes = 0U;
     std::vector<bored::parser::ParserDiagnostic> diagnostics{};
+    std::vector<std::string> detail_lines{};
 };
 
 class ShellEngine final {
@@ -28,6 +31,8 @@ public:
     struct Config final {
         parser::DdlScriptExecutor* ddl_executor = nullptr;
         std::function<CommandMetrics(const std::string&)> dml_executor{};
+        std::function<catalog::CatalogIntrospectionSnapshot()> catalog_snapshot{};
+        std::function<std::vector<storage::LockManager::LockSnapshot>()> lock_snapshot{};
     };
 
     ShellEngine();
@@ -40,6 +45,7 @@ private:
         Empty = 0,
         Ddl,
         Dml,
+        Meta,
         Unknown
     };
 
@@ -51,6 +57,7 @@ private:
     CommandMetrics execute_ddl(const std::string& sql);
     CommandMetrics parse_only_ddl(const std::string& sql);
     CommandMetrics execute_dml(const std::string& sql);
+    CommandMetrics execute_meta(const std::string& command);
     CommandMetrics unsupported_command(const std::string& sql);
 
     Config config_{};

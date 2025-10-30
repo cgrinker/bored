@@ -23,11 +23,12 @@
 ## Milestone 2: Catalog Inspection & System Views
 - **Goals:** Equip operators with introspection commands and system metadata views.
 - **Key Tasks:**
-  - [ ] Define SQL system views (`bored_catalog.*`, `bored_storage.*`) backed by catalog metadata snapshots.
-  - [ ] Implement shell commands `\dt`, `\di`, `\dv`, and `\dl` that render table/index/view/lock summaries.
-  - [ ] Add JSON export endpoints for catalog and telemetry snapshots to the diagnostics CLI.
+  - [x] Define SQL system views (`bored_catalog.*`, `bored_storage.*`) backed by catalog metadata snapshots.
+  - [x] Implement shell commands `\dt`, `\di`, `\dv`, and `\dl` that render table/index/view/lock summaries.
+  - [x] Add JSON export endpoints for catalog and telemetry snapshots to the diagnostics CLI.
+- **Progress (Oct 29, 2025):** `bored_catalog` and `bored_storage` virtual views now back the shell's `\d*` commands, and `boredctl diagnostics catalog|locks` emit JSON snapshots sourced from the shared introspection samplers.
 - **Exit Criteria:**
-  - [ ] System views and shell commands expose schema state and lock holder snapshots, validated via regression tests.
+  - [x] System views and shell commands expose schema state and lock holder snapshots, validated via regression tests.
 
 ## Milestone 3: Observability Integrations
 - **Goals:** Bridge storage/relational telemetry into external observability stacks.

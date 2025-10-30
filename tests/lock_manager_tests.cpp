@@ -175,3 +175,36 @@ TEST_CASE("PageManager surfaces lock contention via LockManager callbacks")
     io->shutdown();
     (void)std::filesystem::remove_all(wal_dir);
 }
+
+TEST_CASE("LockManager snapshot captures active holders")
+{
+    using namespace bored::storage;
+
+    LockManager manager{};
+    const std::uint32_t page_id = 512U;
+
+    std::promise<void> held;
+    std::promise<void> release;
+
+    std::thread worker([&]() {
+        auto ec = manager.acquire(page_id, PageLatchMode::Exclusive);
+        REQUIRE_FALSE(ec);
+        held.set_value();
+        release.get_future().wait();
+        manager.release(page_id, PageLatchMode::Exclusive);
+    });
+
+    held.get_future().wait();
+
+    const auto snapshot = manager.snapshot();
+    REQUIRE(snapshot.size() == 1U);
+    const auto& entry = snapshot.front();
+    CHECK(entry.page_id == page_id);
+    CHECK(entry.exclusive_depth == 1U);
+    CHECK(entry.total_shared == 0U);
+    REQUIRE(entry.holders.size() == 1U);
+    CHECK(entry.holders.front().exclusive == 1U);
+
+    release.set_value();
+    worker.join();
+}

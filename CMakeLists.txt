@@ -25,6 +25,7 @@ add_library(${PROJECT_NAME}_lib
     src/catalog/catalog_mutator.cpp
     src/catalog/catalog_accessor.cpp
     src/catalog/catalog_transaction.cpp
+    src/catalog/catalog_introspection.cpp
     src/storage/checksum.cpp
     src/storage/async_io.cpp
     src/storage/page_operations.cpp
@@ -55,6 +56,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/storage_runtime.cpp
     src/storage/storage_telemetry_registry.cpp
     src/storage/storage_diagnostics.cpp
+    src/storage/lock_introspection.cpp
     src/shell/shell_engine.cpp
     src/storage/index_retention.cpp
     src/storage/temp_resource_registry.cpp
@@ -227,8 +229,10 @@ if(BORED_ENABLE_TESTS)
     tests/checkpoint_coordinator_tests.cpp
         tests/checkpoint_scheduler_tests.cpp
         tests/lock_manager_tests.cpp
+        tests/lock_introspection_tests.cpp
         tests/storage_telemetry_tests.cpp
         tests/storage_diagnostics_tests.cpp
+        tests/catalog_introspection_tests.cpp
     tests/index_retention_tests.cpp
         tests/index_retention_pruner_tests.cpp
     tests/index_retention_executor_tests.cpp

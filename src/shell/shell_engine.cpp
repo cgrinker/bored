@@ -206,6 +206,113 @@ void append_response_diagnostics(const std::vector<DdlCommandResponse>& response
     return first_token(view);
 }
 
+[[nodiscard]] std::vector<std::string> split_tokens(std::string_view text)
+{
+    std::vector<std::string> tokens;
+    std::size_t index = 0U;
+    while (index < text.size()) {
+        while (index < text.size() && std::isspace(static_cast<unsigned char>(text[index])) != 0) {
+            ++index;
+        }
+        if (index >= text.size()) {
+            break;
+        }
+        const std::size_t begin = index;
+        while (index < text.size() && std::isspace(static_cast<unsigned char>(text[index])) == 0) {
+            ++index;
+        }
+        tokens.emplace_back(text.substr(begin, index - begin));
+    }
+    return tokens;
+}
+
+[[nodiscard]] std::string relation_kind_to_string(catalog::CatalogRelationKind kind)
+{
+    switch (kind) {
+    case catalog::CatalogRelationKind::SystemTable:
+        return "system";
+    case catalog::CatalogRelationKind::View:
+        return "view";
+    case catalog::CatalogRelationKind::Table:
+    default:
+        return "table";
+    }
+}
+
+[[nodiscard]] std::string index_type_to_string(catalog::CatalogIndexType type)
+{
+    switch (type) {
+    case catalog::CatalogIndexType::BTree:
+        return "btree";
+    case catalog::CatalogIndexType::Unknown:
+    default:
+        return "unknown";
+    }
+}
+
+[[nodiscard]] bool matches_pattern(const std::string& pattern, std::string_view value)
+{
+    if (pattern.empty()) {
+        return true;
+    }
+    const auto candidate = uppercase(value);
+    return candidate.find(pattern) != std::string::npos;
+}
+
+[[nodiscard]] std::vector<std::string> format_table(const std::vector<std::string>& headers,
+                                                    const std::vector<std::vector<std::string>>& rows)
+{
+    const std::size_t column_count = headers.size();
+    std::vector<std::size_t> widths(column_count, 0U);
+    for (std::size_t i = 0U; i < column_count; ++i) {
+        widths[i] = headers[i].size();
+    }
+    for (const auto& row : rows) {
+        for (std::size_t i = 0U; i < column_count && i < row.size(); ++i) {
+            widths[i] = std::max(widths[i], row[i].size());
+        }
+    }
+
+    auto make_line = [&](const std::vector<std::string>& fields) {
+        std::string line;
+        for (std::size_t i = 0U; i < column_count; ++i) {
+            if (i > 0U) {
+                line.append(" | ");
+            }
+            const std::string& field = (i < fields.size()) ? fields[i] : std::string{};
+            line.append(field);
+            if (field.size() < widths[i]) {
+                line.append(widths[i] - field.size(), ' ');
+            }
+        }
+        return line;
+    };
+
+    std::vector<std::string> lines;
+    lines.reserve(rows.size() + 3U);
+    lines.push_back(make_line(headers));
+
+    std::string separator;
+    for (std::size_t i = 0U; i < column_count; ++i) {
+        if (i > 0U) {
+            separator.append("-+-");
+        }
+        separator.append(widths[i], '-');
+    }
+    lines.push_back(std::move(separator));
+
+    if (rows.empty()) {
+        lines.push_back("(no rows)");
+        return lines;
+    }
+
+    for (const auto& row : rows) {
+        lines.push_back(make_line(row));
+    }
+
+    return lines;
+}
+
 }  // namespace
 
 ShellEngine::ShellEngine() = default;
@@ -233,6 +340,8 @@ CommandMetrics ShellEngine::execute_sql(const std::string& sql)
         return execute_ddl(trimmed);
     case CommandKind::Dml:
         return execute_dml(trimmed);
+    case CommandKind::Meta:
+        return execute_meta(trimmed);
     case CommandKind::Unknown:
     default:
         return unsupported_command(trimmed);
@@ -287,7 +396,7 @@ ShellEngine::CommandKind ShellEngine::classify(std::string_view text)
     }
 
     if (!token.empty() && token.front() == '\\') {
-        return CommandKind::Unknown;
+        return CommandKind::Meta;
     }
 
     return CommandKind::Unknown;
@@ -392,6 +501,203 @@ CommandMetrics ShellEngine::execute_dml(const std::string& sql)
     metrics.rows_touched = after.rows_emitted - before.rows_emitted;
     metrics.wal_bytes = after.wal_bytes - before.wal_bytes;
 
+    return metrics;
+}
+
+CommandMetrics ShellEngine::execute_meta(const std::string& command)
+{
+    CommandMetrics metrics{};
+    const auto start = std::chrono::steady_clock::now();
+
+    const auto tokens = split_tokens(command);
+    if (tokens.empty()) {
+        metrics.success = true;
+        metrics.summary = "Empty command.";
+        metrics.duration_ms = 0.0;
+        return metrics;
+    }
+
+    const std::string pattern_input = (tokens.size() > 1U) ? tokens[1] : std::string{};
+    const std::string pattern_upper = uppercase(pattern_input);
+
+    auto finalize_duration = [&](void) {
+        const auto end = std::chrono::steady_clock::now();
+        const auto duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        metrics.duration_ms = static_cast<double>(duration_ns.count()) / 1'000'000.0;
+    };
+
+    auto make_missing_provider = [&](std::string_view provider_name) {
+        metrics.success = false;
+        std::ostringstream summary;
+        summary << provider_name << " introspection is not available.";
+        metrics.summary = summary.str();
+
+        parser::ParserDiagnostic diagnostic{};
+        diagnostic.severity = parser::ParserSeverity::Error;
+        diagnostic.statement = command;
+        diagnostic.message = std::string(provider_name) + " provider is not configured.";
+        diagnostic.remediation_hints = {"Construct the shell engine with the appropriate sampler."};
+        metrics.diagnostics.push_back(std::move(diagnostic));
+
+        finalize_duration();
+        return metrics;
+    };
+
+    if (tokens.front() == "\\dt") {
+        if (!config_.catalog_snapshot) {
+            return make_missing_provider("Catalog");
+        }
+
+        const auto snapshot = config_.catalog_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        rows.reserve(snapshot.relations.size());
+        for (const auto& relation : snapshot.relations) {
+            if (relation.relation_kind == catalog::CatalogRelationKind::View) {
+                continue;
+            }
+            if (!matches_pattern(pattern_upper, relation.relation_name) &&
+                !matches_pattern(pattern_upper, relation.schema_name)) {
+                continue;
+            }
+
+            rows.push_back({relation.database_name,
+                            relation.schema_name,
+                            relation.relation_name,
+                            relation_kind_to_string(relation.relation_kind),
+                            std::to_string(relation.column_count),
+                            std::to_string(relation.root_page_id)});
+        }
+
+        metrics.detail_lines = format_table({"database", "schema", "name", "kind", "columns", "root_page"}, rows);
+
+        std::ostringstream summary;
+        summary << "Listed " << rows.size() << " relation" << (rows.size() == 1U ? "" : "s");
+        if (!pattern_input.empty()) {
+            summary << " matching '" << pattern_input << "'";
+        }
+        metrics.summary = summary.str();
+        metrics.success = true;
+        finalize_duration();
+        return metrics;
+    }
+
+    if (tokens.front() == "\\di") {
+        if (!config_.catalog_snapshot) {
+            return make_missing_provider("Catalog");
+        }
+
+        const auto snapshot = config_.catalog_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        rows.reserve(snapshot.indexes.size());
+        for (const auto& index : snapshot.indexes) {
+            if (!matches_pattern(pattern_upper, index.index_name) &&
+                !matches_pattern(pattern_upper, index.relation_name)) {
+                continue;
+            }
+
+            rows.push_back({index.schema_name,
+                            index.relation_name,
+                            index.index_name,
+                            index_type_to_string(index.index_type),
+                            index.comparator.empty() ? std::string{"-"} : index.comparator,
+                            std::to_string(index.max_fanout),
+                            std::to_string(index.root_page_id)});
+        }
+
+        metrics.detail_lines = format_table({"schema", "relation", "name", "type", "comparator", "fanout", "root_page"}, rows);
+
+        std::ostringstream summary;
+        summary << "Listed " << rows.size() << " index" << (rows.size() == 1U ? "" : "es");
+        if (!pattern_input.empty()) {
+            summary << " matching '" << pattern_input << "'";
+        }
+        metrics.summary = summary.str();
+        metrics.success = true;
+        finalize_duration();
+        return metrics;
+    }
+
+    if (tokens.front() == "\\dv") {
+        if (!config_.catalog_snapshot) {
+            return make_missing_provider("Catalog");
+        }
+
+        const auto snapshot = config_.catalog_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        rows.reserve(snapshot.relations.size());
+        for (const auto& relation : snapshot.relations) {
+            if (relation.relation_kind != catalog::CatalogRelationKind::View) {
+                continue;
+            }
+            if (!matches_pattern(pattern_upper, relation.relation_name) &&
+                !matches_pattern(pattern_upper, relation.schema_name)) {
+                continue;
+            }
+
+            rows.push_back({relation.database_name,
+                            relation.schema_name,
+                            relation.relation_name,
+                            std::to_string(relation.column_count)});
+        }
+
+        metrics.detail_lines = format_table({"database", "schema", "name", "columns"}, rows);
+
+        std::ostringstream summary;
+        summary << "Listed " << rows.size() << " view" << (rows.size() == 1U ? "" : "s");
+        if (!pattern_input.empty()) {
+            summary << " matching '" << pattern_input << "'";
+        }
+        metrics.summary = summary.str();
+        metrics.success = true;
+        finalize_duration();
+        return metrics;
+    }
+
+    if (tokens.front() == "\\dl") {
+        if (!config_.lock_snapshot) {
+            return make_missing_provider("Lock");
+        }
+
+        const auto locks = config_.lock_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        rows.reserve(locks.size());
+        for (const auto& lock : locks) {
+            const std::string page = std::to_string(lock.page_id);
+            const std::string owner = lock.exclusive_owner.empty() ? std::string{"-"} : lock.exclusive_owner;
+
+            if (!matches_pattern(pattern_upper, page) && !matches_pattern(pattern_upper, owner)) {
+                continue;
+            }
+
+            rows.push_back({page,
+                            std::to_string(lock.total_shared),
+                            std::to_string(lock.exclusive_depth),
+                            std::to_string(lock.holders.size()),
+                            owner});
+        }
+
+        metrics.detail_lines = format_table({"page", "shared", "exclusive", "holders", "owner"}, rows);
+
+        std::ostringstream summary;
+        summary << "Listed " << rows.size() << " lock" << (rows.size() == 1U ? "" : "s");
+        if (!pattern_input.empty()) {
+            summary << " matching '" << pattern_input << "'";
+        }
+        metrics.summary = summary.str();
+        metrics.success = true;
+        finalize_duration();
+        return metrics;
+    }
+
+    metrics.success = false;
+    metrics.summary = "Unsupported meta command.";
+    parser::ParserDiagnostic diagnostic{};
+    diagnostic.severity = parser::ParserSeverity::Error;
+    diagnostic.statement = command;
+    diagnostic.message = "Shell command is not recognised.";
+    diagnostic.remediation_hints = {"Use \\help to list supported commands."};
+    metrics.diagnostics.push_back(std::move(diagnostic));
+    finalize_duration();
     return metrics;
 }
 

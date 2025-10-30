@@ -55,6 +55,10 @@ void render_result(const bored::shell::CommandMetrics& metrics)
     }
     std::cout << '\n';
 
+    for (const auto& line : metrics.detail_lines) {
+        std::cout << "    " << line << '\n';
+    }
+
     for (const auto& diagnostic : metrics.diagnostics) {
         std::cout << "  - " << diagnostic.message;
         if (!diagnostic.statement.empty()) {
@@ -216,7 +220,8 @@ int run_repl(bool quiet)
                 std::cout << "  \\quit      Exit the shell\n";
                 continue;
             }
-            std::cout << "Unknown command: " << trimmed << '\n';
+            const auto result = engine.execute_sql(std::string(trimmed));
+            render_result(result);
             continue;
         }
 

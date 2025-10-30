@@ -5,9 +5,11 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <system_error>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace bored::txn {
 class TransactionContext;
@@ -21,6 +23,20 @@ public:
         bool enable_reentrancy = true;
     };
 
+    struct LockHolderSnapshot final {
+        std::string thread_id;
+        std::uint32_t shared = 0U;
+        std::uint32_t exclusive = 0U;
+    };
+
+    struct LockSnapshot final {
+        std::uint32_t page_id = 0U;
+        std::uint32_t total_shared = 0U;
+        std::uint32_t exclusive_depth = 0U;
+        std::string exclusive_owner;
+        std::vector<LockHolderSnapshot> holders;
+    };
+
     LockManager();
     explicit LockManager(Config config);
 
@@ -32,6 +48,8 @@ public:
     [[nodiscard]] std::error_code acquire(std::uint32_t page_id, PageLatchMode mode);
     [[nodiscard]] std::error_code acquire(std::uint32_t page_id, PageLatchMode mode, txn::TransactionContext* txn);
     void release(std::uint32_t page_id, PageLatchMode mode);
+
+    [[nodiscard]] std::vector<LockSnapshot> snapshot() const;
 
     [[nodiscard]] PageLatchCallbacks page_latch_callbacks();
 
@@ -55,7 +73,7 @@ private:
     void cleanup_if_unused(std::uint32_t page_id, PageState& state);
 
     Config config_{};
-    std::mutex mutex_{};
+    mutable std::mutex mutex_{};
     std::unordered_map<std::uint32_t, PageState> pages_{};
 };
 

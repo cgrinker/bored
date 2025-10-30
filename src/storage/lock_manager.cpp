@@ -2,6 +2,10 @@
 
 #include "bored/txn/transaction_manager.hpp"
 
+#include <algorithm>
+#include <sstream>
+#include <utility>
+
 namespace bored::storage {
 
 namespace {
@@ -182,6 +186,48 @@ void LockManager::cleanup_if_unused(std::uint32_t page_id, PageState& state)
     if (state.shared_total == 0U && state.exclusive_depth == 0U && state.holders.empty()) {
         pages_.erase(page_id);
     }
+}
+
+std::vector<LockManager::LockSnapshot> LockManager::snapshot() const
+{
+    std::scoped_lock lock{mutex_};
+    std::vector<LockSnapshot> result;
+    result.reserve(pages_.size());
+
+    for (const auto& [page_id, state] : pages_) {
+        LockSnapshot snapshot{};
+        snapshot.page_id = page_id;
+        snapshot.total_shared = state.shared_total;
+        snapshot.exclusive_depth = state.exclusive_depth;
+        if (state.exclusive_owner) {
+            std::ostringstream stream;
+            stream << *state.exclusive_owner;
+            snapshot.exclusive_owner = stream.str();
+        }
+
+        snapshot.holders.reserve(state.holders.size());
+        for (const auto& [thread_id, holder] : state.holders) {
+            LockHolderSnapshot holder_snapshot{};
+            std::ostringstream stream;
+            stream << thread_id;
+            holder_snapshot.thread_id = stream.str();
+            holder_snapshot.shared = holder.shared;
+            holder_snapshot.exclusive = holder.exclusive;
+            snapshot.holders.push_back(std::move(holder_snapshot));
+        }
+
+        std::sort(snapshot.holders.begin(), snapshot.holders.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.thread_id < rhs.thread_id;
+        });
+
+        result.push_back(std::move(snapshot));
+    }
+
+    std::sort(result.begin(), result.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.page_id < rhs.page_id;
+    });
+
+    return result;
 }
 
 }  // namespace bored::storage

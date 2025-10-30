@@ -1,3 +1,5 @@
+#include "bored/catalog/catalog_introspection.hpp"
+#include "bored/storage/lock_introspection.hpp"
 #include "bored/storage/storage_diagnostics.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 
@@ -281,6 +283,48 @@ void capture_diagnostics(bool allow_mock,
     }
 }
 
+void export_catalog_snapshot(const std::optional<std::filesystem::path>& output_path)
+{
+    auto sampler = bored::catalog::get_global_catalog_introspection_sampler();
+    if (!sampler) {
+        throw std::runtime_error("no catalog introspection sampler available; run inside the server process");
+    }
+
+    const auto snapshot = sampler();
+    const auto json = bored::catalog::catalog_introspection_to_json(snapshot);
+
+    if (output_path) {
+        std::ofstream file{*output_path, std::ios::out | std::ios::trunc};
+        if (!file.is_open()) {
+            throw std::runtime_error("failed to open output file: " + output_path->string());
+        }
+        file << json << '\n';
+    } else {
+        std::cout << json << '\n';
+    }
+}
+
+void export_lock_snapshot(const std::optional<std::filesystem::path>& output_path)
+{
+    auto sampler = bored::storage::get_global_lock_snapshot_sampler();
+    if (!sampler) {
+        throw std::runtime_error("no lock snapshot sampler available; run inside the server process");
+    }
+
+    const auto document = bored::storage::collect_global_lock_diagnostics();
+    const auto json = bored::storage::lock_diagnostics_to_json(document);
+
+    if (output_path) {
+        std::ofstream file{*output_path, std::ios::out | std::ios::trunc};
+        if (!file.is_open()) {
+            throw std::runtime_error("failed to open output file: " + output_path->string());
+        }
+        file << json << '\n';
+    } else {
+        std::cout << json << '\n';
+    }
+}
+
 void print_repl_help()
 {
     std::cout << "Commands:" << '\n';
@@ -382,6 +426,28 @@ int main(int argc, char** argv)
             output_path = std::filesystem::path(capture_output_path);
         }
         capture_diagnostics(capture_allow_mock, capture_format, output_path, capture_summary);
+    });
+
+    std::string catalog_output_path;
+    auto* catalog = diagnostics->add_subcommand("catalog", "Export catalog system view snapshot as JSON");
+    catalog->add_option("-o,--output", catalog_output_path, "Write output to a file instead of stdout");
+    catalog->callback([&]() {
+        std::optional<std::filesystem::path> output_path;
+        if (!catalog_output_path.empty()) {
+            output_path = std::filesystem::path(catalog_output_path);
+        }
+        export_catalog_snapshot(output_path);
+    });
+
+    std::string locks_output_path;
+    auto* locks = diagnostics->add_subcommand("locks", "Export active page lock snapshot as JSON");
+    locks->add_option("-o,--output", locks_output_path, "Write output to a file instead of stdout");
+    locks->callback([&]() {
+        std::optional<std::filesystem::path> output_path;
+        if (!locks_output_path.empty()) {
+            output_path = std::filesystem::path(locks_output_path);
+        }
+        export_lock_snapshot(output_path);
     });
 
     bool repl_live_only = false;
