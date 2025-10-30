@@ -11,3 +11,9 @@
 
 ## Transaction & Concurrency Control
 - **MVCC design review** — Completed via `docs/transaction_concurrency_design.md` (2025-10-26); milestone follow-ups tracked in `docs/transaction_concurrency_milestones.md`.
+
+## End-to-End Database Validation
+- **Interactive shell smoke tests** — drive `bored_shell` through scenarios that create databases and schemas, issue `CREATE TABLE` statements, insert representative tuples, and verify `SELECT` output matches expectations. Capture scripts under `tests/end_to_end/` so they can run locally and in CI.
+- **Shell script runner** — extend `bored_shell` CLI to accept SQL script files (with `@file` or `--file` semantics), stream commands to the engine, and surface results through the existing console renderer so automation can validate behavior without the interactive REPL.
+- **Integration harness for catalog + storage** — author a Catch2 suite that spins up the catalog, WAL, and storage subsystems together, executes the smoke script programmatically, and asserts catalog/WAL side effects (segment counts, retention stats) alongside query results.
+- **Scenario coverage and diagnostics documentation** — document the end-to-end workflows, required configuration, and troubleshooting steps in `docs/storage_shell_recipes.md`, including how to surface parser/telemetry diagnostics when a step fails.

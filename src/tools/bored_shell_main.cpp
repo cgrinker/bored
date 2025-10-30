@@ -380,6 +380,96 @@ bool command_complete(std::string_view text)
     return false;
 }
 
+bool is_comment_only(std::string_view text)
+{
+    if (text.empty()) {
+        return true;
+    }
+
+    if (text.rfind("--", 0U) == 0U) {
+        return true;
+    }
+
+    if (text.rfind("/*", 0U) == 0U) {
+        return text.find("*/") != std::string_view::npos;
+    }
+
+    return false;
+}
+
+bool load_script_commands(std::istream& input, std::vector<std::string>& commands, std::string& error_message)
+{
+    error_message.clear();
+
+    std::string buffer;
+    std::string line;
+
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        buffer.append(line);
+        buffer.push_back('\n');
+
+        if (!command_complete(buffer)) {
+            continue;
+        }
+
+        const auto statement = trim(buffer);
+        if (!statement.empty()) {
+            commands.push_back(statement);
+        }
+        buffer.clear();
+    }
+
+    if (input.bad()) {
+        error_message = "I/O error while reading script";
+        return false;
+    }
+
+    if (input.fail() && !input.eof()) {
+        error_message = "Failed to read script to completion";
+        return false;
+    }
+
+    const auto trailing = trim(buffer);
+    if (!trailing.empty()) {
+        if (!is_comment_only(trailing)) {
+            commands.push_back(trailing);
+        }
+    }
+
+    return true;
+}
+
+bool run_script_stream(bored::shell::ShellEngine& engine, std::istream& stream, const std::string& source)
+{
+    std::vector<std::string> statements;
+    statements.reserve(16U);
+
+    std::string error;
+    if (!load_script_commands(stream, statements, error)) {
+        std::cerr << "error: " << error;
+        if (!source.empty()) {
+            std::cerr << " ('" << source << "')";
+        }
+        std::cerr << '\n';
+        return false;
+    }
+
+    bool all_success = true;
+    for (const auto& statement : statements) {
+        const auto result = engine.execute_sql(statement);
+        render_result(result);
+        if (!result.success) {
+            all_success = false;
+        }
+    }
+
+    return all_success;
+}
+
 int run_repl(bool quiet, const bored::shell::ShellEngine::Config& config)
 {
     replxx::Replxx repl;
@@ -418,6 +508,30 @@ int run_repl(bool quiet, const bored::shell::ShellEngine::Config& config)
             }
             const auto result = engine.execute_sql(std::string(trimmed));
             render_result(result);
+            continue;
+        }
+
+        if (buffer.empty() && trimmed.rfind("@", 0U) == 0U) {
+            const auto script_spec = trim(trimmed.substr(1U));
+            if (script_spec.empty()) {
+                std::cerr << "error: script path is required after '@'" << '\n';
+                continue;
+            }
+
+            if (script_spec == "-") {
+                std::cerr << "error: reading scripts from stdin is not supported inside the interactive shell" << '\n';
+                continue;
+            }
+
+            std::ifstream script_file{script_spec};
+            if (!script_file.is_open()) {
+                std::cerr << "error: failed to open script file '" << script_spec << "'" << '\n';
+                continue;
+            }
+
+            if (!run_script_stream(engine, script_file, script_spec)) {
+                std::cerr << "error: script '" << script_spec << "' completed with errors" << '\n';
+            }
             continue;
         }
 
@@ -474,11 +588,15 @@ int main(int argc, char** argv)
 
     bool quiet = false;
     std::vector<std::string> execute_commands;
+    std::vector<std::string> script_files;
     std::string log_json_path;
 
     app.add_flag("-q,--quiet", quiet, "Suppress startup banner");
     app.add_option("-c,--command", execute_commands, "Execute the provided SQL command and exit")
         ->type_name("SQL")
+        ->expected(1);
+    app.add_option("-f,--file", script_files, "Execute SQL commands from the specified script file (use '-' for stdin)")
+        ->type_name("PATH")
         ->expected(1);
     app.add_option("--log-json", log_json_path, "Write structured command logs as JSON Lines (use '-' for stdout)");
 
@@ -519,8 +637,50 @@ int main(int argc, char** argv)
         }
     }
 
-    if (!execute_commands.empty()) {
-        return run_batch(execute_commands, config);
+    std::vector<std::string> commands_to_run;
+    commands_to_run.reserve(execute_commands.size());
+
+    bool stdin_consumed = false;
+    for (const auto& script_path : script_files) {
+        std::istream* input = nullptr;
+        std::ifstream script_stream;
+        if (script_path == "-") {
+            if (stdin_consumed) {
+                std::cerr << "error: stdin script '-' specified more than once" << '\n';
+                return 1;
+            }
+            stdin_consumed = true;
+            input = &std::cin;
+        } else {
+            script_stream.open(script_path);
+            if (!script_stream.is_open()) {
+                std::cerr << "error: failed to open script file '" << script_path << "'" << '\n';
+                return 1;
+            }
+            input = &script_stream;
+        }
+
+        std::string error;
+        if (!load_script_commands(*input, commands_to_run, error)) {
+            std::cerr << "error: " << error;
+            if (script_path == "-") {
+                std::cerr << " ('<stdin>')";
+            } else {
+                std::cerr << " ('" << script_path << "')";
+            }
+            std::cerr << '\n';
+            return 1;
+        }
+    }
+
+    commands_to_run.insert(commands_to_run.end(), execute_commands.begin(), execute_commands.end());
+
+    if (!commands_to_run.empty()) {
+        return run_batch(commands_to_run, config);
+    }
+
+    if (!script_files.empty()) {
+        return 0;
     }
 
     return run_repl(quiet, config);
