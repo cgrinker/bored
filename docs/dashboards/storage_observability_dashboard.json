@@ -1,0 +1,172 @@
+{
+  "title": "Bored Storage Observability",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": ["storage", "checkpoint", "wal", "locks"],
+  "style": "dark",
+  "refresh": "30s",
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Checkpoint Lag",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 120},
+              {"color": "red", "value": 300}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "bored_checkpoint_lag_seconds",
+          "legendFormat": "{{scheduler}}",
+          "interval": ""
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "WAL Replay Backlog",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 33554432},
+              {"color": "red", "value": 67108864}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "bored_wal_replay_backlog_bytes",
+          "legendFormat": "{{writer}}",
+          "interval": ""
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Recovery Duration",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 6},
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 30},
+              {"color": "red", "value": 60}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "recovery_total_last_redo_duration_ns / 1e9",
+          "legendFormat": "last redo",
+          "interval": ""
+        },
+        {
+          "refId": "B",
+          "expr": "recovery_total_last_undo_duration_ns / 1e9",
+          "legendFormat": "last undo",
+          "interval": ""
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Lock Contention",
+      "type": "table",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "bored_lock_exclusive_wait_total",
+          "format": "table",
+          "legendFormat": "exclusive waits"
+        },
+        {
+          "refId": "B",
+          "expr": "bored_lock_shared_wait_total",
+          "format": "table",
+          "legendFormat": "shared waits"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Retention Capacity",
+      "type": "gauge",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {"color": "green", "value": 0},
+              {"color": "orange", "value": 70},
+              {"color": "red", "value": 90}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(bored_wal_replay_backlog_bytes / bored_wal_replay_backlog_max_bytes) * 100",
+          "legendFormat": "retention utilisation"
+        }
+      ]
+    }
+  ],
+  "templating": {"list": []},
+  "annotations": {"list": []}
+}

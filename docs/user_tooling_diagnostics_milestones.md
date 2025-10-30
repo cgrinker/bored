@@ -43,8 +43,9 @@
 ## Milestone 4: Operator Runbooks & Dashboards
 - **Goals:** Deliver actionable runbooks and reference dashboards for common incident workflows.
 - **Key Tasks:**
-  - [ ] Expand `docs/storage.md` and new operator guides with SQL shell recipes for diagnostics.
-  - [ ] Ship Grafana dashboard JSON templates covering checkpoint, recovery, retention, and lock contention panels.
-  - [ ] Create incident playbooks for checkpoint failures, recovery stalls, and executor regressions.
+  - [x] Expand `docs/storage.md` and new operator guides with SQL shell recipes for diagnostics.
+  - [x] Ship Grafana dashboard JSON templates covering checkpoint, recovery, retention, and lock contention panels.
+  - [x] Create incident playbooks for checkpoint failures, recovery stalls, and executor regressions.
+- **Progress (Oct 30, 2025):** Added `docs/storage_shell_recipes.md` with end-to-end `bored_shell` and `boredctl` diagnostics flows, published `docs/dashboards/storage_observability_dashboard.json` for Grafana, and documented incident drills in `docs/storage_incident_playbooks.md`. Storage overview now links to dashboards and playbooks for on-call readiness.
 - **Exit Criteria:**
-  - [ ] Documentation and dashboard assets are published alongside CLI tooling, and incident drills reference them end-to-end.
+  - [x] Documentation and dashboard assets are published alongside CLI tooling, and incident drills reference them end-to-end.
