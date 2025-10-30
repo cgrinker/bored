@@ -16,9 +16,9 @@
   - [x] Integrate parser front-end for statement tokenization and error reporting.
   - [x] Wire execution pipeline to route DDL/DML statements into the executor framework when enabled.
   - [x] Surface per-command timing, rows touched, and WAL bytes via telemetry registry hooks.
-- **Progress (Oct 29, 2025):** Shell binary and telemetry overlays now route DDL/DML statements through the executor configuration; integration drills and end-to-end coverage still pending.
+- **Progress (Oct 29, 2025):** Shell REPL now buffers multi-line statements, persists history between sessions, and exercises catalog-backed DDL paths end-to-end in integration tests.
 - **Exit Criteria:**
-  - [ ] Shell supports multi-line statements, command history, and executes DDL operations end-to-end against the engine in integration tests.
+  - [x] Shell supports multi-line statements, command history, and executes DDL operations end-to-end against the engine in integration tests.
 
 ## Milestone 2: Catalog Inspection & System Views
 - **Goals:** Equip operators with introspection commands and system metadata views.

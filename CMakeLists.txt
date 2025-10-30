@@ -280,6 +280,7 @@ if(BORED_ENABLE_TESTS)
                 tests/parser_diagnostics_tests.cpp
                 tests/parser_telemetry_tests.cpp
                 tests/parser_ddl_integration_tests.cpp
+                tests/shell_integration_tests.cpp
                 tests/parser_select_tests.cpp
                 tests/parser_relational_ast_tests.cpp
                 tests/parser_binding_tests.cpp
