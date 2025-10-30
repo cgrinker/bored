@@ -93,12 +93,20 @@ std::span<const std::byte> wal_payload_view(const WalRecordHeader& header, const
     return {base + sizeof(WalRecordHeader), payload_size};
 }
 
-std::span<const std::byte> tuple_payload_view(std::span<const std::byte> storage)
+std::span<const std::byte> tuple_payload_view(std::span<const std::byte> storage, std::size_t tuple_length)
 {
-    if (storage.size() <= tuple_header_size()) {
+    const auto header_size = tuple_header_size();
+    if (storage.size() < header_size || tuple_length <= header_size) {
         return {};
     }
-    return storage.subspan(tuple_header_size());
+    const auto available = storage.size() - header_size;
+    const auto logical = std::min<std::size_t>(available, tuple_length - header_size);
+    return storage.subspan(header_size, logical);
+}
+
+std::span<const std::byte> tuple_payload_view(std::span<const std::byte> storage)
+{
+    return tuple_payload_view(storage, storage.size());
 }
 
 TupleHeader decode_tuple_header(std::span<const std::byte> storage)
@@ -108,6 +116,12 @@ TupleHeader decode_tuple_header(std::span<const std::byte> storage)
         std::memcpy(&header, storage.data(), tuple_header_size());
     }
     return header;
+}
+
+std::vector<std::byte> tuple_payload_vector(std::span<const std::byte> storage, std::size_t tuple_length)
+{
+    auto payload = tuple_payload_view(storage, tuple_length);
+    return std::vector<std::byte>(payload.begin(), payload.end());
 }
 
 std::vector<std::byte> tuple_payload_vector(std::span<const std::byte> storage)
@@ -231,7 +245,7 @@ TEST_CASE("PageManager delete tuple logs WAL record")
     REQUIRE(before_view->meta.slot_index == insert_result.slot.index);
     REQUIRE(before_view->meta.page_id == 77U);
     REQUIRE(before_view->tuple_payload.size() == tuple_storage_length(tuple.size()));
-    auto before_payload = tuple_payload_view(before_view->tuple_payload);
+    auto before_payload = tuple_payload_view(before_view->tuple_payload, before_view->meta.tuple_length);
     REQUIRE(before_payload.size() == tuple.size());
     REQUIRE(std::equal(before_payload.begin(), before_payload.end(), tuple.begin(), tuple.end()));
     REQUIRE(before_view->overflow_chunks.empty());
@@ -396,7 +410,7 @@ TEST_CASE("PageManager update tuple logs WAL record")
     REQUIRE(before_view->meta.page_id == 501U);
     REQUIRE(before_view->meta.tuple_length == tuple_storage_length(original.size()));
     REQUIRE(before_view->tuple_payload.size() == tuple_storage_length(original.size()));
-    auto before_payload = tuple_payload_view(before_view->tuple_payload);
+    auto before_payload = tuple_payload_view(before_view->tuple_payload, before_view->meta.tuple_length);
     REQUIRE(before_payload.size() == original.size());
     REQUIRE(std::equal(before_payload.begin(), before_payload.end(), original.begin(), original.end()));
     REQUIRE(before_view->overflow_chunks.empty());
@@ -420,7 +434,7 @@ TEST_CASE("PageManager update tuple logs WAL record")
 
     auto payload_bytes = bored::storage::wal_tuple_update_payload(payload, *meta);
     REQUIRE(payload_bytes.size() == tuple_storage_length(updated.size()));
-    auto update_payload = tuple_payload_view(payload_bytes);
+    auto update_payload = tuple_payload_view(payload_bytes, meta->base.tuple_length);
     REQUIRE(update_payload.size() == updated.size());
     REQUIRE(std::equal(update_payload.begin(), update_payload.end(), updated.begin(), updated.end()));
 
@@ -1041,7 +1055,7 @@ TEST_CASE("PageManager insert overflow tuple logs before-image chunks")
     const auto expected_stub_storage = tuple_storage_length(header_size + insert_result.inline_length);
     CHECK(before_snapshot.meta.tuple_length == expected_stub_storage);
     REQUIRE(before_snapshot.tuple_payload.size() == expected_stub_storage);
-    auto stub_payload = tuple_payload_view(before_snapshot.tuple_payload);
+    auto stub_payload = tuple_payload_view(before_snapshot.tuple_payload, before_snapshot.meta.tuple_length);
     REQUIRE(stub_payload.size() == header_size + insert_result.inline_length);
     REQUIRE(before_snapshot.overflow_chunks.size() == chunk_records);
 
