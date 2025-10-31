@@ -11,6 +11,7 @@
 #include "bored/ddl/ddl_validation.hpp"
 #include "bored/parser/ddl_command_builder.hpp"
 #include "bored/parser/grammar.hpp"
+#include "bored/planner/plan_printer.hpp"
 #include "bored/planner/planner.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 
@@ -382,6 +383,34 @@ std::string format_relation_name(const parser::relational::TableBinding& binding
         return binding.schema_name + "." + binding.table_name;
     }
     return binding.table_name;
+}
+
+std::string_view physical_operator_name(planner::PhysicalOperatorType type) noexcept
+{
+    using planner::PhysicalOperatorType;
+    switch (type) {
+    case PhysicalOperatorType::NoOp:
+        return "NoOp";
+    case PhysicalOperatorType::Projection:
+        return "Projection";
+    case PhysicalOperatorType::Filter:
+        return "Filter";
+    case PhysicalOperatorType::SeqScan:
+        return "SeqScan";
+    case PhysicalOperatorType::NestedLoopJoin:
+        return "NestedLoopJoin";
+    case PhysicalOperatorType::HashJoin:
+        return "HashJoin";
+    case PhysicalOperatorType::Values:
+        return "Values";
+    case PhysicalOperatorType::Insert:
+        return "Insert";
+    case PhysicalOperatorType::Update:
+        return "Update";
+    case PhysicalOperatorType::Delete:
+        return "Delete";
+    }
+    return "Unknown";
 }
 
 }  // namespace
@@ -966,6 +995,7 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     }
 
     PlannerPlanDetails details{};
+    details.plan = std::move(planner_result.plan);
     details.root_detail = std::string(root_label) + " (children=" + std::to_string(plan_root->children().size()) + ")";
     details.detail_lines = std::move(planner_result.diagnostics);
     return details;
@@ -1028,9 +1058,51 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     }
 
     PlannerPlanDetails details{};
+    details.plan = std::move(planner_result.plan);
     details.root_detail = std::move(root_detail);
     details.detail_lines = std::move(planner_result.diagnostics);
     return details;
+}
+
+std::variant<std::vector<std::string>, CommandMetrics> ShellBackend::simulate_executor_plan(
+    const std::string& sql,
+    std::string_view statement_label,
+    planner::PhysicalPlan plan)
+{
+    const auto root = plan.root();
+    if (!root) {
+        return make_error_metrics(sql,
+                                  "Planner produced empty physical plan for " + std::string(statement_label) + ".",
+                                  {"Report this to the bored_shell maintainers."});
+    }
+
+    std::vector<std::string> detail_lines;
+    std::string summary = "executor.stub=";
+    summary.append(statement_label);
+    summary.append(" pipeline ready (root=");
+    summary.append(physical_operator_name(root->type()));
+    if (!root->children().empty() && root->children().front()) {
+        summary.append(", first_child=");
+        summary.append(physical_operator_name(root->children().front()->type()));
+    }
+    summary.append(")");
+    detail_lines.push_back(std::move(summary));
+
+    planner::ExplainOptions explain{};
+    explain.include_properties = true;
+    explain.include_snapshot = false;
+    const auto rendered_plan = planner::explain_plan(plan, explain);
+
+    std::istringstream stream{rendered_plan};
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        detail_lines.push_back("executor.plan: " + line);
+    }
+
+    return detail_lines;
 }
 
 CommandMetrics ShellBackend::make_error_metrics(const std::string& sql,
@@ -1417,6 +1489,18 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
+    auto executor_stub = simulate_executor_plan(sql, "DELETE", std::move(plan_details.plan));
+    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
+        return std::get<CommandMetrics>(std::move(executor_stub));
+    }
+    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
+
+    auto executor_stub = simulate_executor_plan(sql, "UPDATE", std::move(plan_details.plan));
+    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
+        return std::get<CommandMetrics>(std::move(executor_stub));
+    }
+    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
+
     enum class AssignmentKind {
         NumericConstant,
         StringConstant,
@@ -1580,6 +1664,9 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
                                 plan_details.detail_lines.end());
+    metrics.detail_lines.insert(metrics.detail_lines.end(),
+                                executor_detail_lines.begin(),
+                                executor_detail_lines.end());
     return metrics;
 }
 
@@ -1701,6 +1788,9 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
                                 plan_details.detail_lines.end());
+    metrics.detail_lines.insert(metrics.detail_lines.end(),
+                                executor_detail_lines.begin(),
+                                executor_detail_lines.end());
     return metrics;
 }
 
@@ -1791,6 +1881,12 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
+    auto executor_stub = simulate_executor_plan(sql, "SELECT", std::move(plan_details.plan));
+    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
+        return std::get<CommandMetrics>(std::move(executor_stub));
+    }
+    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
+
     std::vector<std::string> header_names = selected_columns;
 
     std::optional<std::size_t> order_index;
@@ -1845,6 +1941,9 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
                                 plan_details.detail_lines.end());
+    metrics.detail_lines.insert(metrics.detail_lines.end(),
+                                executor_detail_lines.begin(),
+                                executor_detail_lines.end());
 
     if (!header_names.empty()) {
         std::ostringstream header_stream;

@@ -5,6 +5,7 @@
 #include "bored/catalog/catalog_ddl.hpp"
 #include "bored/catalog/catalog_introspection.hpp"
 #include "bored/parser/ddl_script_executor.hpp"
+#include "bored/planner/physical_plan.hpp"
 #include "bored/shell/shell_engine.hpp"
 #include "bored/ddl/ddl_command.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
@@ -79,6 +80,7 @@ private:
     struct PlannerPlanDetails final {
         std::string root_detail{};
         std::vector<std::string> detail_lines{};
+        planner::PhysicalPlan plan{};
     };
 
     using RelationKey = std::uint64_t;
@@ -107,6 +109,10 @@ private:
         const parser::relational::TableBinding& table_binding,
         const TableData& table,
         std::vector<std::string> projection_columns);
+    [[nodiscard]] std::variant<std::vector<std::string>, CommandMetrics> simulate_executor_plan(
+        const std::string& sql,
+        std::string_view statement_label,
+        planner::PhysicalPlan plan);
 
     CommandMetrics execute_dml(const std::string& sql);
     CommandMetrics execute_insert(const std::string& sql);
