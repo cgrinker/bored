@@ -58,6 +58,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/storage_diagnostics.cpp
     src/storage/storage_metrics.cpp
     src/storage/lock_introspection.cpp
+    src/shell/shell_backend.cpp
     src/shell/shell_engine.cpp
     src/storage/index_retention.cpp
     src/storage/temp_resource_registry.cpp

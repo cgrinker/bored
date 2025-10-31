@@ -85,4 +85,32 @@ struct SelectParseResult final {
 };
 
 SelectParseResult parse_select(std::string_view input);
+
+struct InsertParseResult final {
+    relational::AstArena arena{};
+    relational::InsertStatement* statement = nullptr;
+    std::vector<ParserDiagnostic> diagnostics{};
+
+    [[nodiscard]] bool success() const noexcept { return statement != nullptr; }
+};
+
+struct UpdateParseResult final {
+    relational::AstArena arena{};
+    relational::UpdateStatement* statement = nullptr;
+    std::vector<ParserDiagnostic> diagnostics{};
+
+    [[nodiscard]] bool success() const noexcept { return statement != nullptr; }
+};
+
+struct DeleteParseResult final {
+    relational::AstArena arena{};
+    relational::DeleteStatement* statement = nullptr;
+    std::vector<ParserDiagnostic> diagnostics{};
+
+    [[nodiscard]] bool success() const noexcept { return statement != nullptr; }
+};
+
+InsertParseResult parse_insert(std::string_view input);
+UpdateParseResult parse_update(std::string_view input);
+DeleteParseResult parse_delete(std::string_view input);
 }  // namespace bored::parser

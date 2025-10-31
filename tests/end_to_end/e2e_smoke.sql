@@ -1,39 +1,32 @@
 -- Bored end-to-end smoke script
 -- This script exercises database creation, schema setup, basic DDL, and core DML paths.
 
--- Ensure a clean slate when the script is rerun.
-DROP DATABASE IF EXISTS bored_e2e;
+DROP TABLE IF EXISTS analytics.inventory;
 
--- Create the target database and schema for the smoke scenario.
-CREATE DATABASE bored_e2e;
-CREATE SCHEMA bored_e2e.app;
-
--- Define an inventory table with representative column types.
-CREATE TABLE bored_e2e.app.inventory (
-    id INT NOT NULL,
+CREATE TABLE analytics.inventory (
+    id INT PRIMARY KEY,
     sku TEXT NOT NULL,
-    quantity INT NOT NULL,
-    PRIMARY KEY (id)
+    quantity INT NOT NULL
 );
 
 -- Seed the table with a small batch of rows.
-INSERT INTO bored_e2e.app.inventory (id, sku, quantity) VALUES
+INSERT INTO analytics.inventory (id, sku, quantity) VALUES
     (1, 'widget', 5),
     (2, 'gadget', 3),
     (3, 'sprocket', 9);
 
 -- Exercise UPDATE and DELETE paths to mutate the seeded data.
-UPDATE bored_e2e.app.inventory
+UPDATE analytics.inventory
 SET quantity = quantity + 1
 WHERE id = 2;
 
-DELETE FROM bored_e2e.app.inventory
+DELETE FROM analytics.inventory
 WHERE id = 3;
 
 -- Query the remaining rows to validate DDL + DML effects.
 SELECT id, sku, quantity
-FROM bored_e2e.app.inventory
+FROM analytics.inventory
 ORDER BY id;
 
 -- Optional clean-up so repeated runs behave deterministically.
-DROP DATABASE bored_e2e;
+DROP TABLE analytics.inventory;

@@ -17,3 +17,4 @@
 - **Shell script runner** — extend `bored_shell` CLI to accept SQL script files (with `@file` or `--file` semantics), stream commands to the engine, and surface results through the existing console renderer so automation can validate behavior without the interactive REPL.
 - **Integration harness for catalog + storage** — author a Catch2 suite that spins up the catalog, WAL, and storage subsystems together, executes the smoke script programmatically, and asserts catalog/WAL side effects (segment counts, retention stats) alongside query results.
 - **Scenario coverage and diagnostics documentation** — document the end-to-end workflows, required configuration, and troubleshooting steps in `docs/storage_shell_recipes.md`, including how to surface parser/telemetry diagnostics when a step fails.
+

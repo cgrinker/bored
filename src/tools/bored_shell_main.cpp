@@ -1,3 +1,4 @@
+#include "bored/shell/shell_backend.hpp"
 #include "bored/shell/shell_engine.hpp"
 
 #include <CLI/CLI.hpp>
@@ -609,7 +610,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    bored::shell::ShellEngine::Config config{};
+    bored::shell::ShellBackend backend;
+    auto config = backend.make_config();
     std::unique_ptr<std::ofstream> log_file;
     std::ostream* log_stream = nullptr;
     std::mutex log_mutex;

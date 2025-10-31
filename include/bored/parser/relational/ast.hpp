@@ -69,6 +69,9 @@ private:
 
 enum class NodeKind : std::uint8_t {
     SelectStatement = 0,
+    InsertStatement,
+    UpdateStatement,
+    DeleteStatement,
     QuerySpecification,
     SelectItem,
     TableReference,
@@ -94,7 +97,9 @@ enum class BinaryOperator : std::uint8_t {
     Less,
     LessOrEqual,
     Greater,
-    GreaterOrEqual
+    GreaterOrEqual,
+    Add,
+    Subtract
 };
 
 enum class ScalarType : std::uint8_t {
@@ -142,6 +147,9 @@ struct Node {
 };
 
 struct SelectStatement;
+struct InsertStatement;
+struct UpdateStatement;
+struct DeleteStatement;
 struct QuerySpecification;
 struct SelectItem;
 struct TableReference;
@@ -197,6 +205,15 @@ struct SelectItem : Node {
 
     Expression* expression = nullptr;
     std::optional<Identifier> alias{};
+};
+
+struct InsertColumn final {
+    Identifier name{};
+    std::optional<ColumnBinding> binding{};
+};
+
+struct InsertRow final {
+    std::vector<Expression*> values{};
 };
 
 struct TableReference : Node {
@@ -257,6 +274,35 @@ struct SelectStatement : Node {
     SelectStatement() noexcept : Node(NodeKind::SelectStatement) {}
 
     QuerySpecification* query = nullptr;
+};
+
+struct InsertStatement : Node {
+    InsertStatement() noexcept : Node(NodeKind::InsertStatement) {}
+
+    TableReference* target = nullptr;
+    std::vector<InsertColumn> columns{};
+    std::vector<InsertRow> rows{};
+};
+
+struct UpdateAssignment final {
+    Identifier column{};
+    std::optional<ColumnBinding> binding{};
+    Expression* value = nullptr;
+};
+
+struct UpdateStatement : Node {
+    UpdateStatement() noexcept : Node(NodeKind::UpdateStatement) {}
+
+    TableReference* target = nullptr;
+    std::vector<UpdateAssignment> assignments{};
+    Expression* where = nullptr;
+};
+
+struct DeleteStatement : Node {
+    DeleteStatement() noexcept : Node(NodeKind::DeleteStatement) {}
+
+    TableReference* target = nullptr;
+    Expression* where = nullptr;
 };
 
 struct IdentifierExpression : Expression {

@@ -5,93 +5,392 @@
 
 #include <cctype>
 #include <optional>
-#include <type_traits>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-
-namespace bored::parser {
+#include <regex>
 namespace {
 
-namespace pegtl = tao::pegtl;
+relational::IdentifierExpression& make_identifier_expression(relational::AstArena& arena, std::string_view text)
+{
+    auto& expression = arena.make<relational::IdentifierExpression>();
+    expression.name = make_qualified_name(text);
+    return expression;
+}
 
-struct identifier_head : pegtl::sor<pegtl::alpha, pegtl::one<'_'>> {
-};
+relational::LiteralExpression& make_numeric_literal_expression(relational::AstArena& arena, std::string token)
+{
+    auto& expression = arena.make<relational::LiteralExpression>();
+    if (is_decimal_literal(token)) {
+        expression.tag = relational::LiteralTag::Decimal;
+    } else {
+        expression.tag = relational::LiteralTag::Integer;
+    }
+    expression.text = std::move(token);
+    return expression;
+}
 
-struct identifier_tail : pegtl::sor<identifier_head, pegtl::digit> {
-};
+relational::LiteralExpression& make_string_literal_expression(relational::AstArena& arena, std::string text)
+{
+    auto& expression = arena.make<relational::LiteralExpression>();
+    expression.tag = relational::LiteralTag::String;
+    expression.text = std::move(text);
+    return expression;
+}
 
-struct identifier_rule : pegtl::seq<identifier_head, pegtl::star<identifier_tail>> {
-};
+relational::LiteralExpression& make_boolean_literal_expression(relational::AstArena& arena, bool value)
+{
+    auto& expression = arena.make<relational::LiteralExpression>();
+    expression.tag = relational::LiteralTag::Boolean;
+    expression.boolean_value = value;
+    expression.text = value ? "TRUE" : "FALSE";
+    return expression;
+}
 
-struct identifier_grammar : pegtl::must<pegtl::pad<identifier_rule, pegtl::space>, pegtl::eof> {
-};
+relational::LiteralExpression& make_null_literal_expression(relational::AstArena& arena)
+{
+    auto& expression = arena.make<relational::LiteralExpression>();
+    expression.tag = relational::LiteralTag::Null;
+    expression.text.clear();
+    return expression;
+}
 
-struct optional_space : pegtl::star<pegtl::space> {
-};
+relational::BinaryExpression& make_binary_expression(relational::AstArena& arena,
+                                                     relational::BinaryOperator op,
+                                                     relational::Expression& left,
+                                                     relational::Expression& right)
+{
+    auto& expression = arena.make<relational::BinaryExpression>();
+    expression.op = op;
+    expression.left = &left;
+    expression.right = &right;
+    return expression;
+}
 
-struct required_space : pegtl::plus<pegtl::space> {
-};
+}  // namespace
 
-struct semicolon : pegtl::one<';'> {
-};
+UpdateParseResult parse_update(std::string_view input)
+{
+    UpdateParseResult result{};
+    const auto normalized = strip_leading_comments(input);
+    const auto statement_text = strip_trailing_semicolon(normalized);
+    if (statement_text.empty()) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement is empty";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Provide an UPDATE <table> SET ... WHERE ... statement."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
 
-struct dot : pegtl::one<'.'> {
-};
+    if (!starts_with_ci(statement_text, "UPDATE")) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "Only UPDATE statements are supported";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Begin the command with the UPDATE keyword."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
 
-struct comma : pegtl::one<','> {
-};
+    constexpr std::size_t kUpdateLength = 6U;
+    if (statement_text.size() <= kUpdateLength) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement requires a target table";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Specify a table name immediately after UPDATE."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
 
-template <char... Cs>
-struct keyword : pegtl::seq<pegtl::istring<Cs...>, pegtl::not_at<identifier_tail>> {
-};
+    auto rest = trim_copy(statement_text.substr(kUpdateLength));
+    if (rest.empty()) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement requires a target table";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Specify a table name immediately after UPDATE."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
 
-struct kw_create : keyword<'C', 'R', 'E', 'A', 'T', 'E'> {
-};
+    std::size_t position = 0U;
+    auto rest_view = std::string_view(rest);
+    skip_whitespace(rest_view, position);
+    const auto table_start = position;
+    while (position < rest_view.size() && !std::isspace(static_cast<unsigned char>(rest_view[position]))) {
+        ++position;
+    }
+    if (table_start == position) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement requires a target table";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Specify a table name immediately after UPDATE."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+    const auto table_spec = trim_copy(rest_view.substr(table_start, position - table_start));
+    skip_whitespace(rest_view, position);
 
-struct kw_drop : keyword<'D', 'R', 'O', 'P'> {
-};
+    if (position + 3U > rest_view.size() || uppercase_copy(rest_view.substr(position, 3U)) != "SET") {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement must include a SET clause";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Add SET <column> = <expression> before the WHERE clause."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+    position += 3U;
+    skip_whitespace(rest_view, position);
 
-struct kw_database : keyword<'D', 'A', 'T', 'A', 'B', 'A', 'S', 'E'> {
-};
+    const auto where_offset = find_keyword_ci(rest_view.substr(position), "WHERE");
+    if (where_offset == std::string::npos) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement requires a WHERE clause";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Add WHERE <column> = <value> to limit the rows being updated."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
 
-struct kw_schema : keyword<'S', 'C', 'H', 'E', 'M', 'A'> {
-};
+    auto assignment_text = trim_copy(rest_view.substr(position, where_offset));
+    position += where_offset + 5U;
+    skip_whitespace(rest_view, position);
+    auto where_text = trim_copy(rest_view.substr(position));
 
-struct kw_table : keyword<'T', 'A', 'B', 'L', 'E'> {
-};
+    auto& statement = result.arena.make<relational::UpdateStatement>();
+    result.statement = &statement;
 
-struct kw_view : keyword<'V', 'I', 'E', 'W'> {
-};
+    auto& table_ref = result.arena.make<relational::TableReference>();
+    table_ref.name = make_qualified_name(table_spec);
+    statement.target = &table_ref;
 
-struct kw_select : keyword<'S', 'E', 'L', 'E', 'C', 'T'> {
-};
+    const auto eq_pos = assignment_text.find('=');
+    if (eq_pos == std::string::npos) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "SET clause must contain '=' assignment";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Provide assignments in the form column = expression."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        result.statement = nullptr;
+        result.arena.reset();
+        return result;
+    }
 
-struct kw_distinct : keyword<'D', 'I', 'S', 'T', 'I', 'N', 'C', 'T'> {
-};
+    const auto target_column_name = trim_copy(assignment_text.substr(0, eq_pos));
+    const auto rhs_text = trim_copy(assignment_text.substr(eq_pos + 1U));
 
-struct kw_from : keyword<'F', 'R', 'O', 'M'> {
-};
+    if (target_column_name.empty() || rhs_text.empty()) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "SET clause is missing a column or value";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Ensure the assignment specifies both a column and an expression."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        result.statement = nullptr;
+        result.arena.reset();
+        return result;
+    }
 
-struct kw_join : keyword<'J', 'O', 'I', 'N'> {
-};
+    relational::UpdateAssignment assignment{};
+    assignment.column = make_identifier(target_column_name);
 
-struct kw_inner : keyword<'I', 'N', 'N', 'E', 'R'> {
-};
+    static const std::regex kSetOperationPattern(R"(^([A-Za-z0-9_]+)\s*([+-])\s*([0-9]+)$)", std::regex::icase);
+    std::smatch op_match;
+    if (std::regex_match(rhs_text, op_match, kSetOperationPattern)) {
+        const auto source_column = trim_copy(op_match[1].str());
+        const auto op_token = op_match[2].str();
+        const auto operand_literal = trim_copy(op_match[3].str());
 
-struct kw_left : keyword<'L', 'E', 'F', 'T'> {
-};
+        if (!iequals(source_column, target_column_name)) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "SET operations currently require the same source and target column";
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Use the form column = column +/- <integer>."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            result.statement = nullptr;
+            result.arena.reset();
+            return result;
+        }
 
-struct kw_right : keyword<'R', 'I', 'G', 'H', 'T'> {
-};
+        auto& left = make_identifier_expression(result.arena, source_column);
+        auto& right = make_numeric_literal_expression(result.arena, operand_literal);
+        auto& binary = make_binary_expression(result.arena,
+                                              (op_token == "+") ? relational::BinaryOperator::Add : relational::BinaryOperator::Subtract,
+                                              left,
+                                              right);
+        assignment.value = &binary;
+    } else if (is_signed_integer_literal(rhs_text) || is_decimal_literal(rhs_text)) {
+        assignment.value = &make_numeric_literal_expression(result.arena, rhs_text);
+    } else if (!rhs_text.empty() && rhs_text.front() == '\'' && rhs_text.back() == '\'') {
+        std::size_t literal_pos = 0U;
+        std::string literal_value;
+        std::string error;
+        if (!parse_string_literal(rhs_text, literal_pos, literal_value, error) || literal_pos != rhs_text.size()) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = std::move(error);
+            diagnostic.statement = trim_copy(input);
+            result.diagnostics.push_back(std::move(diagnostic));
+            result.statement = nullptr;
+            result.arena.reset();
+            return result;
+        }
+        assignment.value = &make_string_literal_expression(result.arena, std::move(literal_value));
+    } else if (iequals(rhs_text, "TRUE") || iequals(rhs_text, "FALSE")) {
+        assignment.value = &make_boolean_literal_expression(result.arena, iequals(rhs_text, "TRUE"));
+    } else {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "Unsupported SET expression";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Supported forms: column = column +/- integer, column = integer, column = decimal, column = 'text', column = TRUE/FALSE."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        result.statement = nullptr;
+        result.arena.reset();
+        return result;
+    }
 
-struct kw_full : keyword<'F', 'U', 'L', 'L'> {
-};
+    statement.assignments.push_back(std::move(assignment));
 
-struct kw_outer : keyword<'O', 'U', 'T', 'E', 'R'> {
-};
+    static const std::regex kWherePattern(R"(^([A-Za-z0-9_]+)\s*=\s*([0-9]+)$)", std::regex::icase);
+    std::smatch where_match;
+    if (!std::regex_match(where_text, where_match, kWherePattern)) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "Unsupported WHERE clause";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Only equality against integer literals is supported."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        result.statement = nullptr;
+        result.arena.reset();
+        return result;
+    }
 
-struct kw_cross : keyword<'C', 'R', 'O', 'S', 'S'> {
+    const auto where_column_name = trim_copy(where_match[1].str());
+    const auto where_literal = trim_copy(where_match[2].str());
+
+    auto& left = make_identifier_expression(result.arena, where_column_name);
+    auto& right = make_numeric_literal_expression(result.arena, where_literal);
+    auto& predicate = make_binary_expression(result.arena, relational::BinaryOperator::Equal, left, right);
+    statement.where = &predicate;
+
+    return result;
+}
+
+DeleteParseResult parse_delete(std::string_view input)
+{
+    DeleteParseResult result{};
+    const auto normalized = strip_leading_comments(input);
+    const auto statement_text = strip_trailing_semicolon(normalized);
+    if (statement_text.empty()) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "DELETE statement is empty";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Provide a DELETE FROM <table> WHERE ... statement."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+
+    if (!starts_with_ci(statement_text, "DELETE")) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "Only DELETE statements are supported";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Begin the command with the DELETE keyword."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+
+    constexpr std::size_t kDeleteLength = 6U;
+    if (statement_text.size() <= kDeleteLength) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "DELETE statement must specify FROM <table>";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Use DELETE FROM <table> WHERE ..."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+
+    auto rest = trim_copy(statement_text.substr(kDeleteLength));
+    if (!starts_with_ci(rest, "FROM")) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "DELETE must specify FROM <table>";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Use DELETE FROM <table> WHERE ..."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+    rest = trim_copy(rest.substr(4));
+
+    std::size_t position = 0U;
+    auto rest_view = std::string_view(rest);
+    skip_whitespace(rest_view, position);
+    const auto table_start = position;
+    while (position < rest_view.size() && !std::isspace(static_cast<unsigned char>(rest_view[position]))) {
+        ++position;
+    }
+    if (table_start == position) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "DELETE requires a table name";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Specify the table to delete from after FROM."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+    const auto table_spec = trim_copy(rest_view.substr(table_start, position - table_start));
+    skip_whitespace(rest_view, position);
+
+    if (position + 5U > rest_view.size() || uppercase_copy(rest_view.substr(position, 5U)) != "WHERE") {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "DELETE requires a WHERE clause";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Add WHERE <column> = <value> to control which rows are deleted."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+    position += 5U;
+    skip_whitespace(rest_view, position);
+    auto where_text = trim_copy(rest_view.substr(position));
+
+    static const std::regex kWherePattern(R"(^([A-Za-z0-9_]+)\s*=\s*([0-9]+)$)", std::regex::icase);
+    std::smatch where_match;
+    if (!std::regex_match(where_text, where_match, kWherePattern)) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "Unsupported WHERE clause";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Only equality against integer literals is supported."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+
+    auto& statement = result.arena.make<relational::DeleteStatement>();
+    result.statement = &statement;
+
+    auto& table_ref = result.arena.make<relational::TableReference>();
+    table_ref.name = make_qualified_name(table_spec);
+    statement.target = &table_ref;
+
+    const auto where_column_name = trim_copy(where_match[1].str());
+    const auto where_literal = trim_copy(where_match[2].str());
+    auto& left = make_identifier_expression(result.arena, where_column_name);
+    auto& right = make_numeric_literal_expression(result.arena, where_literal);
+    auto& predicate = make_binary_expression(result.arena, relational::BinaryOperator::Equal, left, right);
+    statement.where = &predicate;
+
+    return result;
+}
+
 };
 
 struct kw_on : keyword<'O', 'N'> {
@@ -478,6 +777,294 @@ bool iequals(std::string_view lhs, std::string_view rhs)
         if (std::tolower(left) != std::tolower(right)) {
             return false;
         }
+    }
+
+    return true;
+}
+
+bool starts_with_ci(std::string_view text, std::string_view prefix)
+{
+    if (prefix.size() > text.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < prefix.size(); ++index) {
+        const auto left = static_cast<unsigned char>(text[index]);
+        const auto right = static_cast<unsigned char>(prefix[index]);
+        if (std::toupper(left) != std::toupper(right)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string strip_leading_comments(std::string_view text)
+{
+    std::size_t position = 0U;
+    while (position < text.size()) {
+        while (position < text.size() && std::isspace(static_cast<unsigned char>(text[position])) != 0) {
+            ++position;
+        }
+
+        if (position + 1U < text.size() && text[position] == '-' && text[position + 1U] == '-') {
+            position += 2U;
+            while (position < text.size() && text[position] != '\n' && text[position] != '\r') {
+                ++position;
+            }
+            continue;
+        }
+
+        if (position + 1U < text.size() && text[position] == '/' && text[position + 1U] == '*') {
+            position += 2U;
+            while (position + 1U < text.size() && !(text[position] == '*' && text[position + 1U] == '/')) {
+                ++position;
+            }
+            if (position + 1U < text.size()) {
+                position += 2U;
+            }
+            continue;
+        }
+
+        break;
+    }
+
+    return trim_copy(text.substr(position));
+}
+
+std::string uppercase_copy(std::string_view text)
+{
+    std::string result;
+    result.reserve(text.size());
+    for (unsigned char ch : text) {
+        result.push_back(static_cast<char>(std::toupper(ch)));
+    }
+    return result;
+}
+
+std::string strip_trailing_semicolon(std::string_view text)
+{
+    auto stripped = trim_copy(text);
+    if (!stripped.empty() && stripped.back() == ';') {
+        stripped.pop_back();
+        stripped = trim_copy(stripped);
+    }
+    return stripped;
+}
+
+void skip_whitespace(std::string_view text, std::size_t& position)
+{
+    while (position < text.size() && std::isspace(static_cast<unsigned char>(text[position])) != 0) {
+        ++position;
+    }
+}
+
+bool parse_string_literal(std::string_view text, std::size_t& position, std::string& out, std::string& error)
+{
+    if (position >= text.size() || text[position] != '\'') {
+        error = "Expected string literal.";
+        return false;
+    }
+    ++position;
+    std::string buffer;
+    while (position < text.size()) {
+        const char ch = text[position];
+        if (ch == '\'') {
+            if (position + 1U < text.size() && text[position + 1U] == '\'') {
+                buffer.push_back('\'');
+                position += 2U;
+                continue;
+            }
+            ++position;
+            out = std::move(buffer);
+            return true;
+        }
+        buffer.push_back(ch);
+        ++position;
+    }
+    error = "Unterminated string literal.";
+    return false;
+}
+
+bool parse_identifier_list(std::string_view text, std::vector<std::string>& out)
+{
+    out.clear();
+    std::size_t position = 0U;
+    while (position < text.size()) {
+        skip_whitespace(text, position);
+        if (position >= text.size()) {
+            break;
+        }
+        std::size_t start = position;
+        while (position < text.size() && text[position] != ',') {
+            ++position;
+        }
+        auto token = trim_copy(text.substr(start, position - start));
+        if (!token.empty()) {
+            out.push_back(std::move(token));
+        }
+        if (position < text.size() && text[position] == ',') {
+            ++position;
+        }
+    }
+    return !out.empty();
+}
+
+bool is_signed_integer_literal(std::string_view token)
+{
+    if (token.empty()) {
+        return false;
+    }
+    std::size_t index = 0U;
+    if (token[index] == '+' || token[index] == '-') {
+        ++index;
+    }
+    if (index >= token.size()) {
+        return false;
+    }
+    for (; index < token.size(); ++index) {
+        if (!std::isdigit(static_cast<unsigned char>(token[index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::size_t find_keyword_ci(std::string_view text, std::string_view keyword)
+{
+    const auto haystack = uppercase_copy(text);
+    const auto needle = uppercase_copy(keyword);
+    return haystack.find(needle);
+}
+
+bool is_decimal_literal(std::string_view token)
+{
+    if (token.empty()) {
+        return false;
+    }
+    std::size_t index = 0U;
+    if (token[index] == '+' || token[index] == '-') {
+        ++index;
+    }
+    bool digit_seen = false;
+    bool dot_seen = false;
+    for (; index < token.size(); ++index) {
+        const char ch = token[index];
+        if (std::isdigit(static_cast<unsigned char>(ch)) != 0) {
+            digit_seen = true;
+            continue;
+        }
+        if (ch == '.' && !dot_seen) {
+            dot_seen = true;
+            continue;
+        }
+        return false;
+    }
+    return digit_seen && dot_seen;
+}
+
+bool populate_insert_values(std::string_view text,
+                            relational::AstArena& arena,
+                            relational::InsertStatement& statement,
+                            std::string& error,
+                            std::vector<std::string>& hints)
+{
+    statement.rows.clear();
+    std::size_t position = 0U;
+    while (position < text.size()) {
+        skip_whitespace(text, position);
+        if (position >= text.size()) {
+            break;
+        }
+        if (text[position] != '(') {
+            error = "VALUES list must start with '('";
+            return false;
+        }
+        ++position;
+        relational::InsertRow row{};
+        while (true) {
+            skip_whitespace(text, position);
+            if (position >= text.size()) {
+                error = "Unexpected end of VALUES list.";
+                return false;
+            }
+
+            if (text[position] == '\'') {
+                std::string literal;
+                if (!parse_string_literal(text, position, literal, error)) {
+                    return false;
+                }
+                auto& expression = arena.make<relational::LiteralExpression>();
+                expression.tag = relational::LiteralTag::String;
+                expression.text = std::move(literal);
+                row.values.push_back(&expression);
+            } else {
+                const std::size_t begin = position;
+                while (position < text.size() && text[position] != ',' && text[position] != ')') {
+                    ++position;
+                }
+                auto token = trim_copy(text.substr(begin, position - begin));
+                if (token.empty()) {
+                    error = "Empty literal in VALUES list.";
+                    return false;
+                }
+
+                auto upper = uppercase_copy(token);
+                auto& expression = arena.make<relational::LiteralExpression>();
+                if (iequals(upper, "NULL")) {
+                    expression.tag = relational::LiteralTag::Null;
+                    expression.text.clear();
+                } else if (iequals(upper, "TRUE") || iequals(upper, "FALSE")) {
+                    expression.tag = relational::LiteralTag::Boolean;
+                    expression.boolean_value = iequals(upper, "TRUE");
+                    expression.text = std::move(token);
+                } else if (is_decimal_literal(token)) {
+                    expression.tag = relational::LiteralTag::Decimal;
+                    expression.text = std::move(token);
+                } else if (is_signed_integer_literal(token)) {
+                    expression.tag = relational::LiteralTag::Integer;
+                    expression.text = std::move(token);
+                } else {
+                    expression.tag = relational::LiteralTag::String;
+                    expression.text = std::move(token);
+                }
+                row.values.push_back(&expression);
+            }
+
+            skip_whitespace(text, position);
+            if (position >= text.size()) {
+                error = "Unterminated VALUES row.";
+                return false;
+            }
+            if (text[position] == ',') {
+                ++position;
+                continue;
+            }
+            if (text[position] == ')') {
+                ++position;
+                break;
+            }
+            error = "Unexpected token in VALUES list.";
+            return false;
+        }
+
+        statement.rows.push_back(std::move(row));
+        skip_whitespace(text, position);
+        if (position < text.size() && text[position] == ',') {
+            ++position;
+            continue;
+        }
+        break;
+    }
+
+    skip_whitespace(text, position);
+    if (position != text.size()) {
+        error = "Unexpected trailing characters after VALUES list.";
+        return false;
+    }
+
+    if (statement.rows.empty()) {
+        error = "VALUES list is empty.";
+        hints = {"Supply at least one parenthesized row in the VALUES clause."};
+        return false;
     }
 
     return true;
@@ -1256,12 +1843,14 @@ std::string unescape_string_literal(std::string_view text)
     return result;
 }
 
-void push_expression(SelectParseState& state, relational::Expression& expression)
+template <typename State>
+void push_expression(State& state, relational::Expression& expression)
 {
     state.expression_stack.push_back(&expression);
 }
 
-relational::Expression* pop_expression(SelectParseState& state)
+template <typename State>
+relational::Expression* pop_expression(State& state)
 {
     if (state.expression_stack.empty()) {
         return nullptr;
@@ -2496,4 +3085,188 @@ SelectParseResult parse_select(std::string_view input)
     return result;
 }
 
+InsertParseResult parse_insert(std::string_view input)
+{
+    InsertParseResult result{};
+    const auto normalized = strip_leading_comments(input);
+    const auto statement_text = strip_trailing_semicolon(normalized);
+    if (statement_text.empty()) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "INSERT statement is empty";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Provide an INSERT INTO statement with a VALUES clause."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+
+    static const std::regex kInsertPattern(
+        R"(^INSERT\s+INTO\s+([A-Za-z0-9_."]+)\s*\(([\s\S]+?)\)\s+VALUES\s+([\s\S]+)$)",
+        std::regex::icase);
+
+    std::smatch match;
+    if (!std::regex_match(std::string{statement_text}, match, kInsertPattern)) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "INSERT syntax is not supported in this context";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Use INSERT INTO <schema.table> (<columns>) VALUES (...)."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+
+    auto& statement = result.arena.make<relational::InsertStatement>();
+    result.statement = &statement;
+
+    auto& table_ref = result.arena.make<relational::TableReference>();
+    table_ref.name = make_qualified_name(trim_copy(match[1].str()));
+    statement.target = &table_ref;
+
+    const auto columns_text = trim_copy(match[2].str());
+    std::vector<std::string> column_names;
+    if (!parse_identifier_list(columns_text, column_names)) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "INSERT column list is empty";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"List one or more columns inside parentheses after the table name."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        result.statement = nullptr;
+        result.arena.reset();
+        return result;
+    }
+
+    statement.columns.reserve(column_names.size());
+    for (auto& name : column_names) {
+        relational::InsertColumn column{};
+        column.name = make_identifier(name);
+        statement.columns.push_back(std::move(column));
+    }
+
+    const auto values_text = trim_copy(match[3].str());
+    std::string error;
+    std::vector<std::string> hints;
+    if (!populate_insert_values(values_text, result.arena, statement, error, hints)) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = std::move(error);
+        diagnostic.statement = trim_copy(input);
+        if (!hints.empty()) {
+            diagnostic.remediation_hints = std::move(hints);
+        }
+        result.diagnostics.push_back(std::move(diagnostic));
+        result.statement = nullptr;
+        result.arena.reset();
+        return result;
+    }
+
+    return result;
+}
+
+namespace {
+
+relational::IdentifierExpression& make_identifier_expression(relational::AstArena& arena, std::string_view text)
+{
+    auto& expression = arena.make<relational::IdentifierExpression>();
+    expression.name = make_qualified_name(text);
+    return expression;
+}
+
+relational::LiteralExpression& make_numeric_literal_expression(relational::AstArena& arena, std::string token)
+{
+    auto& expression = arena.make<relational::LiteralExpression>();
+    if (is_decimal_literal(token)) {
+        expression.tag = relational::LiteralTag::Decimal;
+    } else {
+        expression.tag = relational::LiteralTag::Integer;
+    }
+    expression.text = std::move(token);
+    return expression;
+}
+
+relational::LiteralExpression& make_string_literal_expression(relational::AstArena& arena, std::string text)
+{
+    auto& expression = arena.make<relational::LiteralExpression>();
+    expression.tag = relational::LiteralTag::String;
+    expression.text = std::move(text);
+    return expression;
+}
+
+relational::LiteralExpression& make_boolean_literal_expression(relational::AstArena& arena, bool value)
+{
+    auto& expression = arena.make<relational::LiteralExpression>();
+    expression.tag = relational::LiteralTag::Boolean;
+    expression.boolean_value = value;
+    expression.text = value ? "TRUE" : "FALSE";
+    return expression;
+}
+
+relational::LiteralExpression& make_null_literal_expression(relational::AstArena& arena)
+{
+    auto& expression = arena.make<relational::LiteralExpression>();
+    expression.tag = relational::LiteralTag::Null;
+    expression.text.clear();
+    return expression;
+}
+
+}  // namespace
+
+UpdateParseResult parse_update(std::string_view input)
+{
+    UpdateParseResult result{};
+    const auto normalized = strip_leading_comments(input);
+    const auto statement_text = strip_trailing_semicolon(normalized);
+    if (statement_text.empty()) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement is empty";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Provide an UPDATE <table> SET ... WHERE ... statement."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+
+    auto rest = trim_copy(statement_text.substr(kUpdateKeyword.size()));
+    if (rest.empty()) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement requires a target table";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Specify a table name immediately after UPDATE."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+
+    std::size_t position = 0U;
+    auto rest_view = std::string_view(rest);
+    skip_whitespace(rest_view, position);
+    const auto table_start = position;
+    while (position < rest_view.size() && !std::isspace(static_cast<unsigned char>(rest_view[position]))) {
+        ++position;
+    }
+    if (table_start == position) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement requires a target table";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Specify a table name immediately after UPDATE."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+    const auto table_spec = trim_copy(rest_view.substr(table_start, position - table_start));
+    skip_whitespace(rest_view, position);
+
+    if (position + 3U > rest_view.size() || uppercase_copy(rest_view.substr(position, 3U)) != "SET") {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "UPDATE statement must include a SET clause";
+        diagnostic.statement = trim_copy(input);
+        diagnostic.remediation_hints = {"Add SET <column> = <expression> before the WHERE clause."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+    position += 3U;
+    skip_whitespace(rest_view, position);
+
+    const auto where_offset = rest_view.substr(position).find(
 }  // namespace bored::parser

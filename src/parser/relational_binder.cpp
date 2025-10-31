@@ -298,12 +298,7 @@ public:
     BindingResult bind(SelectStatement& statement) const
     {
         BindingResult result{};
-        if (config_.catalog == nullptr) {
-            ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
-            diagnostic.message = "Binder catalog is not configured";
-            diagnostic.remediation_hints = {"Provide a catalog adapter before binding."};
-            result.diagnostics.push_back(std::move(diagnostic));
+        if (!ensure_catalog(result)) {
             return result;
         }
 
@@ -322,7 +317,279 @@ public:
         return result;
     }
 
+    BindingResult bind(InsertStatement& statement) const
+    {
+        BindingResult result{};
+        if (!ensure_catalog(result)) {
+            return result;
+        }
+
+        if (statement.target == nullptr) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "INSERT statement requires a target table";
+            diagnostic.remediation_hints = {"Specify a table after INSERT INTO."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
+        Scope scope{};
+        bind_table_reference(*statement.target, scope, result);
+        if (!result.success()) {
+            return result;
+        }
+
+        const auto tables = scope.tables();
+        if (tables.empty()) {
+            return result;
+        }
+        const auto& bound_table = *tables.front();
+
+        if (statement.columns.empty()) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "INSERT statement must specify a column list";
+            diagnostic.remediation_hints = {"List all target columns inside parentheses after the table name."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
+        std::unordered_set<std::string> seen_columns;
+        for (auto& column : statement.columns) {
+            if (column.name.value.empty()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "INSERT column list contains an empty identifier";
+                diagnostic.remediation_hints = {"Ensure each column name is a valid identifier."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+
+            const auto key = normalise_identifier(column.name.value);
+            if (!seen_columns.insert(key).second) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Duplicate column '" + column.name.value + "' in INSERT column list";
+                diagnostic.remediation_hints = {"Remove duplicate column references from the column list."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+
+            auto matches = scope.resolve_column(column.name.value);
+            if (matches.empty()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Column '" + column.name.value + "' not found in target table";
+                diagnostic.remediation_hints = {"Verify the column exists on the target table."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+            if (matches.size() > 1U) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Column reference '" + column.name.value + "' is ambiguous";
+                diagnostic.remediation_hints = {"Qualify the column with a table alias."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+
+            column.binding = *matches.front().binding;
+        }
+
+        if (!result.success()) {
+            return result;
+        }
+
+        if (statement.columns.size() != bound_table.columns.size()) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "INSERT must provide values for all columns in the target table";
+            diagnostic.remediation_hints = {"List every column defined on the table in the INSERT column list."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
+        if (statement.rows.empty()) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "INSERT statement must include at least one VALUES row";
+            diagnostic.remediation_hints = {"Specify one or more parenthesized value lists after VALUES."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
+        for (auto& row : statement.rows) {
+            if (row.values.size() != statement.columns.size()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "VALUES list does not match INSERT column count";
+                diagnostic.remediation_hints = {"Ensure each VALUES row has exactly one literal per listed column."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+            for (auto* expression : row.values) {
+                if (expression == nullptr) {
+                    ParserDiagnostic diagnostic{};
+                    diagnostic.severity = ParserSeverity::Error;
+                    diagnostic.message = "VALUES list contains an empty expression";
+                    diagnostic.remediation_hints = {"Provide a literal for each position in the VALUES row."};
+                    result.diagnostics.push_back(std::move(diagnostic));
+                    continue;
+                }
+                bind_expression(*expression, scope, result);
+            }
+        }
+
+        return result;
+    }
+
+    BindingResult bind(UpdateStatement& statement) const
+    {
+        BindingResult result{};
+        if (!ensure_catalog(result)) {
+            return result;
+        }
+
+        if (statement.target == nullptr) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "UPDATE statement requires a target table";
+            diagnostic.remediation_hints = {"Provide a table name immediately after UPDATE."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
+        Scope scope{};
+        bind_table_reference(*statement.target, scope, result);
+        if (!result.success()) {
+            return result;
+        }
+
+        if (statement.assignments.empty()) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "UPDATE statement must include at least one SET assignment";
+            diagnostic.remediation_hints = {"Add a SET clause listing the columns to update."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
+        std::unordered_set<std::string> seen_targets;
+        for (auto& assignment : statement.assignments) {
+            if (assignment.column.value.empty()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "SET clause contains an empty column reference";
+                diagnostic.remediation_hints = {"Ensure each assignment references a valid column."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+
+            const auto key = normalise_identifier(assignment.column.value);
+            if (!seen_targets.insert(key).second) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Column '" + assignment.column.value + "' is assigned multiple times";
+                diagnostic.remediation_hints = {"Remove duplicate assignments for the same column."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+
+            auto matches = scope.resolve_column(assignment.column.value);
+            if (matches.empty()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Column '" + assignment.column.value + "' not found in target table";
+                diagnostic.remediation_hints = {"Verify the column exists on the table being updated."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+            if (matches.size() > 1U) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Column reference '" + assignment.column.value + "' is ambiguous";
+                diagnostic.remediation_hints = {"Qualify the column with a table alias."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+
+            assignment.binding = *matches.front().binding;
+
+            if (assignment.value == nullptr) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "SET assignment for column '" + assignment.column.value + "' is missing a value";
+                diagnostic.remediation_hints = {"Provide an expression on the right-hand side of the assignment."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+
+            bind_expression(*assignment.value, scope, result);
+        }
+
+        if (statement.where == nullptr) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "UPDATE statement requires a WHERE clause";
+            diagnostic.remediation_hints = {"Add a WHERE predicate to target specific rows."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
+        bind_expression(*statement.where, scope, result);
+        return result;
+    }
+
+    BindingResult bind(DeleteStatement& statement) const
+    {
+        BindingResult result{};
+        if (!ensure_catalog(result)) {
+            return result;
+        }
+
+        if (statement.target == nullptr) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "DELETE statement requires a target table";
+            diagnostic.remediation_hints = {"Provide a table name after DELETE FROM."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
+        Scope scope{};
+        bind_table_reference(*statement.target, scope, result);
+        if (!result.success()) {
+            return result;
+        }
+
+        if (statement.where == nullptr) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "DELETE statement requires a WHERE clause";
+            diagnostic.remediation_hints = {"Add a WHERE condition to control which rows are deleted."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
+        bind_expression(*statement.where, scope, result);
+        return result;
+    }
+
 private:
+    bool ensure_catalog(BindingResult& result) const
+    {
+        if (config_.catalog != nullptr) {
+            return true;
+        }
+
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "Binder catalog is not configured";
+        diagnostic.remediation_hints = {"Provide a catalog adapter before binding."};
+        result.diagnostics.push_back(std::move(diagnostic));
+        return false;
+    }
+
     void bind_from_clause(QuerySpecification& query, Scope& scope, BindingResult& result) const
     {
         if (query.from_tables.empty()) {
@@ -656,18 +923,58 @@ private:
             right_type = expression.right->inferred_type->type;
             right_nullable = expression.right->inferred_type->nullable;
         }
+        switch (expression.op) {
+        case BinaryOperator::Equal:
+        case BinaryOperator::NotEqual:
+        case BinaryOperator::Less:
+        case BinaryOperator::LessOrEqual:
+        case BinaryOperator::Greater:
+        case BinaryOperator::GreaterOrEqual: {
+            const auto analysis = analyse_comparison(left_type, right_type);
+            if (!analysis.comparable) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Type mismatch: cannot compare " + scalar_type_name(left_type) + " to " + scalar_type_name(right_type);
+                diagnostic.remediation_hints = {"Cast one side to a compatible type or adjust the query predicate."};
+                result.diagnostics.push_back(std::move(diagnostic));
+            }
 
-        const auto analysis = analyse_comparison(left_type, right_type);
-        if (!analysis.comparable) {
-            ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
-            diagnostic.message = "Type mismatch: cannot compare " + scalar_type_name(left_type) + " to " + scalar_type_name(right_type);
-            diagnostic.remediation_hints = {"Cast one side to a compatible type or adjust the query predicate."};
-            result.diagnostics.push_back(std::move(diagnostic));
+            if (analysis.common_type.has_value()) {
+                const auto target_type = *analysis.common_type;
+                if (expression.left != nullptr && expression.left->inferred_type.has_value() &&
+                    expression.left->inferred_type->type != target_type) {
+                    set_expression_coercion(*expression.left, target_type, left_nullable);
+                }
+                if (expression.right != nullptr && expression.right->inferred_type.has_value() &&
+                    expression.right->inferred_type->type != target_type) {
+                    set_expression_coercion(*expression.right, target_type, right_nullable);
+                }
+            }
+
+            set_expression_type(expression, ScalarType::Boolean, true);
+            break;
         }
+        case BinaryOperator::Add:
+        case BinaryOperator::Subtract: {
+            if (!is_numeric(left_type) || !is_numeric(right_type)) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Type mismatch: arithmetic requires numeric operands but saw " + scalar_type_name(left_type) + " and " + scalar_type_name(right_type);
+                diagnostic.remediation_hints = {"Cast operands to numeric types or adjust the SET expression."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                set_expression_type(expression, ScalarType::Unknown, true);
+                break;
+            }
 
-        if (analysis.common_type.has_value()) {
-            const auto target_type = *analysis.common_type;
+            ScalarType target_type = ScalarType::Int64;
+            if (left_type == ScalarType::Decimal || right_type == ScalarType::Decimal) {
+                target_type = ScalarType::Decimal;
+            } else if (left_type == ScalarType::Int64 || right_type == ScalarType::Int64) {
+                target_type = ScalarType::Int64;
+            } else {
+                target_type = ScalarType::UInt32;
+            }
+
             if (expression.left != nullptr && expression.left->inferred_type.has_value() &&
                 expression.left->inferred_type->type != target_type) {
                 set_expression_coercion(*expression.left, target_type, left_nullable);
@@ -676,9 +983,15 @@ private:
                 expression.right->inferred_type->type != target_type) {
                 set_expression_coercion(*expression.right, target_type, right_nullable);
             }
-        }
 
-        set_expression_type(expression, ScalarType::Boolean, true);
+            const bool nullable = left_nullable || right_nullable;
+            set_expression_type(expression, target_type, nullable);
+            break;
+        }
+        default:
+            set_expression_type(expression, ScalarType::Unknown, true);
+            break;
+        }
     }
 
     void set_expression_type(Expression& expression, ScalarType type, bool nullable) const
@@ -703,6 +1016,24 @@ private:
 }  // namespace
 
 BindingResult bind_select(const BinderConfig& config, SelectStatement& statement)
+{
+    RelationalBinder binder(config);
+    return binder.bind(statement);
+}
+
+BindingResult bind_insert(const BinderConfig& config, InsertStatement& statement)
+{
+    RelationalBinder binder(config);
+    return binder.bind(statement);
+}
+
+BindingResult bind_update(const BinderConfig& config, UpdateStatement& statement)
+{
+    RelationalBinder binder(config);
+    return binder.bind(statement);
+}
+
+BindingResult bind_delete(const BinderConfig& config, DeleteStatement& statement)
 {
     RelationalBinder binder(config);
     return binder.bind(statement);

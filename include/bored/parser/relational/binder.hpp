@@ -45,5 +45,8 @@ struct BindingResult final {
 };
 
 BindingResult bind_select(const BinderConfig& config, SelectStatement& statement);
+BindingResult bind_insert(const BinderConfig& config, InsertStatement& statement);
+BindingResult bind_update(const BinderConfig& config, UpdateStatement& statement);
+BindingResult bind_delete(const BinderConfig& config, DeleteStatement& statement);
 
 }  // namespace bored::parser::relational

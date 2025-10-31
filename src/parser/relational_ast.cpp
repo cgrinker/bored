@@ -47,7 +47,9 @@ public:
             " < ",
             " <= ",
             " > ",
-            " >= "
+            " >= ",
+            " + ",
+            " - "
         };
 
         std::ostringstream stream;
