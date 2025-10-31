@@ -37,6 +37,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <cstring>
 #include <stdexcept>
 #include <system_error>
@@ -2603,14 +2604,55 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         order_index = it->second;
     }
 
-    std::vector<std::size_t> order(table->rows.size());
-    for (std::size_t index = 0; index < order.size(); ++index) {
-        order[index] = index;
+    bored::executor::ExecutorTelemetry select_telemetry;
+
+    ShellStorageReader storage_reader{table};
+    bored::executor::SequentialScanExecutor::Config scan_config{};
+    scan_config.reader = &storage_reader;
+    scan_config.relation_id = table->relation_id;
+    scan_config.telemetry = &select_telemetry;
+
+    bored::executor::SequentialScanExecutor scan_executor{scan_config};
+    bored::executor::ExecutorContext executor_context{};
+    bored::executor::TupleBuffer executor_buffer{};
+
+    std::vector<std::vector<ScalarValue>> materialized_rows;
+    scan_executor.open(executor_context);
+    while (scan_executor.next(executor_context, executor_buffer)) {
+        auto tuple_view = bored::executor::TupleView::from_buffer(executor_buffer);
+        if (!tuple_view.valid() || tuple_view.column_count() < 2U) {
+            scan_executor.close(executor_context);
+            return make_error_metrics(sql, "Executor returned invalid tuple payload.");
+        }
+
+        const auto payload_column = tuple_view.column(1U);
+        if (payload_column.is_null) {
+            scan_executor.close(executor_context);
+            return make_error_metrics(sql, "Executor returned null tuple payload.");
+        }
+
+        std::vector<ScalarValue> decoded_values;
+        if (!decode_values_payload(*table, payload_column.data, decoded_values)) {
+            scan_executor.close(executor_context);
+            return make_error_metrics(sql, "Failed to decode tuple payload.");
+        }
+
+        materialized_rows.push_back(std::move(decoded_values));
+        executor_buffer.reset();
     }
+    scan_executor.close(executor_context);
+
+    std::vector<std::size_t> order(materialized_rows.size());
+    std::iota(order.begin(), order.end(), 0U);
 
     if (order_index.has_value()) {
         std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
-            return compare_values(table->rows[lhs][*order_index], table->rows[rhs][*order_index]) < 0;
+            const auto& left_row = materialized_rows[lhs];
+            const auto& right_row = materialized_rows[rhs];
+            if (left_row.size() <= *order_index || right_row.size() <= *order_index) {
+                return false;
+            }
+            return compare_values(left_row[*order_index], right_row[*order_index]) < 0;
         });
     }
 
@@ -2622,22 +2664,27 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     std::vector<std::vector<std::string>> rendered_rows;
     rendered_rows.reserve(order.size());
     for (auto row_index : order) {
-        const auto& row = table->rows[row_index];
+        const auto& row_values = materialized_rows[row_index];
         std::vector<std::string> rendered;
         rendered.reserve(column_indexes.size());
         for (std::size_t index = 0; index < column_indexes.size(); ++index) {
             const auto column_index = column_indexes[index];
-            const auto value_text = value_to_string(row[column_index]);
+            if (row_values.size() <= column_index) {
+                return make_error_metrics(sql, "Executor row payload is missing projected column.");
+            }
+            const auto value_text = value_to_string(row_values[column_index]);
             widths[index] = std::max(widths[index], value_text.size());
             rendered.push_back(value_text);
         }
         rendered_rows.push_back(std::move(rendered));
     }
 
+    const auto telemetry_snapshot = select_telemetry.snapshot();
+
     CommandMetrics metrics{};
     metrics.success = true;
     metrics.summary = "Selected " + format_count("row", rendered_rows.size()) + ".";
-    metrics.rows_touched = rendered_rows.size();
+    metrics.rows_touched = static_cast<std::size_t>(telemetry_snapshot.seq_scan_rows_visible);
 
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 logical_detail_lines.begin(),

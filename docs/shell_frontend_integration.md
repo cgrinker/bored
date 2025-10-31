@@ -39,11 +39,11 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 - **Relevant code**: `src/planner` (logical → physical planning), `src/executor` (operator pipeline), `src/shell/shell_backend.cpp` (row cache), telemetry hooks in `include/bored/storage/storage_telemetry_registry.hpp`.
 - **Action items**
 	1. Introduce a planner/executor call path in `ShellBackend::execute_dml` that takes the logical plan from Milestone 1 and produces results via the executor (likely through `planner::plan_query` and `executor::run_query`).
-		- 2025-10-31: `execute_insert`, `execute_update`, and `execute_delete` now build physical plans via `plan_query` and drain them through real executor pipelines; command metrics stitch in executor telemetry snapshots while SELECT continues to read from the in-memory cache.
+		- 2025-10-31: `execute_insert`, `execute_update`, `execute_delete`, and `execute_select` now build physical plans via `plan_query` and drain them through real executor pipelines; SELECT renders results from sequential scan output while the in-memory cache remains the backing store.
 	2. Remove the in-memory `TableData::rows` mutation logic once executor pipelines write/read from catalog-backed storage or executor buffers.
 		- 2025-10-31: Pending. The shell retains `TableData::rows`/`row_ids` so result rendering works while SELECT routing and storage integration are completed.
 	3. Validate telemetry propagation by asserting `CommandMetrics.rows_touched`/`wal_bytes` reflect executor metrics in updated end-to-end tests.
-		- 2025-10-31: Insert/update/delete command metrics now consume executor row counters and wal byte counters from executor telemetry; WAL byte propagation to disk-backed storage remains TODO until shell persistence lands.
+		- 2025-10-31: Insert/update/delete/select command metrics now consume executor row counters and wal byte counters from executor telemetry; WAL byte propagation to disk-backed storage remains TODO until shell persistence lands.
 - **Iteration guidance**: if integrating planner and executor together is too large, split into subtasks (e.g., planning integration first, executor wiring second) and track them explicitly.
 
 ## Milestone 3 — Persistent Storage Backend _(Status: Planned)_
