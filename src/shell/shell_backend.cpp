@@ -2389,19 +2389,98 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
                                   "WHERE clause literal must be an integer value.");
     }
 
-    auto new_end = std::remove_if(table->rows.begin(), table->rows.end(), [&](const auto& row) {
-        if (!std::holds_alternative<std::int64_t>(row[where_index])) {
+    const std::string predicate_expression = where_identifier.binding->column_name + " = " + where_literal.text;
+    logical_detail_lines.push_back("logical.delete target=" + format_relation_name(*table_binding) +
+                                   " predicate=" + predicate_expression);
+
+    bored::executor::ExecutorTelemetry delete_telemetry;
+
+    ShellStorageReader storage_reader{table};
+    bored::executor::SequentialScanExecutor::Config scan_config{};
+    scan_config.reader = &storage_reader;
+    scan_config.relation_id = table->relation_id;
+    scan_config.telemetry = &delete_telemetry;
+
+    auto scan_node = std::make_unique<bored::executor::SequentialScanExecutor>(scan_config);
+
+    bored::executor::FilterExecutor::Config filter_config{};
+    filter_config.telemetry = &delete_telemetry;
+    filter_config.predicate = [table,
+                               where_index,
+                               where_value,
+                               decoded = std::vector<ScalarValue>{},
+                               row_id = std::uint64_t{}](const bored::executor::TupleView& input,
+                                                         bored::executor::ExecutorContext&) mutable {
+        if (input.column_count() < 2U) {
             return false;
         }
-        return std::get<std::int64_t>(row[where_index]) == where_value;
-    });
-    std::size_t deleted = static_cast<std::size_t>(std::distance(new_end, table->rows.end()));
-    table->rows.erase(new_end, table->rows.end());
+        const auto payload_column = input.column(1U);
+        if (payload_column.is_null) {
+            return false;
+        }
+        if (!decode_row_payload(*table, payload_column.data, row_id, decoded)) {
+            return false;
+        }
+        if (decoded.size() <= where_index) {
+            return false;
+        }
+        if (!std::holds_alternative<std::int64_t>(decoded[where_index])) {
+            return false;
+        }
+        return std::get<std::int64_t>(decoded[where_index]) == where_value;
+    };
+
+    auto filter_node = std::make_unique<bored::executor::FilterExecutor>(std::move(scan_node), std::move(filter_config));
+
+    bored::executor::ProjectionExecutor::Config projection_config{};
+    projection_config.telemetry = &delete_telemetry;
+    projection_config.projections.push_back(
+        [table,
+         decoded = std::vector<ScalarValue>{},
+         row_id = std::uint64_t{},
+         row_id_bytes = std::array<std::byte, sizeof(std::uint64_t)>{}](
+            const bored::executor::TupleView& input,
+            bored::executor::TupleWriter& writer,
+            bored::executor::ExecutorContext&) mutable {
+            if (input.column_count() < 2U) {
+                throw std::runtime_error{"Delete projection missing payload column"};
+            }
+            const auto payload_column = input.column(1U);
+            if (payload_column.is_null) {
+                throw std::runtime_error{"Delete projection encountered null payload"};
+            }
+            if (!decode_row_payload(*table, payload_column.data, row_id, decoded)) {
+                throw std::runtime_error{"Failed to decode row payload for delete"};
+            }
+
+            std::memcpy(row_id_bytes.data(), &row_id, sizeof(row_id));
+            writer.append_column(std::span<const std::byte>(row_id_bytes.data(), row_id_bytes.size()), false);
+        });
+
+    auto projection_node = std::make_unique<bored::executor::ProjectionExecutor>(std::move(filter_node),
+                                                                                  std::move(projection_config));
+
+    ShellDeleteTarget delete_target{table};
+    bored::executor::DeleteExecutor::Config delete_config{};
+    delete_config.target = &delete_target;
+    delete_config.telemetry = &delete_telemetry;
+
+    bored::executor::DeleteExecutor delete_executor{std::move(projection_node), delete_config};
+
+    bored::executor::ExecutorContext executor_context{};
+    bored::executor::TupleBuffer executor_buffer{};
+    delete_executor.open(executor_context);
+    delete_executor.next(executor_context, executor_buffer);
+    delete_executor.close(executor_context);
+
+    const std::size_t deleted = delete_target.deleted_count();
+    const auto telemetry_snapshot = delete_telemetry.snapshot();
 
     CommandMetrics metrics{};
     metrics.success = true;
     metrics.summary = "Deleted " + format_count("row", deleted) + ".";
     metrics.rows_touched = deleted;
+    metrics.wal_bytes = telemetry_snapshot.delete_wal_bytes;
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 logical_detail_lines.begin(),
                                 logical_detail_lines.end());
