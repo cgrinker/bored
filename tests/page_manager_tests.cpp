@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -986,7 +987,9 @@ TEST_CASE("PageManager insert overflow tuple logs before-image chunks")
 
     REQUIRE_FALSE(manager.flush_wal());
 
-    const WalRecordHeader* before_header = nullptr;
+    WalRecordHeader before_header{};
+    bool have_before_header = false;
+    std::vector<std::byte> before_payload_bytes;
     bored::storage::WalTupleBeforeImageView before_snapshot{};
     bool have_before_snapshot = false;
     std::size_t chunk_records = 0U;
@@ -1026,10 +1029,12 @@ TEST_CASE("PageManager insert overflow tuple logs before-image chunks")
             } else if (type == WalRecordType::TupleOverflowChunk) {
                 ++chunk_records;
             } else if (type == WalRecordType::TupleBeforeImage) {
-                auto before_view = bored::storage::decode_wal_tuple_before_image(payload_span);
+                before_payload_bytes.assign(payload_span.begin(), payload_span.end());
+                auto before_view = bored::storage::decode_wal_tuple_before_image(std::span<const std::byte>(before_payload_bytes.data(), before_payload_bytes.size()));
                 REQUIRE(before_view);
                 before_snapshot = *before_view;
-                before_header = header;
+                before_header = *header;
+                have_before_header = true;
                 have_before_snapshot = true;
             }
 
@@ -1046,7 +1051,7 @@ TEST_CASE("PageManager insert overflow tuple logs before-image chunks")
 
     REQUIRE(saw_insert);
     REQUIRE(have_before_snapshot);
-    REQUIRE(before_header != nullptr);
+    REQUIRE(have_before_header);
     REQUIRE(chunk_records > 0U);
     REQUIRE(chunk_records == insert_result.overflow_page_ids.size());
     REQUIRE(before_snapshot.meta.page_id == 3131U);

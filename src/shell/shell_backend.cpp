@@ -12,6 +12,7 @@
 #include "bored/parser/ddl_command_builder.hpp"
 #include "bored/parser/grammar.hpp"
 #include "bored/parser/relational/binder.hpp"
+#include "bored/parser/relational/catalog_binder_adapter.hpp"
 #include "bored/planner/plan_printer.hpp"
 #include "bored/planner/planner.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
