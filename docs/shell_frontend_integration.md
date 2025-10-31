@@ -18,8 +18,8 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 ## Milestone 1 — Parser/AST DML Adoption _(Status: Planned)_
 - **Action items**
  1. [x] Add a shell entry point that invokes the PEGTL parser for single statements (`parser::parse_relational_statement` shim if needed) and returns AST diagnostics. ✓ _2025-10-30: `execute_select` now parses via `parser::parse_select` and rejects unsupported constructs with parser-style diagnostics._
- 2. [ ] Replace `ShellBackend::execute_insert|update|delete|select` with logic that lowers the AST to the logical IR (reusing the binder) and converts semantic/parse failures into `CommandMetrics`.
-	 - 2025-10-30: `execute_insert|update|delete` now parse and bind through the shared PEGTL pipeline; logical IR lowering and executor handoff remain TODO.
+ 2. [x] Replace `ShellBackend::execute_insert|update|delete|select` with logic that lowers the AST to the logical IR (reusing the binder) and converts semantic/parse failures into `CommandMetrics`.
+	 - 2025-10-30: `execute_insert|update|delete` now parse and bind through the shared PEGTL pipeline; executor handoff remains deferred to Milestone 2.
 	 - 2025-10-30: `execute_insert` builds a placeholder planner `LogicalPlan`/`plan_query` result before mutating in-memory tables so planner diagnostics flow into shell metrics.
 	 - 2025-10-31: `execute_update` and `execute_delete` now construct placeholder planner plans (Update/Delete + SeqScan) so planner diagnostics surface before in-memory mutations.
 	 - 2025-10-31: `execute_select` now binds against the catalog and constructs a Projection + SeqScan logical plan so planner diagnostics accompany result rendering.
@@ -28,6 +28,7 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 	- 2025-10-30: Executor stub consumes the shared physical plans and appends simulated executor diagnostics for SELECT/UPDATE/DELETE metrics.
 	- 2025-10-31: INSERT now emits executor stub diagnostics and Catch2 coverage asserts planner/executor detail lines.
 	 - 2025-10-31: UPDATE and DELETE now invoke the executor stub once per command and thread the rendered plan lines into command metrics.
+	 - 2025-10-31: All DML routes lower through the logical plan stage; `ShellBackend` records logical root/plan diagnostics (via `parser::relational::lower_select` for SELECT and binder metadata for INSERT/UPDATE/DELETE) before planner/executor stubs, surfacing lowering errors as `CommandMetrics` failures.
 	- **Next task**: Add focused tests (e.g., Catch2 unit coverage) that assert planner and executor stub detail lines, covering Milestone 1 action item 3.
 	
  3. [ ] Update or add tests (`tests/end_to_end/e2e_smoke.sql` + unit coverage under `tests/parser` or new Catch2 cases) to confirm comment handling and DML success via the parser.

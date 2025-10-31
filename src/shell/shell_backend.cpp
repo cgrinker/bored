@@ -13,6 +13,8 @@
 #include "bored/parser/grammar.hpp"
 #include "bored/parser/relational/binder.hpp"
 #include "bored/parser/relational/catalog_binder_adapter.hpp"
+#include "bored/parser/relational/logical_lowering.hpp"
+#include "bored/parser/relational/logical_plan_printer.hpp"
 #include "bored/planner/plan_printer.hpp"
 #include "bored/planner/planner.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
@@ -413,6 +415,60 @@ std::string_view physical_operator_name(planner::PhysicalOperatorType type) noex
         return "Delete";
     }
     return "Unknown";
+}
+
+std::string join_strings(const std::vector<std::string>& values, std::string_view separator)
+{
+    std::string result;
+    bool first = true;
+    for (const auto& value : values) {
+        if (!first) {
+            result.append(separator);
+        }
+        result.append(value);
+        first = false;
+    }
+    return result;
+}
+
+std::string_view logical_operator_kind_name(parser::relational::LogicalOperatorKind kind) noexcept
+{
+    using parser::relational::LogicalOperatorKind;
+    switch (kind) {
+    case LogicalOperatorKind::Scan:
+        return "Scan";
+    case LogicalOperatorKind::Project:
+        return "Project";
+    case LogicalOperatorKind::Filter:
+        return "Filter";
+    case LogicalOperatorKind::Join:
+        return "Join";
+    case LogicalOperatorKind::Aggregate:
+        return "Aggregate";
+    case LogicalOperatorKind::Sort:
+        return "Sort";
+    case LogicalOperatorKind::Limit:
+        return "Limit";
+    }
+    return "Unknown";
+}
+
+std::vector<std::string> render_logical_plan_lines(const parser::relational::LogicalOperator& root)
+{
+    std::vector<std::string> lines;
+    lines.push_back("logical.root=" + std::string(logical_operator_kind_name(root.kind)));
+
+    const auto plan_text = parser::relational::describe_plan(root);
+    std::istringstream stream{plan_text};
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        lines.push_back("logical.plan: " + line);
+    }
+
+    return lines;
 }
 
 }  // namespace
@@ -935,6 +991,14 @@ ShellBackend::TableData* ShellBackend::find_table_or_default_schema(std::string_
     return find_table(qualified);
 }
 
+ShellBackend::TableData* ShellBackend::find_table(const parser::relational::TableBinding& binding)
+{
+    if (!binding.schema_name.empty()) {
+        return find_table(binding.schema_name + "." + binding.table_name);
+    }
+    return find_table_or_default_schema(binding.table_name);
+}
+
 std::vector<std::string> ShellBackend::collect_table_columns(const TableData& table)
 {
     std::vector<std::string> columns;
@@ -1292,9 +1356,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     }
 
     const auto* table_binding = &*target_ref->binding;
-    auto* table = table_binding->schema_name.empty() ?
-                      find_table_or_default_schema(table_binding->table_name) :
-                      find_table(table_binding->schema_name + "." + table_binding->table_name);
+    auto* table = find_table(*table_binding);
     if (table == nullptr) {
         return make_error_metrics(sql, "Target table not found.", {"Verify the table exists."});
     }
@@ -1322,6 +1384,11 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
         }
         column_indexes.push_back(it->second);
     }
+
+    std::vector<std::string> logical_detail_lines;
+    logical_detail_lines.push_back("logical.insert target=" + format_relation_name(*table_binding) +
+                                   " columns=[" + join_strings(planner_columns, ", ") + "] rows=" +
+                                   std::to_string(parse_result.statement->rows.size()));
 
     // Build a logical plan so planner integration can be validated prior to executor wiring.
     planner::LogicalProperties insert_props{};
@@ -1417,6 +1484,9 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     metrics.success = true;
     metrics.summary = "Inserted " + format_count("row", inserted) + ".";
     metrics.rows_touched = inserted;
+    metrics.detail_lines.insert(metrics.detail_lines.end(),
+                                logical_detail_lines.begin(),
+                                logical_detail_lines.end());
     metrics.detail_lines.push_back("planner.root=" + plan_details.root_detail);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
@@ -1465,16 +1535,17 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     }
 
     const auto* table_binding = &*target_ref->binding;
-    auto* table = table_binding->schema_name.empty() ?
-                      find_table_or_default_schema(table_binding->table_name) :
-                      find_table(table_binding->schema_name + "." + table_binding->table_name);
+    auto* table = find_table(*table_binding);
     if (table == nullptr) {
         return make_error_metrics(sql, "Target table not found.");
     }
 
+    std::vector<std::string> logical_detail_lines;
+
     if (parse_result.statement->assignments.empty()) {
         return make_error_metrics(sql, "UPDATE statement is missing a SET assignment.");
     }
+    std::vector<std::string> logical_detail_lines;
 
     const auto& assignment = parse_result.statement->assignments.front();
     if (!assignment.binding.has_value() || assignment.value == nullptr) {
@@ -1620,6 +1691,9 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
                                   "WHERE clause literal must be an integer value.");
     }
 
+    logical_detail_lines.push_back("logical.delete target=" + format_relation_name(*table_binding) +
+                                   " predicate=" + where_identifier.binding->column_name + " = " + where_literal.text);
+
     if (assignment_kind == AssignmentKind::StringConstant &&
         target_column.type != catalog::CatalogColumnType::Utf8) {
         return make_error_metrics(sql,
@@ -1631,6 +1705,27 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
         return make_error_metrics(sql,
                                   "Cannot assign numeric expression to text column '" + target_column.name + "'.");
     }
+
+    std::string set_expression;
+    const auto set_column = assignment.binding->column_name;
+    switch (assignment_kind) {
+    case AssignmentKind::StringConstant:
+        set_expression = set_column + " = '" + string_constant + "'";
+        break;
+    case AssignmentKind::NumericConstant:
+        set_expression = set_column + " = " + std::to_string(numeric_constant);
+        break;
+    case AssignmentKind::AddInteger:
+        set_expression = set_column + " = " + set_column + " + " + std::to_string(delta_value);
+        break;
+    case AssignmentKind::SubtractInteger:
+        set_expression = set_column + " = " + set_column + " - " + std::to_string(delta_value);
+        break;
+    }
+
+    std::string predicate_expression = where_identifier.binding->column_name + " = " + where_literal.text;
+    logical_detail_lines.push_back("logical.update target=" + format_relation_name(*table_binding) +
+                                   " set=" + set_expression + " predicate=" + predicate_expression);
 
     std::size_t updated = 0U;
     for (auto& row : table->rows) {
@@ -1668,6 +1763,9 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     metrics.success = true;
     metrics.summary = "Updated " + format_count("row", updated) + ".";
     metrics.rows_touched = updated;
+    metrics.detail_lines.insert(metrics.detail_lines.end(),
+                                logical_detail_lines.begin(),
+                                logical_detail_lines.end());
     metrics.detail_lines.push_back("planner.root=" + plan_details.root_detail);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
@@ -1716,9 +1814,7 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     }
 
     const auto* table_binding = &*target_ref->binding;
-    auto* table = table_binding->schema_name.empty() ?
-                      find_table_or_default_schema(table_binding->table_name) :
-                      find_table(table_binding->schema_name + "." + table_binding->table_name);
+    auto* table = find_table(*table_binding);
     if (table == nullptr) {
         return make_error_metrics(sql, "Target table not found.");
     }
@@ -1798,6 +1894,9 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     metrics.success = true;
     metrics.summary = "Deleted " + format_count("row", deleted) + ".";
     metrics.rows_touched = deleted;
+    metrics.detail_lines.insert(metrics.detail_lines.end(),
+                                logical_detail_lines.begin(),
+                                logical_detail_lines.end());
     metrics.detail_lines.push_back("planner.root=" + plan_details.root_detail);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
@@ -1843,6 +1942,18 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
                                          "Failed to bind SELECT statement.");
     }
 
+    auto lowering = parser::relational::lower_select(*parse_result.statement);
+    if (!lowering.success()) {
+        return make_parser_error_metrics(sql,
+                                         std::move(lowering.diagnostics),
+                                         "Failed to lower SELECT statement.");
+    }
+
+    std::vector<std::string> logical_detail_lines;
+    if (lowering.plan != nullptr) {
+        logical_detail_lines = render_logical_plan_lines(*lowering.plan);
+    }
+
     std::string plan_error;
     std::vector<std::string> plan_hints;
     auto plan = build_simple_select_plan(*parse_result.statement, plan_error, plan_hints);
@@ -1857,11 +1968,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     const auto* table_binding = &*query->from->binding;
 
     TableData* table = nullptr;
-    if (table_binding->schema_name.empty()) {
-        table = find_table_or_default_schema(table_binding->table_name);
-    } else {
-        table = find_table(table_binding->schema_name + "." + table_binding->table_name);
-    }
+    table = find_table(*table_binding);
     if (table == nullptr) {
         return make_error_metrics(sql, "Target table not found.");
     }
@@ -1949,6 +2056,9 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     metrics.summary = "Selected " + format_count("row", rendered_rows.size()) + ".";
     metrics.rows_touched = rendered_rows.size();
 
+    metrics.detail_lines.insert(metrics.detail_lines.end(),
+                                logical_detail_lines.begin(),
+                                logical_detail_lines.end());
     if (!plan_details.root_detail.empty()) {
         metrics.detail_lines.push_back("planner.root=" + plan_details.root_detail);
     }

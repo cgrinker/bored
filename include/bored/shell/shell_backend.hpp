@@ -35,6 +35,10 @@ namespace bored::ddl {
 class DdlCommandDispatcher;
 }
 
+namespace bored::parser::relational {
+struct TableBinding;
+}  // namespace bored::parser::relational
+
 namespace bored::shell {
 
 class ShellBackend final {
@@ -94,6 +98,7 @@ private:
     void refresh_table_cache();
     [[nodiscard]] TableData* find_table(std::string_view qualified_name);
     [[nodiscard]] TableData* find_table_or_default_schema(std::string_view name);
+    [[nodiscard]] TableData* find_table(const parser::relational::TableBinding& binding);
 
     [[nodiscard]] static std::vector<std::string> collect_table_columns(const TableData& table);
     [[nodiscard]] std::variant<PlannerPlanDetails, CommandMetrics> plan_scan_operation(

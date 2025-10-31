@@ -44,6 +44,16 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for SELECT")
     const auto metrics = harness.engine.execute_sql("SELECT id, counter FROM metrics;");
     REQUIRE(metrics.success);
 
+    auto logical_root_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "logical.root=");
+    });
+    REQUIRE(logical_root_it != metrics.detail_lines.end());
+
+    auto logical_plan_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "logical.plan:");
+    });
+    REQUIRE(logical_plan_it != metrics.detail_lines.end());
+
     auto root_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "planner.root=");
     });
@@ -62,6 +72,8 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for SELECT")
 
     CHECK(std::distance(metrics.detail_lines.begin(), root_it) <
           std::distance(metrics.detail_lines.begin(), stub_it));
+    CHECK(std::distance(metrics.detail_lines.begin(), logical_root_it) <
+          std::distance(metrics.detail_lines.begin(), root_it));
 }
 
 TEST_CASE("ShellBackend emits executor stub diagnostics for INSERT")
@@ -71,6 +83,11 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for INSERT")
     const auto metrics = harness.engine.execute_sql("INSERT INTO metrics (id, counter, name) VALUES (2, 11, 'beta');");
     REQUIRE(metrics.success);
     CHECK_THAT(metrics.summary, ContainsSubstring("Inserted 1 row"));
+
+    auto logical_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "logical.insert");
+    });
+    REQUIRE(logical_it != metrics.detail_lines.end());
 
     auto root_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "planner.root=");
@@ -88,6 +105,8 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for INSERT")
         return starts_with(line, "executor.plan:");
     });
     CHECK(plan_line_count > 0);
+    CHECK(std::distance(metrics.detail_lines.begin(), logical_it) <
+          std::distance(metrics.detail_lines.begin(), root_it));
 }
 
 TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
@@ -96,6 +115,11 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
 
     const auto metrics = harness.engine.execute_sql("UPDATE metrics SET counter = counter + 1 WHERE id = 1;");
     REQUIRE(metrics.success);
+
+    auto logical_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "logical.update");
+    });
+    REQUIRE(logical_it != metrics.detail_lines.end());
 
     auto stub_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "executor.stub=UPDATE pipeline ready");
@@ -108,6 +132,8 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
         return starts_with(line, "executor.plan:");
     });
     CHECK(plan_line_count > 0);
+    CHECK(std::distance(metrics.detail_lines.begin(), logical_it) <
+          std::distance(metrics.detail_lines.begin(), stub_it));
 }
 
 TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
@@ -117,6 +143,11 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
     const auto metrics = harness.engine.execute_sql("DELETE FROM metrics WHERE id = 1;");
     REQUIRE(metrics.success);
     CHECK_THAT(metrics.summary, ContainsSubstring("Deleted 1 row"));
+
+    auto logical_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "logical.delete");
+    });
+    REQUIRE(logical_it != metrics.detail_lines.end());
 
     auto stub_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "executor.stub=DELETE pipeline ready");
@@ -128,4 +159,6 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
         return starts_with(line, "executor.plan:");
     });
     REQUIRE(plan_it != metrics.detail_lines.end());
+    CHECK(std::distance(metrics.detail_lines.begin(), logical_it) <
+          std::distance(metrics.detail_lines.begin(), stub_it));
 }
