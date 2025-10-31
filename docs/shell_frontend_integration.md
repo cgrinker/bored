@@ -31,7 +31,8 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 	 - 2025-10-31: All DML routes lower through the logical plan stage; `ShellBackend` records logical root/plan diagnostics (via `parser::relational::lower_select` for SELECT and binder metadata for INSERT/UPDATE/DELETE) before planner/executor stubs, surfacing lowering errors as `CommandMetrics` failures.
 	- 2025-10-31: Catch2 coverage now enforces planner root detail lines and executor stub ordering for UPDATE/DELETE metrics, addressing the planner/executor detail-line test gap.
 	
- 3. [ ] Update or add tests (`tests/end_to_end/e2e_smoke.sql` + unit coverage under `tests/parser` or new Catch2 cases) to confirm comment handling and DML success via the parser.
+ 3. [x] Update or add tests (`tests/end_to_end/e2e_smoke.sql` + unit coverage under `tests/parser` or new Catch2 cases) to confirm comment handling and DML success via the parser.
+	- 2025-10-31: `ShellBackend` Catch2 suite now exercises INSERT/UPDATE/SELECT/DELETE statements prefixed with line and block comments, verifying parser-driven execution and summaries.
 - **Iteration guidance**: each numbered item should be achievable in a single Codex iteration; if an item grows (for example, needing extensive binder changes), break it into subtasks before starting.
 
 ## Milestone 2 — Executor-Backed DML _(Status: Planned)_

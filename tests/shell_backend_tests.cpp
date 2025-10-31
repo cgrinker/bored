@@ -178,3 +178,28 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
     CHECK(std::distance(metrics.detail_lines.begin(), planner_it) <
           std::distance(metrics.detail_lines.begin(), stub_it));
 }
+
+TEST_CASE("ShellBackend executes DML statements when preceded by comments")
+{
+    ShellBackendHarness harness;
+
+    const auto insert = harness.engine.execute_sql("-- leading comment for insert\nINSERT INTO metrics (id, counter, name) VALUES (2, 3, 'beta');");
+    REQUIRE(insert.success);
+    CHECK_THAT(insert.summary, ContainsSubstring("Inserted 1 row"));
+
+    const auto update = harness.engine.execute_sql("/* block comment before update */\nUPDATE metrics SET counter = counter + 4 WHERE id = 2;");
+    REQUIRE(update.success);
+    CHECK_THAT(update.summary, ContainsSubstring("Updated 1 row"));
+
+    const auto select = harness.engine.execute_sql("-- leading comment for select\nSELECT id, counter FROM metrics;");
+    REQUIRE(select.success);
+    CHECK_THAT(select.summary, ContainsSubstring("Selected 2 rows"));
+
+    const auto remove = harness.engine.execute_sql("/* removal comment */\nDELETE FROM metrics WHERE id = 2;");
+    REQUIRE(remove.success);
+    CHECK_THAT(remove.summary, ContainsSubstring("Deleted 1 row"));
+
+    const auto final_select = harness.engine.execute_sql("SELECT id FROM metrics;");
+    REQUIRE(final_select.success);
+    CHECK_THAT(final_select.summary, ContainsSubstring("Selected 1 row"));
+}
