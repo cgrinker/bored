@@ -121,6 +121,12 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
     });
     REQUIRE(logical_it != metrics.detail_lines.end());
 
+    auto planner_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "planner.root=");
+    });
+    REQUIRE(planner_it != metrics.detail_lines.end());
+    CHECK_THAT(*planner_it, ContainsSubstring("Update"));
+
     auto stub_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "executor.stub=UPDATE pipeline ready");
     });
@@ -133,6 +139,8 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
     });
     CHECK(plan_line_count > 0);
     CHECK(std::distance(metrics.detail_lines.begin(), logical_it) <
+          std::distance(metrics.detail_lines.begin(), planner_it));
+    CHECK(std::distance(metrics.detail_lines.begin(), planner_it) <
           std::distance(metrics.detail_lines.begin(), stub_it));
 }
 
@@ -149,6 +157,12 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
     });
     REQUIRE(logical_it != metrics.detail_lines.end());
 
+    auto planner_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "planner.root=");
+    });
+    REQUIRE(planner_it != metrics.detail_lines.end());
+    CHECK_THAT(*planner_it, ContainsSubstring("Delete"));
+
     auto stub_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "executor.stub=DELETE pipeline ready");
     });
@@ -160,5 +174,7 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
     });
     REQUIRE(plan_it != metrics.detail_lines.end());
     CHECK(std::distance(metrics.detail_lines.begin(), logical_it) <
+          std::distance(metrics.detail_lines.begin(), planner_it));
+    CHECK(std::distance(metrics.detail_lines.begin(), planner_it) <
           std::distance(metrics.detail_lines.begin(), stub_it));
 }

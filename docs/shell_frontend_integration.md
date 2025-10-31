@@ -29,7 +29,7 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 	- 2025-10-31: INSERT now emits executor stub diagnostics and Catch2 coverage asserts planner/executor detail lines.
 	 - 2025-10-31: UPDATE and DELETE now invoke the executor stub once per command and thread the rendered plan lines into command metrics.
 	 - 2025-10-31: All DML routes lower through the logical plan stage; `ShellBackend` records logical root/plan diagnostics (via `parser::relational::lower_select` for SELECT and binder metadata for INSERT/UPDATE/DELETE) before planner/executor stubs, surfacing lowering errors as `CommandMetrics` failures.
-	- **Next task**: Add focused tests (e.g., Catch2 unit coverage) that assert planner and executor stub detail lines, covering Milestone 1 action item 3.
+	- 2025-10-31: Catch2 coverage now enforces planner root detail lines and executor stub ordering for UPDATE/DELETE metrics, addressing the planner/executor detail-line test gap.
 	
  3. [ ] Update or add tests (`tests/end_to_end/e2e_smoke.sql` + unit coverage under `tests/parser` or new Catch2 cases) to confirm comment handling and DML success via the parser.
 - **Iteration guidance**: each numbered item should be achievable in a single Codex iteration; if an item grows (for example, needing extensive binder changes), break it into subtasks before starting.
