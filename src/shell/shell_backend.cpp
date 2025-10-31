@@ -11,6 +11,7 @@
 #include "bored/ddl/ddl_validation.hpp"
 #include "bored/parser/ddl_command_builder.hpp"
 #include "bored/parser/grammar.hpp"
+#include "bored/parser/relational/binder.hpp"
 #include "bored/planner/plan_printer.hpp"
 #include "bored/planner/planner.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
@@ -1489,12 +1490,6 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
-    auto executor_stub = simulate_executor_plan(sql, "DELETE", std::move(plan_details.plan));
-    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
-        return std::get<CommandMetrics>(std::move(executor_stub));
-    }
-    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
-
     auto executor_stub = simulate_executor_plan(sql, "UPDATE", std::move(plan_details.plan));
     if (std::holds_alternative<CommandMetrics>(executor_stub)) {
         return std::get<CommandMetrics>(std::move(executor_stub));
@@ -1726,6 +1721,12 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
         return std::get<CommandMetrics>(std::move(plan_result));
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
+
+    auto executor_stub = simulate_executor_plan(sql, "DELETE", std::move(plan_details.plan));
+    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
+        return std::get<CommandMetrics>(std::move(executor_stub));
+    }
+    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
 
     const auto* where_expression = parse_result.statement->where;
     if (where_expression == nullptr ||
