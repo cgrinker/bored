@@ -650,6 +650,65 @@ struct ShellBackend::InMemoryCatalogStorage final {
         it->second.erase(row_id);
     }
 
+    [[nodiscard]] const Relation* relation(catalog::RelationId relation_id) const
+    {
+        auto it = relations_.find(relation_id.value);
+        if (it == relations_.end()) {
+            return nullptr;
+        }
+        return &it->second;
+    }
+
+    void upsert_row(catalog::RelationId relation_id, std::uint64_t row_id, std::span<const std::byte> payload)
+    {
+        auto& relation = relations_[relation_id.value];
+        relation[row_id] = std::vector<std::byte>(payload.begin(), payload.end());
+    }
+
+    bool fetch_row(catalog::RelationId relation_id,
+                   std::uint64_t row_id,
+                   std::vector<std::byte>& out_payload) const
+    {
+        auto it = relations_.find(relation_id.value);
+        if (it == relations_.end()) {
+            return false;
+        }
+        auto row_it = it->second.find(row_id);
+        if (row_it == it->second.end()) {
+            return false;
+        }
+        out_payload = row_it->second;
+        return true;
+    }
+
+    bool remove_row(catalog::RelationId relation_id,
+                    std::uint64_t row_id,
+                    std::vector<std::byte>* out_payload)
+    {
+        auto it = relations_.find(relation_id.value);
+        if (it == relations_.end()) {
+            return false;
+        }
+        auto row_it = it->second.find(row_id);
+        if (row_it == it->second.end()) {
+            return false;
+        }
+        if (out_payload != nullptr) {
+            *out_payload = row_it->second;
+        }
+        it->second.erase(row_it);
+        return true;
+    }
+
+    [[nodiscard]] std::uint64_t max_row_id(catalog::RelationId relation_id) const
+    {
+        auto rel = relation(relation_id);
+        if (rel == nullptr || rel->empty()) {
+            return 0U;
+        }
+        return rel->rbegin()->first;
+    }
+
     std::unordered_map<std::uint64_t, Relation> relations_{};
 };
 
@@ -777,14 +836,6 @@ void encode_values_payload(const ShellBackend::TableData& table,
     append_values_payload(table, values, buffer);
 }
 
-std::size_t values_payload_size(const ShellBackend::TableData& table,
-                                const std::vector<ScalarValue>& values,
-                                std::vector<std::byte>& buffer)
-{
-    encode_values_payload(table, values, buffer);
-    return buffer.size();
-}
-
 bool decode_values_payload(const ShellBackend::TableData& table,
                            std::span<const std::byte> payload,
                            std::vector<ScalarValue>& out_values)
@@ -837,19 +888,6 @@ bool decode_values_payload(const ShellBackend::TableData& table,
     return offset <= payload.size();
 }
 
-void encode_row_payload(const ShellBackend::TableData& table,
-                        std::size_t row_index,
-                        std::vector<std::byte>& buffer)
-{
-    if (row_index >= table.rows.size()) {
-        throw std::runtime_error{"Row index out of range"};
-    }
-    buffer.clear();
-    const auto row_id = (row_index < table.row_ids.size()) ? table.row_ids[row_index] : 0U;
-    append_uint64(buffer, row_id);
-    append_values_payload(table, table.rows[row_index], buffer);
-}
-
 bool decode_row_payload(const ShellBackend::TableData& table,
                         std::span<const std::byte> payload,
                         std::uint64_t& row_id,
@@ -863,29 +901,26 @@ bool decode_row_payload(const ShellBackend::TableData& table,
     return decode_values_payload(table, values_payload, out_values);
 }
 
-std::optional<std::size_t> table_row_index(const ShellBackend::TableData& table, std::uint64_t row_id)
-{
-    for (std::size_t index = 0U; index < table.row_ids.size(); ++index) {
-        if (table.row_ids[index] == row_id) {
-            return index;
-        }
-    }
-    return std::nullopt;
-}
-
 class ShellTableScanCursor final : public bored::storage::TableScanCursor {
 public:
-    explicit ShellTableScanCursor(const ShellBackend::TableData* table)
+    ShellTableScanCursor(const ShellBackend::TableData* table,
+                        const ShellBackend::InMemoryCatalogStorage* storage)
         : table_{table}
-    {}
+        , storage_{storage}
+    {
+        reset();
+    }
 
     bool next(bored::storage::TableTuple& out_tuple) override
     {
-        if (table_ == nullptr || index_ >= table_->rows.size()) {
+        if (relation_ == nullptr || iterator_ == end_iterator_) {
             return false;
         }
 
-        encode_row_payload(*table_, index_, payload_buffer_);
+    const auto& [row_id, payload] = *iterator_;
+        payload_buffer_.clear();
+        append_uint64(payload_buffer_, row_id);
+        payload_buffer_.insert(payload_buffer_.end(), payload.begin(), payload.end());
 
         current_header_ = {};
         current_header_.created_transaction_id = 1U;
@@ -894,35 +929,64 @@ public:
         out_tuple.header = current_header_;
         out_tuple.payload = std::span<const std::byte>(payload_buffer_.data(), payload_buffer_.size());
         out_tuple.page_id = 1U;
-        out_tuple.slot_id = static_cast<std::uint16_t>(index_ + 1U);
+        out_tuple.slot_id = static_cast<std::uint16_t>((slot_index_ % std::numeric_limits<std::uint16_t>::max()) + 1U);
 
-        ++index_;
+        ++iterator_;
+        ++slot_index_;
         return true;
     }
 
-    void reset() override { index_ = 0U; }
+    void reset() override
+    {
+        if (storage_ == nullptr || table_ == nullptr) {
+            relation_ = nullptr;
+            iterator_ = ShellBackend::InMemoryCatalogStorage::Relation::const_iterator{};
+            end_iterator_ = ShellBackend::InMemoryCatalogStorage::Relation::const_iterator{};
+            slot_index_ = 0U;
+            return;
+        }
+
+        relation_ = storage_->relation(table_->relation_id);
+        if (relation_ == nullptr) {
+            iterator_ = ShellBackend::InMemoryCatalogStorage::Relation::const_iterator{};
+            end_iterator_ = ShellBackend::InMemoryCatalogStorage::Relation::const_iterator{};
+            slot_index_ = 0U;
+            return;
+        }
+
+        iterator_ = relation_->begin();
+        end_iterator_ = relation_->end();
+        slot_index_ = 0U;
+    }
 
 private:
     const ShellBackend::TableData* table_ = nullptr;
-    std::size_t index_ = 0U;
+    const ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
+    const ShellBackend::InMemoryCatalogStorage::Relation* relation_ = nullptr;
+    ShellBackend::InMemoryCatalogStorage::Relation::const_iterator iterator_{};
+    ShellBackend::InMemoryCatalogStorage::Relation::const_iterator end_iterator_{};
+    std::size_t slot_index_ = 0U;
     std::vector<std::byte> payload_buffer_{};
     bored::storage::TupleHeader current_header_{};
 };
 
 class ShellStorageReader final : public bored::storage::StorageReader {
 public:
-    explicit ShellStorageReader(const ShellBackend::TableData* table)
+    ShellStorageReader(const ShellBackend::TableData* table,
+                       const ShellBackend::InMemoryCatalogStorage* storage)
         : table_{table}
+        , storage_{storage}
     {}
 
     [[nodiscard]] std::unique_ptr<bored::storage::TableScanCursor> create_table_scan(
         const bored::storage::TableScanConfig&) override
     {
-        return std::make_unique<ShellTableScanCursor>(table_);
+        return std::make_unique<ShellTableScanCursor>(table_, storage_);
     }
 
 private:
     const ShellBackend::TableData* table_ = nullptr;
+    const ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
 };
 
 class ShellValuesExecutor final : public bored::executor::ExecutorNode {
@@ -961,8 +1025,9 @@ private:
 
 class ShellInsertTarget final : public bored::executor::InsertExecutor::Target {
 public:
-    explicit ShellInsertTarget(ShellBackend::TableData* table)
+    ShellInsertTarget(ShellBackend::TableData* table, ShellBackend::InMemoryCatalogStorage* storage)
         : table_{table}
+        , storage_{storage}
     {}
 
     std::error_code insert_tuple(const bored::executor::TupleView& tuple,
@@ -982,8 +1047,12 @@ public:
             return std::make_error_code(std::errc::invalid_argument);
         }
 
-        table_->rows.push_back(decoded_values_);
-        table_->row_ids.push_back(table_->next_row_id++);
+        if (storage_ == nullptr) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        const auto row_id = table_->next_row_id++;
+        storage_->upsert_row(table_->relation_id, row_id, payload.data);
 
         out_stats.payload_bytes = payload.data.size();
         out_stats.wal_bytes = out_stats.payload_bytes;
@@ -995,14 +1064,16 @@ public:
 
 private:
     ShellBackend::TableData* table_ = nullptr;
+    ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
     std::vector<ScalarValue> decoded_values_{};
     std::size_t inserted_ = 0U;
 };
 
 class ShellUpdateTarget final : public bored::executor::UpdateExecutor::Target {
 public:
-    explicit ShellUpdateTarget(ShellBackend::TableData* table)
+    ShellUpdateTarget(ShellBackend::TableData* table, ShellBackend::InMemoryCatalogStorage* storage)
         : table_{table}
+        , storage_{storage}
     {}
 
     std::error_code update_tuple(const bored::executor::TupleView& tuple,
@@ -1023,18 +1094,20 @@ public:
         std::uint64_t row_id = 0U;
         std::memcpy(&row_id, row_id_view.data.data(), sizeof(row_id));
 
-        const auto index_opt = table_row_index(*table_, row_id);
-        if (!index_opt.has_value()) {
+        if (storage_ == nullptr) {
             return std::make_error_code(std::errc::invalid_argument);
         }
 
-        auto& existing_row = table_->rows[*index_opt];
+        if (!storage_->fetch_row(table_->relation_id, row_id, existing_payload_)) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
         if (!decode_values_payload(*table_, new_payload_view.data, decoded_values_)) {
             return std::make_error_code(std::errc::invalid_argument);
         }
 
-        const auto old_size = values_payload_size(*table_, existing_row, payload_buffer_);
-        existing_row = decoded_values_;
+        const auto old_size = existing_payload_.size();
+        storage_->upsert_row(table_->relation_id, row_id, new_payload_view.data);
 
         out_stats.new_payload_bytes = new_payload_view.data.size();
         out_stats.old_payload_bytes = old_size;
@@ -1049,16 +1122,18 @@ public:
 
 private:
     ShellBackend::TableData* table_ = nullptr;
+    ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
     std::vector<ScalarValue> decoded_values_{};
-    std::vector<std::byte> payload_buffer_{};
+    std::vector<std::byte> existing_payload_{};
     std::size_t updated_ = 0U;
     std::size_t wal_bytes_ = 0U;
 };
 
 class ShellDeleteTarget final : public bored::executor::DeleteExecutor::Target {
 public:
-    explicit ShellDeleteTarget(ShellBackend::TableData* table)
+    ShellDeleteTarget(ShellBackend::TableData* table, ShellBackend::InMemoryCatalogStorage* storage)
         : table_{table}
+        , storage_{storage}
     {}
 
     std::error_code delete_tuple(const bored::executor::TupleView& tuple,
@@ -1077,17 +1152,15 @@ public:
         std::uint64_t row_id = 0U;
         std::memcpy(&row_id, row_id_view.data.data(), sizeof(row_id));
 
-        const auto index_opt = table_row_index(*table_, row_id);
-        if (!index_opt.has_value()) {
+        if (storage_ == nullptr) {
             return std::make_error_code(std::errc::invalid_argument);
         }
 
-        const auto index = *index_opt;
-        encode_values_payload(*table_, table_->rows[index], payload_buffer_);
-        const auto reclaimed = payload_buffer_.size();
+        if (!storage_->remove_row(table_->relation_id, row_id, &existing_payload_)) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
 
-        table_->rows.erase(table_->rows.begin() + static_cast<std::ptrdiff_t>(index));
-        table_->row_ids.erase(table_->row_ids.begin() + static_cast<std::ptrdiff_t>(index));
+        const auto reclaimed = existing_payload_.size();
 
         out_stats.reclaimed_bytes = reclaimed;
         out_stats.wal_bytes = reclaimed;
@@ -1101,7 +1174,8 @@ public:
 
 private:
     ShellBackend::TableData* table_ = nullptr;
-    std::vector<std::byte> payload_buffer_{};
+    ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
+    std::vector<std::byte> existing_payload_{};
     std::size_t deleted_ = 0U;
     std::size_t reclaimed_bytes_ = 0U;
 };
@@ -1352,25 +1426,20 @@ void ShellBackend::refresh_table_cache()
         }
 
         const auto key = normalize_identifier(data.schema_name) + "." + normalize_identifier(data.table_name);
+        std::uint64_t next_row_id = storage_->max_row_id(data.relation_id);
+        if (next_row_id < std::numeric_limits<std::uint64_t>::max()) {
+            ++next_row_id;
+        }
+        if (next_row_id == 0U) {
+            next_row_id = 1U;
+        }
+
         auto existing = table_cache_.find(relation_id);
         if (existing != table_cache_.end()) {
-            const auto& existing_table = existing->second;
-            if (existing_table.columns.size() == data.columns.size()) {
-                bool compatible = true;
-                for (std::size_t index = 0; index < data.columns.size(); ++index) {
-                    const auto& new_column = data.columns[index];
-                    const auto& old_column = existing_table.columns[index];
-                    if (normalize_identifier(new_column.name) != normalize_identifier(old_column.name) ||
-                        new_column.type != old_column.type) {
-                        compatible = false;
-                        break;
-                    }
-                }
-                if (compatible) {
-                    data.rows = existing_table.rows;
-                }
-            }
+            next_row_id = std::max(next_row_id, existing->second.next_row_id);
         }
+
+        data.next_row_id = next_row_id;
 
         lookup.emplace(key, relation_id);
         refreshed.emplace(relation_id, std::move(data));
@@ -1885,7 +1954,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     }
 
     bored::executor::ExecutorTelemetry insert_telemetry;
-    ShellInsertTarget insert_target{table};
+    ShellInsertTarget insert_target{table, storage_.get()};
     auto values_executor = std::make_unique<ShellValuesExecutor>(table, std::move(pending_rows));
 
     bored::executor::InsertExecutor::Config insert_config{};
@@ -2155,7 +2224,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
 
     bored::executor::ExecutorTelemetry update_telemetry;
 
-    ShellStorageReader storage_reader{table};
+    ShellStorageReader storage_reader{table, storage_.get()};
     bored::executor::SequentialScanExecutor::Config scan_config{};
     scan_config.reader = &storage_reader;
     scan_config.relation_id = table->relation_id;
@@ -2251,7 +2320,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
 
     auto projection_node = std::make_unique<bored::executor::ProjectionExecutor>(std::move(filter_node), std::move(projection_config));
 
-    ShellUpdateTarget update_target{table};
+    ShellUpdateTarget update_target{table, storage_.get()};
     bored::executor::UpdateExecutor::Config update_config{};
     update_config.target = &update_target;
     update_config.telemetry = &update_telemetry;
@@ -2396,7 +2465,7 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
 
     bored::executor::ExecutorTelemetry delete_telemetry;
 
-    ShellStorageReader storage_reader{table};
+    ShellStorageReader storage_reader{table, storage_.get()};
     bored::executor::SequentialScanExecutor::Config scan_config{};
     scan_config.reader = &storage_reader;
     scan_config.relation_id = table->relation_id;
@@ -2461,7 +2530,7 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     auto projection_node = std::make_unique<bored::executor::ProjectionExecutor>(std::move(filter_node),
                                                                                   std::move(projection_config));
 
-    ShellDeleteTarget delete_target{table};
+    ShellDeleteTarget delete_target{table, storage_.get()};
     bored::executor::DeleteExecutor::Config delete_config{};
     delete_config.target = &delete_target;
     delete_config.telemetry = &delete_telemetry;
@@ -2606,7 +2675,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
 
     bored::executor::ExecutorTelemetry select_telemetry;
 
-    ShellStorageReader storage_reader{table};
+    ShellStorageReader storage_reader{table, storage_.get()};
     bored::executor::SequentialScanExecutor::Config scan_config{};
     scan_config.reader = &storage_reader;
     scan_config.relation_id = table->relation_id;

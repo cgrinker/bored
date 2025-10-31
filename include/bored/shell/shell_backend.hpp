@@ -87,8 +87,6 @@ private:
         std::string table_name{};
         std::vector<ColumnInfo> columns{};
         std::unordered_map<std::string, std::size_t> column_index{};
-        std::vector<std::vector<ScalarValue>> rows{};
-        std::vector<std::uint64_t> row_ids{};
         std::uint64_t next_row_id = 1U;
     };
 
@@ -98,20 +96,13 @@ private:
     friend void encode_values_payload(const TableData& table,
                                       const std::vector<ScalarValue>& values,
                                       std::vector<std::byte>& buffer);
-    friend std::size_t values_payload_size(const TableData& table,
-                                           const std::vector<ScalarValue>& values,
-                                           std::vector<std::byte>& buffer);
     friend bool decode_values_payload(const TableData& table,
                                       std::span<const std::byte> payload,
                                       std::vector<ScalarValue>& out_values);
-    friend void encode_row_payload(const TableData& table,
-                                   std::size_t row_index,
-                                   std::vector<std::byte>& buffer);
     friend bool decode_row_payload(const TableData& table,
                                    std::span<const std::byte> payload,
                                    std::uint64_t& row_id,
                                    std::vector<ScalarValue>& out_values);
-    friend std::optional<std::size_t> table_row_index(const TableData& table, std::uint64_t row_id);
     friend class ShellTableScanCursor;
     friend class ShellStorageReader;
     friend class ShellValuesExecutor;
