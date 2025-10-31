@@ -904,6 +904,135 @@ ShellBackend::TableData* ShellBackend::find_table_or_default_schema(std::string_
     return find_table(qualified);
 }
 
+std::vector<std::string> ShellBackend::collect_table_columns(const TableData& table)
+{
+    std::vector<std::string> columns;
+    columns.reserve(table.columns.size());
+    for (const auto& column_info : table.columns) {
+        columns.push_back(column_info.name);
+    }
+    return columns;
+}
+
+std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::plan_scan_operation(
+    const std::string& sql,
+    planner::LogicalOperatorType logical_type,
+    planner::PhysicalOperatorType physical_type,
+    const parser::relational::TableBinding& table_binding,
+    const TableData& table,
+    std::string_view root_label,
+    std::string_view statement_label)
+{
+    auto planner_columns = collect_table_columns(table);
+
+    planner::LogicalProperties scan_props{};
+    scan_props.relation_name = format_relation_name(table_binding);
+    scan_props.output_columns = planner_columns;
+
+    auto scan_logical = planner::LogicalOperator::make(
+        planner::LogicalOperatorType::TableScan,
+        std::vector<planner::LogicalOperatorPtr>{},
+        scan_props);
+
+    planner::LogicalProperties root_props{};
+    root_props.relation_name = scan_props.relation_name;
+    root_props.output_columns = planner_columns;
+
+    auto root_logical = planner::LogicalOperator::make(
+        logical_type,
+        std::vector<planner::LogicalOperatorPtr>{scan_logical},
+        root_props);
+
+    planner::LogicalPlan logical_plan{root_logical};
+    planner::PlannerContext planner_context{};
+    auto planner_result = planner::plan_query(planner_context, logical_plan);
+    const auto plan_root = planner_result.plan.root();
+    const auto statement = std::string(statement_label);
+    if (!plan_root) {
+        return make_planner_error_metrics(sql,
+                                          std::move(planner_result.diagnostics),
+                                          "Failed to plan " + statement + " statement.");
+    }
+    if (plan_root->type() != physical_type) {
+        return make_planner_error_metrics(sql,
+                                          std::move(planner_result.diagnostics),
+                                          "Planner produced unexpected physical operator for " + statement + ".");
+    }
+    if (plan_root->children().empty() ||
+        plan_root->children().front()->type() != planner::PhysicalOperatorType::SeqScan) {
+        return make_planner_error_metrics(sql,
+                                          std::move(planner_result.diagnostics),
+                                          "Planner " + statement + " plan is missing SeqScan child.");
+    }
+
+    PlannerPlanDetails details{};
+    details.root_detail = std::string(root_label) + " (children=" + std::to_string(plan_root->children().size()) + ")";
+    details.detail_lines = std::move(planner_result.diagnostics);
+    return details;
+}
+
+std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::plan_select_operation(
+    const std::string& sql,
+    const parser::relational::TableBinding& table_binding,
+    const TableData& table,
+    std::vector<std::string> projection_columns)
+{
+    auto planner_columns = collect_table_columns(table);
+    if (projection_columns.empty()) {
+        projection_columns = planner_columns;
+    }
+
+    planner::LogicalProperties scan_props{};
+    scan_props.relation_name = format_relation_name(table_binding);
+    scan_props.output_columns = planner_columns;
+
+    auto scan_logical = planner::LogicalOperator::make(
+        planner::LogicalOperatorType::TableScan,
+        std::vector<planner::LogicalOperatorPtr>{},
+        scan_props);
+
+    planner::LogicalProperties projection_props{};
+    projection_props.relation_name = scan_props.relation_name;
+    projection_props.output_columns = projection_columns;
+
+    auto projection_logical = planner::LogicalOperator::make(
+        planner::LogicalOperatorType::Projection,
+        std::vector<planner::LogicalOperatorPtr>{scan_logical},
+        projection_props);
+
+    planner::LogicalPlan logical_plan{projection_logical};
+    planner::PlannerContext planner_context{};
+    auto planner_result = planner::plan_query(planner_context, logical_plan);
+    const auto plan_root = planner_result.plan.root();
+    if (!plan_root) {
+        return make_planner_error_metrics(sql,
+                                          std::move(planner_result.diagnostics),
+                                          "Failed to plan SELECT statement.");
+    }
+
+    std::string root_detail;
+    if (plan_root->type() == planner::PhysicalOperatorType::Projection) {
+        if (plan_root->children().empty() ||
+            plan_root->children().front()->type() != planner::PhysicalOperatorType::SeqScan) {
+            return make_planner_error_metrics(sql,
+                                              std::move(planner_result.diagnostics),
+                                              "Planner SELECT plan is missing SeqScan child.");
+        }
+        root_detail = "Projection (children=" + std::to_string(plan_root->children().size()) + ")";
+    } else if (plan_root->type() == planner::PhysicalOperatorType::SeqScan) {
+        root_detail = "SeqScan (children=" + std::to_string(plan_root->children().size()) + ")";
+    } else {
+        return make_planner_error_metrics(sql,
+                                          std::move(planner_result.diagnostics),
+                                          "Planner produced unexpected physical operator for SELECT.");
+    }
+
+    PlannerPlanDetails details{};
+    details.root_detail = std::move(root_detail);
+    details.detail_lines = std::move(planner_result.diagnostics);
+    return details;
+}
+
 CommandMetrics ShellBackend::make_error_metrics(const std::string& sql,
                                                 std::string message,
                                                 std::vector<std::string> hints)
@@ -1276,52 +1405,17 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     const auto target_index = target_it->second;
     const auto& target_column = table->columns[target_index];
 
-    std::vector<std::string> planner_columns;
-    planner_columns.reserve(table->columns.size());
-    for (const auto& column_info : table->columns) {
-        planner_columns.push_back(column_info.name);
+    auto plan_result = plan_scan_operation(sql,
+                                           planner::LogicalOperatorType::Update,
+                                           planner::PhysicalOperatorType::Update,
+                                           *table_binding,
+                                           *table,
+                                           "Update",
+                                           "UPDATE");
+    if (std::holds_alternative<CommandMetrics>(plan_result)) {
+        return std::get<CommandMetrics>(std::move(plan_result));
     }
-
-    planner::LogicalProperties scan_props{};
-    scan_props.relation_name = format_relation_name(*table_binding);
-    scan_props.output_columns = planner_columns;
-
-    auto scan_logical = planner::LogicalOperator::make(
-        planner::LogicalOperatorType::TableScan,
-        std::vector<planner::LogicalOperatorPtr>{},
-        scan_props);
-
-    planner::LogicalProperties update_props{};
-    update_props.relation_name = scan_props.relation_name;
-    update_props.output_columns = planner_columns;
-
-    auto update_logical = planner::LogicalOperator::make(
-        planner::LogicalOperatorType::Update,
-        std::vector<planner::LogicalOperatorPtr>{scan_logical},
-        update_props);
-
-    planner::LogicalPlan logical_plan{update_logical};
-    planner::PlannerContext planner_context{};
-    auto planner_result = planner::plan_query(planner_context, logical_plan);
-    const auto plan_root = planner_result.plan.root();
-    if (!plan_root) {
-        return make_planner_error_metrics(sql,
-                                          std::move(planner_result.diagnostics),
-                                          "Failed to plan UPDATE statement.");
-    }
-    if (plan_root->type() != planner::PhysicalOperatorType::Update) {
-        return make_planner_error_metrics(sql,
-                                          std::move(planner_result.diagnostics),
-                                          "Planner produced unexpected physical operator for UPDATE.");
-    }
-    if (plan_root->children().empty() ||
-        plan_root->children().front()->type() != planner::PhysicalOperatorType::SeqScan) {
-        return make_planner_error_metrics(sql,
-                                          std::move(planner_result.diagnostics),
-                                          "Planner UPDATE plan is missing SeqScan child.");
-    }
-
-    auto plan_detail_lines = std::move(planner_result.diagnostics);
+    auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
     enum class AssignmentKind {
         NumericConstant,
@@ -1482,10 +1576,10 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     metrics.success = true;
     metrics.summary = "Updated " + format_count("row", updated) + ".";
     metrics.rows_touched = updated;
-    metrics.detail_lines.push_back("planner.root=Update (children=1)");
+    metrics.detail_lines.push_back("planner.root=" + plan_details.root_detail);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
-                                plan_detail_lines.begin(),
-                                plan_detail_lines.end());
+                                plan_details.detail_lines.begin(),
+                                plan_details.detail_lines.end());
     return metrics;
 }
 
@@ -1534,52 +1628,17 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
         return make_error_metrics(sql, "Target table not found.");
     }
 
-    std::vector<std::string> planner_columns;
-    planner_columns.reserve(table->columns.size());
-    for (const auto& column_info : table->columns) {
-        planner_columns.push_back(column_info.name);
+    auto plan_result = plan_scan_operation(sql,
+                                           planner::LogicalOperatorType::Delete,
+                                           planner::PhysicalOperatorType::Delete,
+                                           *table_binding,
+                                           *table,
+                                           "Delete",
+                                           "DELETE");
+    if (std::holds_alternative<CommandMetrics>(plan_result)) {
+        return std::get<CommandMetrics>(std::move(plan_result));
     }
-
-    planner::LogicalProperties scan_props{};
-    scan_props.relation_name = format_relation_name(*table_binding);
-    scan_props.output_columns = planner_columns;
-
-    auto scan_logical = planner::LogicalOperator::make(
-        planner::LogicalOperatorType::TableScan,
-        std::vector<planner::LogicalOperatorPtr>{},
-        scan_props);
-
-    planner::LogicalProperties delete_props{};
-    delete_props.relation_name = scan_props.relation_name;
-    delete_props.output_columns = planner_columns;
-
-    auto delete_logical = planner::LogicalOperator::make(
-        planner::LogicalOperatorType::Delete,
-        std::vector<planner::LogicalOperatorPtr>{scan_logical},
-        delete_props);
-
-    planner::LogicalPlan logical_plan{delete_logical};
-    planner::PlannerContext planner_context{};
-    auto planner_result = planner::plan_query(planner_context, logical_plan);
-    const auto plan_root = planner_result.plan.root();
-    if (!plan_root) {
-        return make_planner_error_metrics(sql,
-                                          std::move(planner_result.diagnostics),
-                                          "Failed to plan DELETE statement.");
-    }
-    if (plan_root->type() != planner::PhysicalOperatorType::Delete) {
-        return make_planner_error_metrics(sql,
-                                          std::move(planner_result.diagnostics),
-                                          "Planner produced unexpected physical operator for DELETE.");
-    }
-    if (plan_root->children().empty() ||
-        plan_root->children().front()->type() != planner::PhysicalOperatorType::SeqScan) {
-        return make_planner_error_metrics(sql,
-                                          std::move(planner_result.diagnostics),
-                                          "Planner DELETE plan is missing SeqScan child.");
-    }
-
-    auto plan_detail_lines = std::move(planner_result.diagnostics);
+    auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
     const auto* where_expression = parse_result.statement->where;
     if (where_expression == nullptr ||
@@ -1638,10 +1697,10 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     metrics.success = true;
     metrics.summary = "Deleted " + format_count("row", deleted) + ".";
     metrics.rows_touched = deleted;
-    metrics.detail_lines.push_back("planner.root=Delete (children=1)");
+    metrics.detail_lines.push_back("planner.root=" + plan_details.root_detail);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
-                                plan_detail_lines.begin(),
-                                plan_detail_lines.end());
+                                plan_details.detail_lines.begin(),
+                                plan_details.detail_lines.end());
     return metrics;
 }
 
@@ -1704,16 +1763,17 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     }
 
     std::vector<std::size_t> column_indexes;
-    std::vector<std::string> header_names;
+    std::vector<std::string> selected_columns;
     if (plan->select_all) {
         column_indexes.reserve(table->columns.size());
+        selected_columns.reserve(table->columns.size());
         for (const auto& column : table->columns) {
             column_indexes.push_back(column.ordinal);
-            header_names.push_back(column.name);
+            selected_columns.push_back(column.name);
         }
     } else {
         column_indexes.reserve(plan->column_names.size());
-        header_names.reserve(plan->column_names.size());
+        selected_columns.reserve(plan->column_names.size());
         for (const auto& column_name : plan->column_names) {
             const auto key = normalize_identifier(column_name);
             auto it = table->column_index.find(key);
@@ -1721,70 +1781,17 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
                 return make_error_metrics(sql, "Column '" + column_name + "' not found in target table.");
             }
             column_indexes.push_back(it->second);
-            header_names.push_back(table->columns[it->second].name);
+            selected_columns.push_back(table->columns[it->second].name);
         }
     }
 
-    std::string planner_root_detail;
-    std::vector<std::string> plan_detail_lines;
-    {
-        std::vector<std::string> planner_columns;
-        planner_columns.reserve(table->columns.size());
-        for (const auto& column_info : table->columns) {
-            planner_columns.push_back(column_info.name);
-        }
-
-        std::vector<std::string> projection_columns = header_names;
-        if (projection_columns.empty()) {
-            projection_columns = planner_columns;
-        }
-
-        planner::LogicalProperties scan_props{};
-        scan_props.relation_name = format_relation_name(*table_binding);
-        scan_props.output_columns = planner_columns;
-
-        auto scan_logical = planner::LogicalOperator::make(
-            planner::LogicalOperatorType::TableScan,
-            std::vector<planner::LogicalOperatorPtr>{},
-            scan_props);
-
-        planner::LogicalProperties projection_props{};
-        projection_props.relation_name = scan_props.relation_name;
-        projection_props.output_columns = projection_columns;
-
-        auto projection_logical = planner::LogicalOperator::make(
-            planner::LogicalOperatorType::Projection,
-            std::vector<planner::LogicalOperatorPtr>{scan_logical},
-            projection_props);
-
-        planner::LogicalPlan logical_plan{projection_logical};
-        planner::PlannerContext planner_context{};
-        auto planner_result = planner::plan_query(planner_context, logical_plan);
-        const auto plan_root = planner_result.plan.root();
-        if (!plan_root) {
-            return make_planner_error_metrics(sql,
-                                              std::move(planner_result.diagnostics),
-                                              "Failed to plan SELECT statement.");
-        }
-
-        if (plan_root->type() == planner::PhysicalOperatorType::Projection) {
-            if (plan_root->children().empty() ||
-                plan_root->children().front()->type() != planner::PhysicalOperatorType::SeqScan) {
-                return make_planner_error_metrics(sql,
-                                                  std::move(planner_result.diagnostics),
-                                                  "Planner SELECT plan is missing SeqScan child.");
-            }
-            planner_root_detail = "Projection (children=" + std::to_string(plan_root->children().size()) + ")";
-        } else if (plan_root->type() == planner::PhysicalOperatorType::SeqScan) {
-            planner_root_detail = "SeqScan (children=0)";
-        } else {
-            return make_planner_error_metrics(sql,
-                                              std::move(planner_result.diagnostics),
-                                              "Planner produced unexpected physical operator for SELECT.");
-        }
-
-        plan_detail_lines = std::move(planner_result.diagnostics);
+    auto plan_result = plan_select_operation(sql, *table_binding, *table, selected_columns);
+    if (std::holds_alternative<CommandMetrics>(plan_result)) {
+        return std::get<CommandMetrics>(std::move(plan_result));
     }
+    auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
+
+    std::vector<std::string> header_names = selected_columns;
 
     std::optional<std::size_t> order_index;
     if (plan->order_by_column.has_value()) {
@@ -1832,12 +1839,12 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     metrics.summary = "Selected " + format_count("row", rendered_rows.size()) + ".";
     metrics.rows_touched = rendered_rows.size();
 
-    if (!planner_root_detail.empty()) {
-        metrics.detail_lines.push_back("planner.root=" + planner_root_detail);
+    if (!plan_details.root_detail.empty()) {
+        metrics.detail_lines.push_back("planner.root=" + plan_details.root_detail);
     }
     metrics.detail_lines.insert(metrics.detail_lines.end(),
-                                plan_detail_lines.begin(),
-                                plan_detail_lines.end());
+                                plan_details.detail_lines.begin(),
+                                plan_details.detail_lines.end());
 
     if (!header_names.empty()) {
         std::ostringstream header_stream;
