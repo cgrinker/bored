@@ -17,14 +17,29 @@
 #include "bored/parser/relational/logical_plan_printer.hpp"
 #include "bored/planner/plan_printer.hpp"
 #include "bored/planner/planner.hpp"
+#include "bored/executor/delete_executor.hpp"
+#include "bored/executor/executor_context.hpp"
+#include "bored/executor/executor_telemetry.hpp"
+#include "bored/executor/filter_executor.hpp"
+#include "bored/executor/insert_executor.hpp"
+#include "bored/executor/projection_executor.hpp"
+#include "bored/executor/seq_scan_executor.hpp"
+#include "bored/executor/tuple_buffer.hpp"
+#include "bored/executor/tuple_format.hpp"
+#include "bored/executor/update_executor.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
+#include "bored/storage/storage_reader.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <cstring>
+#include <stdexcept>
+#include <system_error>
 #include <optional>
 #include <sstream>
 #include <span>
@@ -36,6 +51,8 @@
 #include <vector>
 
 namespace bored::shell {
+
+using ScalarValue = std::variant<std::int64_t, std::string>;
 
 namespace {
 
@@ -637,8 +654,6 @@ struct ShellBackend::InMemoryCatalogStorage final {
 
 namespace {
 
-using ScalarValue = std::variant<std::int64_t, std::string>;
-
 [[nodiscard]] txn::Snapshot make_relaxed_snapshot() noexcept
 {
     txn::Snapshot snapshot{};
@@ -693,6 +708,402 @@ int compare_values(const ScalarValue& lhs, const ScalarValue& rhs)
 }
 
 }  // namespace
+
+constexpr std::size_t kNumericWidth = sizeof(std::int64_t);
+constexpr std::size_t kLengthFieldWidth = sizeof(std::uint32_t);
+
+void append_bytes(std::vector<std::byte>& buffer, const void* data, std::size_t size)
+{
+    const auto* bytes = static_cast<const std::byte*>(data);
+    buffer.insert(buffer.end(), bytes, bytes + size);
+}
+
+void append_uint64(std::vector<std::byte>& buffer, std::uint64_t value)
+{
+    append_bytes(buffer, &value, sizeof(value));
+}
+
+void append_uint32(std::vector<std::byte>& buffer, std::uint32_t value)
+{
+    append_bytes(buffer, &value, sizeof(value));
+}
+
+void append_values_payload(const ShellBackend::TableData& table,
+                           const std::vector<ScalarValue>& values,
+                           std::vector<std::byte>& buffer)
+{
+    if (values.size() != table.columns.size()) {
+        throw std::runtime_error{"Value count does not match table column count"};
+    }
+
+    for (std::size_t index = 0; index < table.columns.size(); ++index) {
+        const auto& column = table.columns[index];
+        const auto& value = values[index];
+        switch (column.type) {
+        case catalog::CatalogColumnType::Utf8: {
+            if (!std::holds_alternative<std::string>(value)) {
+                throw std::runtime_error{"Expected string value for UTF8 column"};
+            }
+            const auto& text = std::get<std::string>(value);
+            if (text.size() > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::runtime_error{"String value exceeds maximum supported length"};
+            }
+            append_uint32(buffer, static_cast<std::uint32_t>(text.size()));
+            append_bytes(buffer, text.data(), text.size());
+            break;
+        }
+        case catalog::CatalogColumnType::Int64:
+        case catalog::CatalogColumnType::UInt16:
+        case catalog::CatalogColumnType::UInt32:
+        case catalog::CatalogColumnType::Unknown:
+        default: {
+            if (!std::holds_alternative<std::int64_t>(value)) {
+                throw std::runtime_error{"Expected numeric value for integer column"};
+            }
+            const auto numeric = std::get<std::int64_t>(value);
+            append_bytes(buffer, &numeric, sizeof(numeric));
+            break;
+        }
+        }
+    }
+}
+
+void encode_values_payload(const ShellBackend::TableData& table,
+                           const std::vector<ScalarValue>& values,
+                           std::vector<std::byte>& buffer)
+{
+    buffer.clear();
+    append_values_payload(table, values, buffer);
+}
+
+std::size_t values_payload_size(const ShellBackend::TableData& table,
+                                const std::vector<ScalarValue>& values,
+                                std::vector<std::byte>& buffer)
+{
+    encode_values_payload(table, values, buffer);
+    return buffer.size();
+}
+
+bool decode_values_payload(const ShellBackend::TableData& table,
+                           std::span<const std::byte> payload,
+                           std::vector<ScalarValue>& out_values)
+{
+    out_values.clear();
+    out_values.reserve(table.columns.size());
+
+    std::size_t offset = 0U;
+    for (const auto& column : table.columns) {
+        if (offset >= payload.size()) {
+            return false;
+        }
+
+        switch (column.type) {
+        case catalog::CatalogColumnType::Utf8: {
+            if (offset + kLengthFieldWidth > payload.size()) {
+                return false;
+            }
+            std::uint32_t length = 0U;
+            std::memcpy(&length, payload.data() + offset, kLengthFieldWidth);
+            offset += kLengthFieldWidth;
+            if (offset + length > payload.size()) {
+                return false;
+            }
+            std::string text(length, '\0');
+            if (length > 0U) {
+                std::memcpy(text.data(), payload.data() + offset, length);
+            }
+            offset += length;
+            out_values.emplace_back(std::move(text));
+            break;
+        }
+        case catalog::CatalogColumnType::Int64:
+        case catalog::CatalogColumnType::UInt16:
+        case catalog::CatalogColumnType::UInt32:
+        case catalog::CatalogColumnType::Unknown:
+        default: {
+            if (offset + kNumericWidth > payload.size()) {
+                return false;
+            }
+            std::int64_t numeric = 0;
+            std::memcpy(&numeric, payload.data() + offset, kNumericWidth);
+            offset += kNumericWidth;
+            out_values.emplace_back(numeric);
+            break;
+        }
+        }
+    }
+
+    return offset <= payload.size();
+}
+
+void encode_row_payload(const ShellBackend::TableData& table,
+                        std::size_t row_index,
+                        std::vector<std::byte>& buffer)
+{
+    if (row_index >= table.rows.size()) {
+        throw std::runtime_error{"Row index out of range"};
+    }
+    buffer.clear();
+    const auto row_id = (row_index < table.row_ids.size()) ? table.row_ids[row_index] : 0U;
+    append_uint64(buffer, row_id);
+    append_values_payload(table, table.rows[row_index], buffer);
+}
+
+bool decode_row_payload(const ShellBackend::TableData& table,
+                        std::span<const std::byte> payload,
+                        std::uint64_t& row_id,
+                        std::vector<ScalarValue>& out_values)
+{
+    if (payload.size() < sizeof(std::uint64_t)) {
+        return false;
+    }
+    std::memcpy(&row_id, payload.data(), sizeof(row_id));
+    const auto values_payload = payload.subspan(sizeof(row_id));
+    return decode_values_payload(table, values_payload, out_values);
+}
+
+std::optional<std::size_t> table_row_index(const ShellBackend::TableData& table, std::uint64_t row_id)
+{
+    for (std::size_t index = 0U; index < table.row_ids.size(); ++index) {
+        if (table.row_ids[index] == row_id) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
+class ShellTableScanCursor final : public bored::storage::TableScanCursor {
+public:
+    explicit ShellTableScanCursor(const ShellBackend::TableData* table)
+        : table_{table}
+    {}
+
+    bool next(bored::storage::TableTuple& out_tuple) override
+    {
+        if (table_ == nullptr || index_ >= table_->rows.size()) {
+            return false;
+        }
+
+        encode_row_payload(*table_, index_, payload_buffer_);
+
+        current_header_ = {};
+        current_header_.created_transaction_id = 1U;
+        current_header_.deleted_transaction_id = 0U;
+
+        out_tuple.header = current_header_;
+        out_tuple.payload = std::span<const std::byte>(payload_buffer_.data(), payload_buffer_.size());
+        out_tuple.page_id = 1U;
+        out_tuple.slot_id = static_cast<std::uint16_t>(index_ + 1U);
+
+        ++index_;
+        return true;
+    }
+
+    void reset() override { index_ = 0U; }
+
+private:
+    const ShellBackend::TableData* table_ = nullptr;
+    std::size_t index_ = 0U;
+    std::vector<std::byte> payload_buffer_{};
+    bored::storage::TupleHeader current_header_{};
+};
+
+class ShellStorageReader final : public bored::storage::StorageReader {
+public:
+    explicit ShellStorageReader(const ShellBackend::TableData* table)
+        : table_{table}
+    {}
+
+    [[nodiscard]] std::unique_ptr<bored::storage::TableScanCursor> create_table_scan(
+        const bored::storage::TableScanConfig&) override
+    {
+        return std::make_unique<ShellTableScanCursor>(table_);
+    }
+
+private:
+    const ShellBackend::TableData* table_ = nullptr;
+};
+
+class ShellValuesExecutor final : public bored::executor::ExecutorNode {
+public:
+    ShellValuesExecutor(const ShellBackend::TableData* table,
+                        std::vector<std::vector<ScalarValue>> rows)
+        : table_{table}
+        , rows_{std::move(rows)}
+    {}
+
+    void open(bored::executor::ExecutorContext&) override { index_ = 0U; }
+
+    bool next(bored::executor::ExecutorContext&, bored::executor::TupleBuffer& buffer) override
+    {
+        if (table_ == nullptr || index_ >= rows_.size()) {
+            return false;
+        }
+
+        bored::executor::TupleWriter writer{buffer};
+        writer.reset();
+
+        encode_values_payload(*table_, rows_[index_++], payload_buffer_);
+        writer.append_column(std::span<const std::byte>(payload_buffer_.data(), payload_buffer_.size()), false);
+        writer.finalize();
+        return true;
+    }
+
+    void close(bored::executor::ExecutorContext&) override { index_ = 0U; }
+
+private:
+    const ShellBackend::TableData* table_ = nullptr;
+    std::vector<std::vector<ScalarValue>> rows_{};
+    std::vector<std::byte> payload_buffer_{};
+    std::size_t index_ = 0U;
+};
+
+class ShellInsertTarget final : public bored::executor::InsertExecutor::Target {
+public:
+    explicit ShellInsertTarget(ShellBackend::TableData* table)
+        : table_{table}
+    {}
+
+    std::error_code insert_tuple(const bored::executor::TupleView& tuple,
+                                 bored::executor::ExecutorContext&,
+                                 bored::executor::InsertExecutor::InsertStats& out_stats) override
+    {
+        if (table_ == nullptr || tuple.column_count() != 1U) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        const auto payload = tuple.column(0U);
+        if (payload.is_null) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        if (!decode_values_payload(*table_, payload.data, decoded_values_)) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        table_->rows.push_back(decoded_values_);
+        table_->row_ids.push_back(table_->next_row_id++);
+
+        out_stats.payload_bytes = payload.data.size();
+        out_stats.wal_bytes = out_stats.payload_bytes;
+        ++inserted_;
+        return {};
+    }
+
+    [[nodiscard]] std::size_t inserted_count() const noexcept { return inserted_; }
+
+private:
+    ShellBackend::TableData* table_ = nullptr;
+    std::vector<ScalarValue> decoded_values_{};
+    std::size_t inserted_ = 0U;
+};
+
+class ShellUpdateTarget final : public bored::executor::UpdateExecutor::Target {
+public:
+    explicit ShellUpdateTarget(ShellBackend::TableData* table)
+        : table_{table}
+    {}
+
+    std::error_code update_tuple(const bored::executor::TupleView& tuple,
+                                 bored::executor::ExecutorContext&,
+                                 bored::executor::UpdateExecutor::UpdateStats& out_stats) override
+    {
+        if (table_ == nullptr || tuple.column_count() < 2U) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        const auto row_id_view = tuple.column(0U);
+        const auto new_payload_view = tuple.column(1U);
+        if (row_id_view.is_null || new_payload_view.is_null ||
+            row_id_view.data.size() != sizeof(std::uint64_t)) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        std::uint64_t row_id = 0U;
+        std::memcpy(&row_id, row_id_view.data.data(), sizeof(row_id));
+
+        const auto index_opt = table_row_index(*table_, row_id);
+        if (!index_opt.has_value()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        auto& existing_row = table_->rows[*index_opt];
+        if (!decode_values_payload(*table_, new_payload_view.data, decoded_values_)) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        const auto old_size = values_payload_size(*table_, existing_row, payload_buffer_);
+        existing_row = decoded_values_;
+
+        out_stats.new_payload_bytes = new_payload_view.data.size();
+        out_stats.old_payload_bytes = old_size;
+        out_stats.wal_bytes = new_payload_view.data.size();
+        ++updated_;
+        wal_bytes_ += out_stats.wal_bytes;
+        return {};
+    }
+
+    [[nodiscard]] std::size_t updated_count() const noexcept { return updated_; }
+    [[nodiscard]] std::size_t wal_bytes() const noexcept { return wal_bytes_; }
+
+private:
+    ShellBackend::TableData* table_ = nullptr;
+    std::vector<ScalarValue> decoded_values_{};
+    std::vector<std::byte> payload_buffer_{};
+    std::size_t updated_ = 0U;
+    std::size_t wal_bytes_ = 0U;
+};
+
+class ShellDeleteTarget final : public bored::executor::DeleteExecutor::Target {
+public:
+    explicit ShellDeleteTarget(ShellBackend::TableData* table)
+        : table_{table}
+    {}
+
+    std::error_code delete_tuple(const bored::executor::TupleView& tuple,
+                                 bored::executor::ExecutorContext&,
+                                 bored::executor::DeleteExecutor::DeleteStats& out_stats) override
+    {
+        if (table_ == nullptr || tuple.column_count() < 1U) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        const auto row_id_view = tuple.column(0U);
+        if (row_id_view.is_null || row_id_view.data.size() != sizeof(std::uint64_t)) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        std::uint64_t row_id = 0U;
+        std::memcpy(&row_id, row_id_view.data.data(), sizeof(row_id));
+
+        const auto index_opt = table_row_index(*table_, row_id);
+        if (!index_opt.has_value()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        const auto index = *index_opt;
+        encode_values_payload(*table_, table_->rows[index], payload_buffer_);
+        const auto reclaimed = payload_buffer_.size();
+
+        table_->rows.erase(table_->rows.begin() + static_cast<std::ptrdiff_t>(index));
+        table_->row_ids.erase(table_->row_ids.begin() + static_cast<std::ptrdiff_t>(index));
+
+        out_stats.reclaimed_bytes = reclaimed;
+        out_stats.wal_bytes = reclaimed;
+        ++deleted_;
+        reclaimed_bytes_ += reclaimed;
+        return {};
+    }
+
+    [[nodiscard]] std::size_t deleted_count() const noexcept { return deleted_; }
+    [[nodiscard]] std::size_t reclaimed_bytes() const noexcept { return reclaimed_bytes_; }
+
+private:
+    ShellBackend::TableData* table_ = nullptr;
+    std::vector<std::byte> payload_buffer_{};
+    std::size_t deleted_ = 0U;
+    std::size_t reclaimed_bytes_ = 0U;
+};
 
 std::string ShellBackend::normalize_identifier(std::string_view text)
 {
@@ -1130,28 +1541,24 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     return details;
 }
 
-std::variant<std::vector<std::string>, CommandMetrics> ShellBackend::simulate_executor_plan(
-    const std::string& sql,
-    std::string_view statement_label,
-    planner::PhysicalPlan plan)
+std::vector<std::string> ShellBackend::render_executor_plan(std::string_view statement_label,
+                                                            const planner::PhysicalPlan& plan)
 {
+    std::vector<std::string> detail_lines;
     const auto root = plan.root();
     if (!root) {
-        return make_error_metrics(sql,
-                                  "Planner produced empty physical plan for " + std::string(statement_label) + ".",
-                                  {"Report this to the bored_shell maintainers."});
+        detail_lines.push_back("executor.plan: <empty>");
+        return detail_lines;
     }
 
-    std::vector<std::string> detail_lines;
-    std::string summary = "executor.stub=";
+    std::string summary = "executor.plan=";
     summary.append(statement_label);
-    summary.append(" pipeline ready (root=");
+    summary.append(" root=");
     summary.append(physical_operator_name(root->type()));
     if (!root->children().empty() && root->children().front()) {
-        summary.append(", first_child=");
+        summary.append(" first_child=");
         summary.append(physical_operator_name(root->children().front()->type()));
     }
-    summary.append(")");
     detail_lines.push_back(std::move(summary));
 
     planner::ExplainOptions explain{};
@@ -1435,13 +1842,10 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     plan_details.detail_lines = std::move(planner_result.diagnostics);
     plan_details.plan = std::move(planner_result.plan);
 
-    auto executor_stub = simulate_executor_plan(sql, "INSERT", std::move(plan_details.plan));
-    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
-        return std::get<CommandMetrics>(std::move(executor_stub));
-    }
-    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
+    auto executor_detail_lines = render_executor_plan("INSERT", plan_details.plan);
 
-    std::size_t inserted = 0U;
+    std::vector<std::vector<ScalarValue>> pending_rows;
+    pending_rows.reserve(parse_result.statement->rows.size());
     for (const auto& row_node : parse_result.statement->rows) {
         if (row_node.values.size() != column_indexes.size()) {
             return make_error_metrics(sql, "VALUES list does not match column count.");
@@ -1476,14 +1880,35 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
             row_values[column_index] = numeric_value;
         }
 
-        table->rows.push_back(std::move(row_values));
-        ++inserted;
+        pending_rows.push_back(std::move(row_values));
     }
+
+    bored::executor::ExecutorTelemetry insert_telemetry;
+    ShellInsertTarget insert_target{table};
+    auto values_executor = std::make_unique<ShellValuesExecutor>(table, std::move(pending_rows));
+
+    bored::executor::InsertExecutor::Config insert_config{};
+    insert_config.target = &insert_target;
+    insert_config.telemetry = &insert_telemetry;
+
+    bored::executor::InsertExecutor insert_executor{std::move(values_executor), insert_config};
+
+    bored::executor::ExecutorContext executor_context{};
+    bored::executor::TupleBuffer executor_buffer{};
+    insert_executor.open(executor_context);
+    while (insert_executor.next(executor_context, executor_buffer)) {
+        executor_buffer.reset();
+    }
+    insert_executor.close(executor_context);
+
+    const std::size_t inserted = insert_target.inserted_count();
+    const auto telemetry_snapshot = insert_telemetry.snapshot();
 
     CommandMetrics metrics{};
     metrics.success = true;
     metrics.summary = "Inserted " + format_count("row", inserted) + ".";
     metrics.rows_touched = inserted;
+    metrics.wal_bytes = telemetry_snapshot.insert_wal_bytes;
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 logical_detail_lines.begin(),
                                 logical_detail_lines.end());
@@ -1545,7 +1970,6 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     if (parse_result.statement->assignments.empty()) {
         return make_error_metrics(sql, "UPDATE statement is missing a SET assignment.");
     }
-    std::vector<std::string> logical_detail_lines;
 
     const auto& assignment = parse_result.statement->assignments.front();
     if (!assignment.binding.has_value() || assignment.value == nullptr) {
@@ -1574,11 +1998,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
-    auto executor_stub = simulate_executor_plan(sql, "UPDATE", std::move(plan_details.plan));
-    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
-        return std::get<CommandMetrics>(std::move(executor_stub));
-    }
-    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
+    auto executor_detail_lines = render_executor_plan("UPDATE", plan_details.plan);
 
     enum class AssignmentKind {
         NumericConstant,
@@ -1692,7 +2112,12 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     }
 
     logical_detail_lines.push_back("logical.delete target=" + format_relation_name(*table_binding) +
-                                   " predicate=" + where_identifier.binding->column_name + " = " + where_literal.text);
+                                   " predicate=" + where_identifier.binding->column_name + " = " +
+                                   where_literal.text);
+
+    logical_detail_lines.push_back("logical.delete target=" + format_relation_name(*table_binding) +
+                                   " predicate=" + where_identifier.binding->column_name + " = " +
+                                   where_literal.text);
 
     if (assignment_kind == AssignmentKind::StringConstant &&
         target_column.type != catalog::CatalogColumnType::Utf8) {
@@ -1727,42 +2152,127 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     logical_detail_lines.push_back("logical.update target=" + format_relation_name(*table_binding) +
                                    " set=" + set_expression + " predicate=" + predicate_expression);
 
-    std::size_t updated = 0U;
-    for (auto& row : table->rows) {
-        if (!std::holds_alternative<std::int64_t>(row[where_index])) {
-            continue;
+    bored::executor::ExecutorTelemetry update_telemetry;
+
+    ShellStorageReader storage_reader{table};
+    bored::executor::SequentialScanExecutor::Config scan_config{};
+    scan_config.reader = &storage_reader;
+    scan_config.relation_id = table->relation_id;
+    scan_config.telemetry = &update_telemetry;
+
+    auto scan_node = std::make_unique<bored::executor::SequentialScanExecutor>(scan_config);
+
+    bored::executor::FilterExecutor::Config filter_config{};
+    filter_config.telemetry = &update_telemetry;
+    filter_config.predicate = [table, where_index, where_value, decoded = std::vector<ScalarValue>{},
+                               row_id = std::uint64_t{}](const bored::executor::TupleView& view,
+                                                         bored::executor::ExecutorContext&) mutable {
+        if (view.column_count() < 2U) {
+            return false;
         }
-        if (std::get<std::int64_t>(row[where_index]) != where_value) {
-            continue;
+        const auto payload_column = view.column(1U);
+        if (payload_column.is_null) {
+            return false;
+        }
+        if (!decode_row_payload(*table, payload_column.data, row_id, decoded)) {
+            return false;
+        }
+        if (decoded.size() <= where_index) {
+            return false;
+        }
+        if (!std::holds_alternative<std::int64_t>(decoded[where_index])) {
+            return false;
+        }
+        return std::get<std::int64_t>(decoded[where_index]) == where_value;
+    };
+
+    auto filter_node = std::make_unique<bored::executor::FilterExecutor>(std::move(scan_node), std::move(filter_config));
+
+    bored::executor::ProjectionExecutor::Config projection_config{};
+    projection_config.telemetry = &update_telemetry;
+    projection_config.projections.push_back([table,
+                                             assignment_kind,
+                                             target_index,
+                                             numeric_constant,
+                                             delta_value,
+                                             string_constant,
+                                             decoded = std::vector<ScalarValue>{},
+                                             updated_values = std::vector<ScalarValue>{},
+                                             payload_buffer = std::vector<std::byte>{}](
+                                                const bored::executor::TupleView& input,
+                                                bored::executor::TupleWriter& writer,
+                                                bored::executor::ExecutorContext&) mutable {
+        if (input.column_count() < 2U) {
+            throw std::runtime_error{"Update projection missing payload column"};
+        }
+        const auto payload_column = input.column(1U);
+        if (payload_column.is_null) {
+            throw std::runtime_error{"Update projection encountered null payload"};
         }
 
+        std::uint64_t row_id = 0U;
+        if (!decode_row_payload(*table, payload_column.data, row_id, decoded)) {
+            throw std::runtime_error{"Failed to decode row payload for update"};
+        }
+
+        updated_values = decoded;
+        if (updated_values.size() <= target_index) {
+            throw std::runtime_error{"Update projection missing target column"};
+        }
         switch (assignment_kind) {
         case AssignmentKind::StringConstant:
-            row[target_index] = string_constant;
+            updated_values[target_index] = string_constant;
             break;
         case AssignmentKind::NumericConstant:
-            row[target_index] = numeric_constant;
+            updated_values[target_index] = numeric_constant;
             break;
         case AssignmentKind::AddInteger:
         case AssignmentKind::SubtractInteger: {
-            if (!std::holds_alternative<std::int64_t>(row[target_index])) {
-                return make_error_metrics(sql,
-                                          "Cannot apply numeric assignment to non-numeric column '" +
-                                              target_column.name + "'.");
+            if (!std::holds_alternative<std::int64_t>(updated_values[target_index])) {
+                throw std::runtime_error{"Cannot apply numeric assignment to non-numeric column"};
             }
-            auto current_value = std::get<std::int64_t>(row[target_index]);
+            auto current_value = std::get<std::int64_t>(updated_values[target_index]);
             current_value += (assignment_kind == AssignmentKind::AddInteger) ? delta_value : -delta_value;
-            row[target_index] = current_value;
+            updated_values[target_index] = current_value;
             break;
         }
         }
-        ++updated;
+
+        payload_buffer.clear();
+        encode_values_payload(*table, updated_values, payload_buffer);
+
+        std::array<std::byte, sizeof(std::uint64_t)> row_id_bytes{};
+        std::memcpy(row_id_bytes.data(), &row_id, sizeof(row_id));
+
+        writer.append_column(std::span<const std::byte>(row_id_bytes.data(), row_id_bytes.size()), false);
+        writer.append_column(std::span<const std::byte>(payload_buffer.data(), payload_buffer.size()), false);
+    });
+
+    auto projection_node = std::make_unique<bored::executor::ProjectionExecutor>(std::move(filter_node), std::move(projection_config));
+
+    ShellUpdateTarget update_target{table};
+    bored::executor::UpdateExecutor::Config update_config{};
+    update_config.target = &update_target;
+    update_config.telemetry = &update_telemetry;
+
+    bored::executor::UpdateExecutor update_executor{std::move(projection_node), update_config};
+
+    bored::executor::ExecutorContext executor_context{};
+    bored::executor::TupleBuffer executor_buffer{};
+    update_executor.open(executor_context);
+    while (update_executor.next(executor_context, executor_buffer)) {
+        executor_buffer.reset();
     }
+    update_executor.close(executor_context);
+
+    const std::size_t updated = update_target.updated_count();
+    const auto telemetry_snapshot = update_telemetry.snapshot();
 
     CommandMetrics metrics{};
     metrics.success = true;
     metrics.summary = "Updated " + format_count("row", updated) + ".";
     metrics.rows_touched = updated;
+    metrics.wal_bytes = telemetry_snapshot.update_wal_bytes;
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 logical_detail_lines.begin(),
                                 logical_detail_lines.end());
@@ -1819,6 +2329,8 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
         return make_error_metrics(sql, "Target table not found.");
     }
 
+    std::vector<std::string> logical_detail_lines;
+
     auto plan_result = plan_scan_operation(sql,
                                            planner::LogicalOperatorType::Delete,
                                            planner::PhysicalOperatorType::Delete,
@@ -1831,11 +2343,7 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
-    auto executor_stub = simulate_executor_plan(sql, "DELETE", std::move(plan_details.plan));
-    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
-        return std::get<CommandMetrics>(std::move(executor_stub));
-    }
-    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
+    auto executor_detail_lines = render_executor_plan("DELETE", plan_details.plan);
 
     const auto* where_expression = parse_result.statement->where;
     if (where_expression == nullptr ||
@@ -2002,11 +2510,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
-    auto executor_stub = simulate_executor_plan(sql, "SELECT", std::move(plan_details.plan));
-    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
-        return std::get<CommandMetrics>(std::move(executor_stub));
-    }
-    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
+    auto executor_detail_lines = render_executor_plan("SELECT", plan_details.plan);
 
     std::vector<std::string> header_names = selected_columns;
 

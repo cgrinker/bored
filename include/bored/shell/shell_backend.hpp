@@ -13,9 +13,11 @@
 #include "bored/txn/transaction_types.hpp"
 
 #include <functional>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -40,6 +42,13 @@ struct TableBinding;
 }  // namespace bored::parser::relational
 
 namespace bored::shell {
+
+class ShellTableScanCursor;
+class ShellStorageReader;
+class ShellValuesExecutor;
+class ShellInsertTarget;
+class ShellUpdateTarget;
+class ShellDeleteTarget;
 
 class ShellBackend final {
 public:
@@ -79,7 +88,36 @@ private:
         std::vector<ColumnInfo> columns{};
         std::unordered_map<std::string, std::size_t> column_index{};
         std::vector<std::vector<ScalarValue>> rows{};
+        std::vector<std::uint64_t> row_ids{};
+        std::uint64_t next_row_id = 1U;
     };
+
+    friend void append_values_payload(const TableData& table,
+                                      const std::vector<ScalarValue>& values,
+                                      std::vector<std::byte>& buffer);
+    friend void encode_values_payload(const TableData& table,
+                                      const std::vector<ScalarValue>& values,
+                                      std::vector<std::byte>& buffer);
+    friend std::size_t values_payload_size(const TableData& table,
+                                           const std::vector<ScalarValue>& values,
+                                           std::vector<std::byte>& buffer);
+    friend bool decode_values_payload(const TableData& table,
+                                      std::span<const std::byte> payload,
+                                      std::vector<ScalarValue>& out_values);
+    friend void encode_row_payload(const TableData& table,
+                                   std::size_t row_index,
+                                   std::vector<std::byte>& buffer);
+    friend bool decode_row_payload(const TableData& table,
+                                   std::span<const std::byte> payload,
+                                   std::uint64_t& row_id,
+                                   std::vector<ScalarValue>& out_values);
+    friend std::optional<std::size_t> table_row_index(const TableData& table, std::uint64_t row_id);
+    friend class ShellTableScanCursor;
+    friend class ShellStorageReader;
+    friend class ShellValuesExecutor;
+    friend class ShellInsertTarget;
+    friend class ShellUpdateTarget;
+    friend class ShellDeleteTarget;
 
     struct PlannerPlanDetails final {
         std::string root_detail{};
@@ -114,10 +152,9 @@ private:
         const parser::relational::TableBinding& table_binding,
         const TableData& table,
         std::vector<std::string> projection_columns);
-    [[nodiscard]] std::variant<std::vector<std::string>, CommandMetrics> simulate_executor_plan(
-        const std::string& sql,
+    [[nodiscard]] std::vector<std::string> render_executor_plan(
         std::string_view statement_label,
-        planner::PhysicalPlan plan);
+        const planner::PhysicalPlan& plan);
 
     CommandMetrics execute_dml(const std::string& sql);
     CommandMetrics execute_insert(const std::string& sql);

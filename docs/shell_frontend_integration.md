@@ -35,12 +35,15 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 	- 2025-10-31: `ShellBackend` Catch2 suite now exercises INSERT/UPDATE/SELECT/DELETE statements prefixed with line and block comments, verifying parser-driven execution and summaries.
 - **Iteration guidance**: each numbered item should be achievable in a single Codex iteration; if an item grows (for example, needing extensive binder changes), break it into subtasks before starting.
 
-## Milestone 2 — Executor-Backed DML _(Status: Planned)_
+## Milestone 2 — Executor-Backed DML _(Status: In Progress)_
 - **Relevant code**: `src/planner` (logical → physical planning), `src/executor` (operator pipeline), `src/shell/shell_backend.cpp` (row cache), telemetry hooks in `include/bored/storage/storage_telemetry_registry.hpp`.
 - **Action items**
 	1. Introduce a planner/executor call path in `ShellBackend::execute_dml` that takes the logical plan from Milestone 1 and produces results via the executor (likely through `planner::plan_query` and `executor::run_query`).
+		- 2025-11-02: `execute_insert` and `execute_update` now build physical plans via `plan_query` and drain them through real executor pipelines; command metrics stitch in executor telemetry snapshots. `execute_delete` still mutates in-memory rows while its executor wiring lands.
 	2. Remove the in-memory `TableData::rows` mutation logic once executor pipelines write/read from catalog-backed storage or executor buffers.
+		- 2025-11-02: Pending. The shell retains `TableData::rows`/`row_ids` so result rendering works while delete/select executor integration is completed.
 	3. Validate telemetry propagation by asserting `CommandMetrics.rows_touched`/`wal_bytes` reflect executor metrics in updated end-to-end tests.
+		- 2025-11-02: Insert/update command metrics now consume executor row counters; WAL byte propagation remains TODO until storage-backed writes replace in-memory mutations.
 - **Iteration guidance**: if integrating planner and executor together is too large, split into subtasks (e.g., planning integration first, executor wiring second) and track them explicitly.
 
 ## Milestone 3 — Persistent Storage Backend _(Status: Planned)_
