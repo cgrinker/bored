@@ -21,7 +21,8 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
  2. [ ] Replace `ShellBackend::execute_insert|update|delete|select` with logic that lowers the AST to the logical IR (reusing the binder) and converts semantic/parse failures into `CommandMetrics`.
 	 - 2025-10-30: `execute_insert|update|delete` now parse and bind through the shared PEGTL pipeline; logical IR lowering and executor handoff remain TODO.
 	 - 2025-10-30: `execute_insert` builds a placeholder planner `LogicalPlan`/`plan_query` result before mutating in-memory tables so planner diagnostics flow into shell metrics.
-	 - **Next task**: Mirror the planner handoff for `execute_update` and `execute_delete`, then revisit the SELECT flow.
+	 - 2025-10-31: `execute_update` and `execute_delete` now construct placeholder planner plans (Update/Delete + SeqScan) so planner diagnostics surface before in-memory mutations.
+	 - **Next task**: Apply the planner handoff to `execute_select`, then unify legacy row execution behind the planned pipeline.
  3. [ ] Update or add tests (`tests/end_to_end/e2e_smoke.sql` + unit coverage under `tests/parser` or new Catch2 cases) to confirm comment handling and DML success via the parser.
 - **Iteration guidance**: each numbered item should be achievable in a single Codex iteration; if an item grows (for example, needing extensive binder changes), break it into subtasks before starting.
 
