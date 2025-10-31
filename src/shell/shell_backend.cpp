@@ -1657,6 +1657,29 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         return make_parser_error_metrics(sql, std::move(parse_result.diagnostics), "Failed to parse SELECT statement.");
     }
 
+    catalog::CatalogTransactionConfig tx_cfg{&txn_allocator_, &snapshot_manager_};
+    catalog::CatalogTransaction transaction{tx_cfg};
+    transaction.bind_transaction_context(&txn_manager_, nullptr);
+
+    catalog::CatalogAccessor::Config accessor_cfg{};
+    accessor_cfg.transaction = &transaction;
+    accessor_cfg.scanner = storage_->make_scanner();
+    catalog::CatalogAccessor accessor{accessor_cfg};
+
+    parser::relational::CatalogBinderAdapter binder_catalog{accessor};
+    parser::relational::BinderConfig binder_cfg{};
+    binder_cfg.catalog = &binder_catalog;
+    if (!config_.default_schema_name.empty()) {
+        binder_cfg.default_schema = config_.default_schema_name;
+    }
+
+    auto binding = parser::relational::bind_select(binder_cfg, *parse_result.statement);
+    if (!binding.success()) {
+        return make_parser_error_metrics(sql,
+                                         std::move(binding.diagnostics),
+                                         "Failed to bind SELECT statement.");
+    }
+
     std::string plan_error;
     std::vector<std::string> plan_hints;
     auto plan = build_simple_select_plan(*parse_result.statement, plan_error, plan_hints);
@@ -1664,12 +1687,17 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         return make_error_metrics(sql, std::move(plan_error), std::move(plan_hints));
     }
 
+    const auto* query = parse_result.statement->query;
+    if (query == nullptr || query->from == nullptr || !query->from->binding.has_value()) {
+        return make_error_metrics(sql, "SELECT target table binding is missing.");
+    }
+    const auto* table_binding = &*query->from->binding;
+
     TableData* table = nullptr;
-    if (plan->schema_name.has_value()) {
-        const auto qualified = *plan->schema_name + "." + plan->table_name;
-        table = find_table(qualified);
+    if (table_binding->schema_name.empty()) {
+        table = find_table_or_default_schema(table_binding->table_name);
     } else {
-        table = find_table_or_default_schema(plan->table_name);
+        table = find_table(table_binding->schema_name + "." + table_binding->table_name);
     }
     if (table == nullptr) {
         return make_error_metrics(sql, "Target table not found.");
@@ -1695,6 +1723,67 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
             column_indexes.push_back(it->second);
             header_names.push_back(table->columns[it->second].name);
         }
+    }
+
+    std::string planner_root_detail;
+    std::vector<std::string> plan_detail_lines;
+    {
+        std::vector<std::string> planner_columns;
+        planner_columns.reserve(table->columns.size());
+        for (const auto& column_info : table->columns) {
+            planner_columns.push_back(column_info.name);
+        }
+
+        std::vector<std::string> projection_columns = header_names;
+        if (projection_columns.empty()) {
+            projection_columns = planner_columns;
+        }
+
+        planner::LogicalProperties scan_props{};
+        scan_props.relation_name = format_relation_name(*table_binding);
+        scan_props.output_columns = planner_columns;
+
+        auto scan_logical = planner::LogicalOperator::make(
+            planner::LogicalOperatorType::TableScan,
+            std::vector<planner::LogicalOperatorPtr>{},
+            scan_props);
+
+        planner::LogicalProperties projection_props{};
+        projection_props.relation_name = scan_props.relation_name;
+        projection_props.output_columns = projection_columns;
+
+        auto projection_logical = planner::LogicalOperator::make(
+            planner::LogicalOperatorType::Projection,
+            std::vector<planner::LogicalOperatorPtr>{scan_logical},
+            projection_props);
+
+        planner::LogicalPlan logical_plan{projection_logical};
+        planner::PlannerContext planner_context{};
+        auto planner_result = planner::plan_query(planner_context, logical_plan);
+        const auto plan_root = planner_result.plan.root();
+        if (!plan_root) {
+            return make_planner_error_metrics(sql,
+                                              std::move(planner_result.diagnostics),
+                                              "Failed to plan SELECT statement.");
+        }
+
+        if (plan_root->type() == planner::PhysicalOperatorType::Projection) {
+            if (plan_root->children().empty() ||
+                plan_root->children().front()->type() != planner::PhysicalOperatorType::SeqScan) {
+                return make_planner_error_metrics(sql,
+                                                  std::move(planner_result.diagnostics),
+                                                  "Planner SELECT plan is missing SeqScan child.");
+            }
+            planner_root_detail = "Projection (children=" + std::to_string(plan_root->children().size()) + ")";
+        } else if (plan_root->type() == planner::PhysicalOperatorType::SeqScan) {
+            planner_root_detail = "SeqScan (children=0)";
+        } else {
+            return make_planner_error_metrics(sql,
+                                              std::move(planner_result.diagnostics),
+                                              "Planner produced unexpected physical operator for SELECT.");
+        }
+
+        plan_detail_lines = std::move(planner_result.diagnostics);
     }
 
     std::optional<std::size_t> order_index;
@@ -1742,6 +1831,13 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     metrics.success = true;
     metrics.summary = "Selected " + format_count("row", rendered_rows.size()) + ".";
     metrics.rows_touched = rendered_rows.size();
+
+    if (!planner_root_detail.empty()) {
+        metrics.detail_lines.push_back("planner.root=" + planner_root_detail);
+    }
+    metrics.detail_lines.insert(metrics.detail_lines.end(),
+                                plan_detail_lines.begin(),
+                                plan_detail_lines.end());
 
     if (!header_names.empty()) {
         std::ostringstream header_stream;

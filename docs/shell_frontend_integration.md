@@ -22,7 +22,8 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 	 - 2025-10-30: `execute_insert|update|delete` now parse and bind through the shared PEGTL pipeline; logical IR lowering and executor handoff remain TODO.
 	 - 2025-10-30: `execute_insert` builds a placeholder planner `LogicalPlan`/`plan_query` result before mutating in-memory tables so planner diagnostics flow into shell metrics.
 	 - 2025-10-31: `execute_update` and `execute_delete` now construct placeholder planner plans (Update/Delete + SeqScan) so planner diagnostics surface before in-memory mutations.
-	 - **Next task**: Apply the planner handoff to `execute_select`, then unify legacy row execution behind the planned pipeline.
+	 - 2025-10-31: `execute_select` now binds against the catalog and constructs a Projection + SeqScan logical plan so planner diagnostics accompany result rendering.
+	 - **Next task**: Unify the in-memory row execution behind the planner-issued column lists (starting with SELECT) before wiring the executor path.
  3. [ ] Update or add tests (`tests/end_to_end/e2e_smoke.sql` + unit coverage under `tests/parser` or new Catch2 cases) to confirm comment handling and DML success via the parser.
 - **Iteration guidance**: each numbered item should be achievable in a single Codex iteration; if an item grows (for example, needing extensive binder changes), break it into subtasks before starting.
 
