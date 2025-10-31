@@ -1363,7 +1363,16 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
                                           "Planner column projection does not match INSERT column list.");
     }
 
-    std::vector<std::string> plan_detail_lines = std::move(planner_result.diagnostics);
+    PlannerPlanDetails plan_details{};
+    plan_details.root_detail = "Insert (children=" + std::to_string(plan_root->children().size()) + ")";
+    plan_details.detail_lines = std::move(planner_result.diagnostics);
+    plan_details.plan = std::move(planner_result.plan);
+
+    auto executor_stub = simulate_executor_plan(sql, "INSERT", std::move(plan_details.plan));
+    if (std::holds_alternative<CommandMetrics>(executor_stub)) {
+        return std::get<CommandMetrics>(std::move(executor_stub));
+    }
+    auto executor_detail_lines = std::get<std::vector<std::string>>(std::move(executor_stub));
 
     std::size_t inserted = 0U;
     for (const auto& row_node : parse_result.statement->rows) {
@@ -1408,10 +1417,13 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     metrics.success = true;
     metrics.summary = "Inserted " + format_count("row", inserted) + ".";
     metrics.rows_touched = inserted;
-    metrics.detail_lines.push_back("planner.root=Insert (children=1)");
+    metrics.detail_lines.push_back("planner.root=" + plan_details.root_detail);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
-                                plan_detail_lines.begin(),
-                                plan_detail_lines.end());
+                                plan_details.detail_lines.begin(),
+                                plan_details.detail_lines.end());
+    metrics.detail_lines.insert(metrics.detail_lines.end(),
+                                executor_detail_lines.begin(),
+                                executor_detail_lines.end());
     return metrics;
 }
 

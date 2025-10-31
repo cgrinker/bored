@@ -18,6 +18,7 @@
 - Work through each checklist item systematically.
 - Keep communication concise and focused.
 - Follow development best practices.
+- For any file exceeding 500 lines or 25 KB, apply edits exclusively via the `apply_patch` workflow (no direct-buffer writes).
 
 ## Current State (Oct 23, 2025)
 - `WalWriter` provides aligned WAL buffering, segment rotation, and size/time/commit-driven flush hooks; endian-stable headers verified by tests.

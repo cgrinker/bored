@@ -64,6 +64,32 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for SELECT")
           std::distance(metrics.detail_lines.begin(), stub_it));
 }
 
+TEST_CASE("ShellBackend emits executor stub diagnostics for INSERT")
+{
+    ShellBackendHarness harness;
+
+    const auto metrics = harness.engine.execute_sql("INSERT INTO metrics (id, counter, name) VALUES (2, 11, 'beta');");
+    REQUIRE(metrics.success);
+    CHECK_THAT(metrics.summary, ContainsSubstring("Inserted 1 row"));
+
+    auto root_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "planner.root=");
+    });
+    REQUIRE(root_it != metrics.detail_lines.end());
+    CHECK_THAT(*root_it, ContainsSubstring("Insert"));
+
+    auto stub_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "executor.stub=INSERT pipeline ready");
+    });
+    REQUIRE(stub_it != metrics.detail_lines.end());
+    CHECK_THAT(*stub_it, ContainsSubstring("root=Insert"));
+
+    auto plan_line_count = std::count_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "executor.plan:");
+    });
+    CHECK(plan_line_count > 0);
+}
+
 TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
 {
     ShellBackendHarness harness;
