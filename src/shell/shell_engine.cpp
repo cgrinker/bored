@@ -518,8 +518,15 @@ CommandMetrics ShellEngine::parse_only_ddl(const std::string& sql)
     metrics.duration_ms = static_cast<double>(duration_ns.count()) / 1'000'000.0;
 
     const auto after = capture(registry);
-    metrics.rows_touched = after.rows_emitted - before.rows_emitted;
-    metrics.wal_bytes = after.wal_bytes - before.wal_bytes;
+    const auto delta_rows = after.rows_emitted - before.rows_emitted;
+    if (delta_rows != 0U) {
+        metrics.rows_touched = delta_rows;
+    }
+
+    const auto delta_wal = after.wal_bytes - before.wal_bytes;
+    if (delta_wal != 0U) {
+        metrics.wal_bytes = delta_wal;
+    }
 
     return metrics;
 }
@@ -548,8 +555,15 @@ CommandMetrics ShellEngine::execute_dml(const std::string& sql)
     }
 
     const auto after = capture(registry);
-    metrics.rows_touched = after.rows_emitted - before.rows_emitted;
-    metrics.wal_bytes = after.wal_bytes - before.wal_bytes;
+    const auto delta_rows = after.rows_emitted - before.rows_emitted;
+    if (delta_rows != 0U) {
+        metrics.rows_touched = delta_rows;
+    }
+
+    const auto delta_wal = after.wal_bytes - before.wal_bytes;
+    if (delta_wal != 0U) {
+        metrics.wal_bytes = delta_wal;
+    }
 
     return metrics;
 }

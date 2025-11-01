@@ -60,6 +60,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/lock_introspection.cpp
     src/shell/shell_backend.cpp
     src/shell/shell_engine.cpp
+    src/tools/shell_log_formatter.cpp
     src/storage/index_retention.cpp
     src/storage/temp_resource_registry.cpp
     src/storage/vacuum_scheduler.cpp
@@ -253,6 +254,7 @@ if(BORED_ENABLE_TESTS)
     tests/transaction_manager_tests.cpp
     tests/wal_commit_pipeline_tests.cpp
             tests/shell_engine_tests.cpp
+            tests/shell_log_tests.cpp
         tests/executor_scaffolding_tests.cpp
         tests/executor_nested_loop_join_tests.cpp
     tests/executor_hash_join_tests.cpp
