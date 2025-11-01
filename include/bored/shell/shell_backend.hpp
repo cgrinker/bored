@@ -171,8 +171,8 @@ private:
     txn::TransactionManager txn_manager_;
     std::unique_ptr<catalog::CatalogIdentifierAllocator> identifier_allocator_{};
     std::unique_ptr<ddl::DdlCommandDispatcher> dispatcher_{};
-    std::unique_ptr<parser::DdlScriptExecutor> ddl_executor_{};
     storage::StorageTelemetryRegistry storage_registry_{};
+    std::unique_ptr<parser::DdlScriptExecutor> ddl_executor_{};
     catalog::SchemaId default_schema_id_{};
     catalog::DatabaseId default_database_id_{catalog::kSystemDatabaseId};
     std::uint64_t next_database_id_{catalog::kSystemDatabaseId.value + 1U};

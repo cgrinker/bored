@@ -1320,6 +1320,8 @@ ShellBackend::ShellBackend(Config config)
 
 ShellBackend::~ShellBackend()
 {
+    ddl_executor_.reset();
+
     if (registered_catalog_sampler_) {
         auto sampler = catalog::get_global_catalog_introspection_sampler();
         if (sampler) {

@@ -4,6 +4,12 @@
 #include <CLI/CLI.hpp>
 #include <replxx.hxx>
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <DbgHelp.h>
+#pragma comment(lib, "Dbghelp.lib")
+#endif
+
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
@@ -20,6 +26,116 @@
 #include <vector>
 
 namespace {
+
+#if defined(_WIN32)
+std::mutex& symbol_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+bool ensure_symbol_handler()
+{
+    static std::once_flag once_flag;
+    static bool initialized = false;
+    std::call_once(once_flag, []() {
+        HANDLE process = GetCurrentProcess();
+        const DWORD options = SymGetOptions() | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME;
+        SymSetOptions(options);
+        if (SymInitialize(process, nullptr, TRUE) == TRUE) {
+            initialized = true;
+        } else {
+            std::cerr << "[debug] SymInitialize failed error=" << GetLastError() << '\n';
+        }
+    });
+    return initialized;
+}
+
+void log_stack_trace(const char* label)
+{
+    if (!ensure_symbol_handler()) {
+        std::cerr << "[debug] " << label << " stack trace unavailable" << '\n';
+        return;
+    }
+
+    constexpr ULONG max_frames = 32U;
+    void* stack[max_frames] = {};
+    const USHORT captured = CaptureStackBackTrace(1U, max_frames, stack, nullptr);
+    if (captured == 0U) {
+        std::cerr << "[debug] " << label << " stack trace empty" << '\n';
+        return;
+    }
+
+    std::lock_guard<std::mutex> guard{symbol_mutex()};
+    HANDLE process = GetCurrentProcess();
+    std::cerr << "[debug] " << label << " stack trace (" << captured << " frames)" << '\n';
+
+    for (USHORT index = 0U; index < captured; ++index) {
+        const DWORD64 address = reinterpret_cast<DWORD64>(stack[index]);
+
+        alignas(SYMBOL_INFO) char symbol_buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME]{};
+        auto* symbol = reinterpret_cast<PSYMBOL_INFO>(symbol_buffer);
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        symbol->MaxNameLen = MAX_SYM_NAME;
+
+        DWORD64 displacement = 0U;
+        const bool has_symbol = SymFromAddr(process, address, &displacement, symbol) == TRUE;
+
+        IMAGEHLP_LINE64 line_info{};
+        line_info.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+        DWORD line_displacement = 0U;
+        const bool has_line = SymGetLineFromAddr64(process, address, &line_displacement, &line_info) == TRUE;
+
+        IMAGEHLP_MODULE64 module_info{};
+        module_info.SizeOfStruct = sizeof(IMAGEHLP_MODULE64);
+        const bool has_module = SymGetModuleInfo64(process, address, &module_info) == TRUE;
+
+        std::cerr << "    [" << index << "] 0x" << std::hex << address << std::dec;
+        if (has_module) {
+            std::cerr << " (" << module_info.ModuleName << " base=0x" << std::hex << module_info.BaseOfImage << std::dec << ')';
+        }
+        if (has_symbol) {
+            std::cerr << " " << symbol->Name;
+            if (displacement != 0U) {
+                std::cerr << "+0x" << std::hex << displacement << std::dec;
+            }
+        }
+        if (has_line) {
+            std::cerr << " -- " << line_info.FileName << ':' << line_info.LineNumber;
+        }
+        std::cerr << '\n';
+    }
+}
+
+LONG CALLBACK shell_vectored_exception_handler(PEXCEPTION_POINTERS info)
+{
+    if (info != nullptr && info->ExceptionRecord != nullptr) {
+        const auto* record = info->ExceptionRecord;
+    const bool non_continuable = (record->ExceptionFlags & EXCEPTION_NONCONTINUABLE) != 0;
+    std::cerr << "[debug] vectored exception code=0x" << std::hex << record->ExceptionCode
+          << " flags=0x" << record->ExceptionFlags << " address=" << record->ExceptionAddress
+                  << " continuable=" << (non_continuable ? "no" : "yes") << std::dec << '\n';
+        log_stack_trace("vectored");
+    } else {
+        std::cerr << "[debug] vectored exception (no details available)" << '\n';
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+LONG CALLBACK shell_unhandled_exception_filter(EXCEPTION_POINTERS* info)
+{
+    if (info != nullptr && info->ExceptionRecord != nullptr) {
+        const auto* record = info->ExceptionRecord;
+        std::cerr << "[debug] unhandled exception code=0x" << std::hex << record->ExceptionCode
+                  << " flags=0x" << record->ExceptionFlags << " address=" << record->ExceptionAddress
+                  << " parameters=" << record->NumberParameters << std::dec << '\n';
+        log_stack_trace("unhandled");
+    } else {
+        std::cerr << "[debug] unhandled exception (no details available)" << '\n';
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 std::string trim(std::string_view text)
 {
@@ -564,6 +680,7 @@ int run_repl(bool quiet, const bored::shell::ShellEngine::Config& config)
         buffer.clear();
     }
 
+    std::cerr << "[debug] run_repl exiting with code=0\n";
     return 0;
 }
 
@@ -578,6 +695,7 @@ int run_batch(const std::vector<std::string>& commands, const bored::shell::Shel
             exit_code = 1;
         }
     }
+    std::cerr << "[debug] run_batch exiting with code=" << exit_code << '\n';
     return exit_code;
 }
 
@@ -585,6 +703,11 @@ int run_batch(const std::vector<std::string>& commands, const bored::shell::Shel
 
 int main(int argc, char** argv)
 {
+#if defined(_WIN32)
+    static auto vectored_handle = AddVectoredExceptionHandler(1U, shell_vectored_exception_handler);
+    SetUnhandledExceptionFilter(shell_unhandled_exception_filter);
+#endif
+
     CLI::App app{"Interactive SQL shell for the bored prototype."};
 
     bool quiet = false;
@@ -604,9 +727,12 @@ int main(int argc, char** argv)
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError& error) {
-        return app.exit(error);
+        const auto code = app.exit(error);
+        std::cerr << "[debug] exiting main via CLI parse error path code=" << code << '\n';
+        return code;
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';
+        std::cerr << "[debug] exiting main due to exception code=1\n";
         return 1;
     }
 
@@ -623,6 +749,7 @@ int main(int argc, char** argv)
             auto file = std::make_unique<std::ofstream>(log_json_path, std::ios::out | std::ios::app);
             if (!file->is_open()) {
                 std::cerr << "error: failed to open log file '" << log_json_path << "'" << '\n';
+                std::cerr << "[debug] exiting main due to log open failure code=1\n";
                 return 1;
             }
             log_stream = file.get();
@@ -649,6 +776,7 @@ int main(int argc, char** argv)
         if (script_path == "-") {
             if (stdin_consumed) {
                 std::cerr << "error: stdin script '-' specified more than once" << '\n';
+                std::cerr << "[debug] exiting main due to repeated stdin script code=1\n";
                 return 1;
             }
             stdin_consumed = true;
@@ -657,6 +785,7 @@ int main(int argc, char** argv)
             script_stream.open(script_path);
             if (!script_stream.is_open()) {
                 std::cerr << "error: failed to open script file '" << script_path << "'" << '\n';
+                std::cerr << "[debug] exiting main due to script open failure code=1\n";
                 return 1;
             }
             input = &script_stream;
@@ -671,6 +800,7 @@ int main(int argc, char** argv)
                 std::cerr << " ('" << script_path << "')";
             }
             std::cerr << '\n';
+            std::cerr << "[debug] exiting main due to script load failure code=1\n";
             return 1;
         }
     }
@@ -678,12 +808,17 @@ int main(int argc, char** argv)
     commands_to_run.insert(commands_to_run.end(), execute_commands.begin(), execute_commands.end());
 
     if (!commands_to_run.empty()) {
-        return run_batch(commands_to_run, config);
+        const auto code = run_batch(commands_to_run, config);
+        std::cerr << "[debug] exiting main via run_batch code=" << code << '\n';
+        return code;
     }
 
     if (!script_files.empty()) {
+        std::cerr << "[debug] exiting main after scripts with no commands code=0\n";
         return 0;
     }
 
-    return run_repl(quiet, config);
+    const auto repl_code = run_repl(quiet, config);
+    std::cerr << "[debug] exiting main via run_repl code=" << repl_code << '\n';
+    return repl_code;
 }
