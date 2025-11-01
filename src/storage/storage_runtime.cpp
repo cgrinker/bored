@@ -1,6 +1,8 @@
 #include "bored/storage/storage_runtime.hpp"
 
+#include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_telemetry_registry.hpp"
+#include "bored/storage/temp_resource_registry.hpp"
 
 #include <chrono>
 #include <exception>
@@ -134,11 +136,24 @@ std::error_code StorageRuntime::initialize()
         set_global_storage_telemetry_registry(config_.storage_telemetry_registry);
     }
 
+    control_metrics_ = StorageControlTelemetrySnapshot{};
+
+    control_telemetry_identifier_ = config_.control_telemetry_identifier;
+    if (config_.storage_telemetry_registry && !control_telemetry_identifier_.empty()) {
+        config_.storage_telemetry_registry->register_control(control_telemetry_identifier_, [this] {
+            return this->control_telemetry_snapshot();
+        });
+    }
+
+    install_control_handlers();
+
     return {};
 }
 
 void StorageRuntime::shutdown()
 {
+    uninstall_control_handlers();
+
     if (wal_writer_) {
         (void)wal_writer_->close();
         wal_writer_.reset();
@@ -149,6 +164,11 @@ void StorageRuntime::shutdown()
     index_retention_pruner_.reset();
     index_retention_executor_.reset();
     checkpoint_manager_.reset();
+
+    if (config_.storage_telemetry_registry && !control_telemetry_identifier_.empty()) {
+        config_.storage_telemetry_registry->unregister_control(control_telemetry_identifier_);
+        control_telemetry_identifier_.clear();
+    }
 
     if (config_.storage_telemetry_registry &&
         get_global_storage_telemetry_registry() == config_.storage_telemetry_registry) {
@@ -161,6 +181,11 @@ void StorageRuntime::shutdown()
         owns_async_io_ = false;
     } else {
         async_io_.reset();
+    }
+
+    {
+        std::lock_guard guard(control_metrics_mutex_);
+        control_metrics_ = StorageControlTelemetrySnapshot{};
     }
 }
 
@@ -224,6 +249,168 @@ WalRecoveryDriver StorageRuntime::make_recovery_driver() const
                              checkpoint_directory,
                              config_.storage_telemetry_registry,
                              config_.storage_telemetry_registry ? std::string{"wal_recovery"} : std::string{}};
+}
+
+std::error_code StorageRuntime::run_control_command(ControlCommand command,
+                                                    const std::function<std::error_code()>& callable)
+{
+    if (!callable) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    std::error_code result = callable();
+    const auto end = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+    const auto duration_ns = elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0ULL;
+
+    {
+        std::lock_guard guard(control_metrics_mutex_);
+        auto& metrics = control_metrics(command);
+        metrics.attempts += 1U;
+        if (result) {
+            metrics.failures += 1U;
+        }
+        metrics.total_duration_ns += duration_ns;
+        metrics.last_duration_ns = duration_ns;
+    }
+
+    return result;
+}
+
+OperationTelemetrySnapshot& StorageRuntime::control_metrics(ControlCommand command) noexcept
+{
+    switch (command) {
+    case ControlCommand::Checkpoint:
+        return control_metrics_.checkpoint;
+    case ControlCommand::Retention:
+        return control_metrics_.retention;
+    case ControlCommand::Recovery:
+        return control_metrics_.recovery;
+    }
+    return control_metrics_.checkpoint;
+}
+
+StorageControlTelemetrySnapshot StorageRuntime::control_telemetry_snapshot() const
+{
+    std::lock_guard guard(control_metrics_mutex_);
+    return control_metrics_;
+}
+
+void StorageRuntime::install_control_handlers()
+{
+    if (control_handlers_installed_) {
+        return;
+    }
+
+    previous_control_handlers_ = get_global_storage_control_handlers();
+
+    StorageControlHandlers handlers{};
+    handlers.checkpoint = [this](const StorageCheckpointRequest& request) {
+        return this->handle_checkpoint_request(request);
+    };
+    handlers.retention = [this](const StorageRetentionRequest& request) {
+        return this->handle_retention_request(request);
+    };
+    handlers.recovery = [this](const StorageRecoveryRequest& request) {
+        return this->handle_recovery_request(request);
+    };
+
+    set_global_storage_control_handlers(std::move(handlers));
+    control_handlers_installed_ = true;
+}
+
+void StorageRuntime::uninstall_control_handlers() noexcept
+{
+    if (!control_handlers_installed_) {
+        return;
+    }
+    set_global_storage_control_handlers(previous_control_handlers_);
+    control_handlers_installed_ = false;
+}
+
+std::error_code StorageRuntime::handle_checkpoint_request(const StorageCheckpointRequest& request)
+{
+    return run_control_command(ControlCommand::Checkpoint, [this, request]() -> std::error_code {
+        if (!checkpoint_scheduler_) {
+            return std::make_error_code(std::errc::not_connected);
+        }
+
+        const auto& provider = config_.checkpoint_snapshot_provider;
+        if (!provider) {
+            return std::make_error_code(std::errc::operation_not_permitted);
+        }
+
+        std::optional<WalAppendResult> append_result;
+        const auto now = std::chrono::steady_clock::now();
+        const std::optional<bool> dry_run_override = request.dry_run ? std::optional<bool>{true} : std::nullopt;
+        return checkpoint_scheduler_->maybe_run(now, provider, request.force, append_result, dry_run_override);
+    });
+}
+
+std::error_code StorageRuntime::handle_retention_request(const StorageRetentionRequest& request)
+{
+    return run_control_command(ControlCommand::Retention, [this, request]() -> std::error_code {
+        if (!wal_writer_) {
+            return std::make_error_code(std::errc::not_connected);
+        }
+
+        WalRetentionConfig retention_config = wal_writer_config_.retention;
+        if (checkpoint_scheduler_) {
+            retention_config = checkpoint_scheduler_->retention_config();
+        }
+
+        const auto segment_id = wal_writer_->current_segment_id();
+        WalRetentionStats stats{};
+        std::error_code result = wal_writer_->apply_retention(retention_config, segment_id, &stats);
+
+        if (!result && request.include_index_retention && index_retention_manager_) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto checkpoint_lsn = wal_writer_->next_lsn();
+            auto index_ec = index_retention_manager_->apply_checkpoint(now, checkpoint_lsn, nullptr);
+            if (index_ec) {
+                result = index_ec;
+            }
+        }
+
+        return result;
+    });
+}
+
+std::error_code StorageRuntime::handle_recovery_request(const StorageRecoveryRequest& request)
+{
+    return run_control_command(ControlCommand::Recovery, [this, request]() -> std::error_code {
+        WalRecoveryDriver driver = this->make_recovery_driver();
+        WalRecoveryPlan plan{};
+        if (auto plan_ec = driver.build_plan(plan); plan_ec) {
+            return plan_ec;
+        }
+
+        WalReplayContext replay_context{};
+        WalReplayer replayer{replay_context};
+
+        if (request.cleanup_only) {
+            WalRecoveryPlan cleanup_plan = plan;
+            cleanup_plan.redo.clear();
+            cleanup_plan.undo.clear();
+            cleanup_plan.undo_spans.clear();
+            return replayer.apply_undo(cleanup_plan);
+        }
+
+        if (request.run_redo) {
+            if (auto redo_ec = replayer.apply_redo(plan); redo_ec) {
+                return redo_ec;
+            }
+        }
+
+        if (request.run_undo) {
+            if (auto undo_ec = replayer.apply_undo(plan); undo_ec) {
+                return undo_ec;
+            }
+        }
+
+        return std::error_code{};
+    });
 }
 
 }  // namespace bored::storage

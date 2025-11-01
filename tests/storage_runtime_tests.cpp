@@ -298,3 +298,106 @@ TEST_CASE("StorageRuntime dispatches index retention candidates via executor fal
     runtime.shutdown();
     (void)std::filesystem::remove_all(wal_dir);
 }
+
+TEST_CASE("StorageRuntime registers storage control handlers", "[storage][runtime]")
+{
+    using namespace bored::storage;
+
+    StorageTelemetryRegistry storage_registry;
+    WalTelemetryRegistry wal_registry;
+
+    auto wal_dir = make_temp_dir("bored_storage_runtime_control_");
+
+    StorageRuntimeConfig config{};
+    config.async_io.backend = AsyncIoBackend::ThreadPool;
+    config.async_io.worker_threads = 2U;
+    config.async_io.queue_depth = 8U;
+    config.wal_telemetry_registry = &wal_registry;
+    config.storage_telemetry_registry = &storage_registry;
+    config.control_telemetry_identifier = "runtime_control";
+
+    config.temp_manager.base_directory = wal_dir / "spill";
+
+    config.wal_writer.directory = wal_dir;
+    config.wal_writer.segment_size = 4U * kWalBlockSize;
+    config.wal_writer.buffer_size = 2U * kWalBlockSize;
+    config.wal_writer.size_flush_threshold = kWalBlockSize;
+    config.wal_writer.start_lsn = kWalBlockSize;
+    config.wal_writer.retention.retention_segments = 1U;
+    config.wal_writer.telemetry_identifier = "runtime_control_wal";
+    config.wal_writer.temp_cleanup_telemetry_identifier = "runtime_control_temp";
+
+    config.checkpoint_scheduler.min_interval = std::chrono::seconds(300);
+    config.checkpoint_scheduler.dirty_page_trigger = 0U;
+    config.checkpoint_scheduler.active_transaction_trigger = 0U;
+    config.checkpoint_scheduler.lsn_gap_trigger = kWalBlockSize;
+    config.checkpoint_scheduler.flush_after_emit = true;
+    config.checkpoint_scheduler.retention = config.wal_writer.retention;
+    config.checkpoint_scheduler.telemetry_identifier = "runtime_control_checkpoint";
+    config.checkpoint_scheduler.retention_telemetry_identifier = "runtime_control_retention";
+
+    StorageRuntime* runtime_ptr = nullptr;
+    config.checkpoint_snapshot_provider = [&runtime_ptr](CheckpointSnapshot& snapshot) -> std::error_code {
+        if (runtime_ptr == nullptr) {
+            return std::make_error_code(std::errc::not_connected);
+        }
+        auto writer = runtime_ptr->wal_writer();
+        if (!writer) {
+            return std::make_error_code(std::errc::not_connected);
+        }
+        snapshot.redo_lsn = writer->next_lsn();
+        snapshot.undo_lsn = writer->next_lsn();
+        snapshot.dirty_pages.clear();
+        snapshot.active_transactions.clear();
+        return {};
+    };
+
+    StorageRuntime runtime{config};
+    runtime_ptr = &runtime;
+    REQUIRE_FALSE(runtime.initialize());
+
+    WalRecordDescriptor descriptor{};
+    descriptor.type = WalRecordType::Abort;
+    descriptor.page_id = 42U;
+
+    WalAppendResult append_result{};
+    REQUIRE_FALSE(runtime.wal_writer()->append_record(descriptor, append_result));
+    REQUIRE_FALSE(runtime.wal_writer()->flush());
+
+    auto handlers = get_global_storage_control_handlers();
+    REQUIRE(static_cast<bool>(handlers.checkpoint));
+    REQUIRE(static_cast<bool>(handlers.retention));
+    REQUIRE(static_cast<bool>(handlers.recovery));
+
+    StorageCheckpointRequest checkpoint_request{};
+    checkpoint_request.force = true;
+    checkpoint_request.dry_run = false;
+    REQUIRE_FALSE(handlers.checkpoint(checkpoint_request));
+
+    StorageRetentionRequest retention_request{};
+    retention_request.include_index_retention = true;
+    REQUIRE_FALSE(handlers.retention(retention_request));
+
+    StorageRecoveryRequest recovery_request{};
+    recovery_request.run_redo = false;
+    recovery_request.run_undo = false;
+    recovery_request.cleanup_only = true;
+    REQUIRE_FALSE(handlers.recovery(recovery_request));
+
+    auto control_snapshot = storage_registry.aggregate_control();
+    CHECK(control_snapshot.checkpoint.attempts == 1U);
+    CHECK(control_snapshot.retention.attempts == 1U);
+    CHECK(control_snapshot.recovery.attempts == 1U);
+
+    runtime.shutdown();
+
+    handlers = get_global_storage_control_handlers();
+    CHECK_FALSE(static_cast<bool>(handlers.checkpoint));
+    CHECK_FALSE(static_cast<bool>(handlers.retention));
+    CHECK_FALSE(static_cast<bool>(handlers.recovery));
+
+    control_snapshot = storage_registry.aggregate_control();
+    CHECK(control_snapshot.checkpoint.attempts == 0U);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}

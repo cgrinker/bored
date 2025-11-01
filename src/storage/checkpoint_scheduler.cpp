@@ -133,7 +133,8 @@ std::shared_ptr<WalWriter> CheckpointScheduler::wal_writer() const noexcept
 std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_point now,
                                                const SnapshotProvider& provider,
                                                bool force,
-                                               std::optional<WalAppendResult>& out_result)
+                                               std::optional<WalAppendResult>& out_result,
+                                               std::optional<bool> dry_run_override)
 {
     out_result.reset();
 
@@ -255,7 +256,9 @@ std::error_code CheckpointScheduler::maybe_run(std::chrono::steady_clock::time_p
 
     CheckpointCoordinator::ActiveCheckpoint coordinator_checkpoint{};
     const bool use_coordinator = coordinator_ != nullptr;
-    const bool dry_run_only = config_.dry_run_only;
+    const bool dry_run_only = dry_run_override.has_value()
+        ? dry_run_override.value()
+        : config_.dry_run_only;
 
     txn::TransactionManager* transaction_manager = nullptr;
     if (use_coordinator && coordinator_ != nullptr) {

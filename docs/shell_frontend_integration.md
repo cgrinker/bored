@@ -46,7 +46,7 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 		- [x] 2025-10-31: Insert/update/delete/select command metrics now consume executor row counters and wal byte counters from executor telemetry; WAL byte propagation to disk-backed storage remains TODO until shell persistence lands.
 		- [x] 2025-10-31: Shell backend tests now assert non-zero DML row counters and WAL bytes, mirroring the smoke script workload so Release smoke runs surface telemetry regressions immediately.
 		- [x] 2025-10-31: Added `boredctl control` verbs for checkpoint, retention, and recovery in `src/tools/boredctl_main.cpp` with flaggable options ready for runtime wiring.
-		- [ ] Wire the new CLI verbs into the storage runtime so scheduler, retention, and recovery paths update command metrics and telemetry counters for shell-driven operations.
+		- [x] Wire the new CLI verbs into the storage runtime so scheduler, retention, and recovery paths update command metrics and telemetry counters for shell-driven operations. ✓ _2025-11-01: `StorageRuntime` now installs global control handlers that invoke the scheduler, retention hooks, and recovery driver while recording control telemetry snapshots._
 		- [ ] Refresh `docs/storage_shell_recipes.md` and `docs/storage_incident_playbooks.md` to document the supported CLI workflow and telemetry expectations.
 - **Iteration guidance**: if integrating planner and executor together is too large, split into subtasks (e.g., planning integration first, executor wiring second) and track them explicitly.
 

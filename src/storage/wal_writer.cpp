@@ -506,6 +506,11 @@ std::filesystem::path WalWriter::segment_path(std::uint64_t segment_id) const
     return make_segment_path(segment_id);
 }
 
+std::uint64_t WalWriter::current_segment_id() const noexcept
+{
+    return current_segment_id_;
+}
+
 WalWriterTelemetrySnapshot WalWriter::telemetry_snapshot() const
 {
     std::lock_guard guard(telemetry_mutex_);

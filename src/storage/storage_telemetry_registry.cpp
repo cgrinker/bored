@@ -186,6 +186,15 @@ TempCleanupTelemetrySnapshot& accumulate(TempCleanupTelemetrySnapshot& target, c
     return target;
 }
 
+StorageControlTelemetrySnapshot& accumulate(StorageControlTelemetrySnapshot& target,
+                                            const StorageControlTelemetrySnapshot& source)
+{
+    accumulate_operation(target.checkpoint, source.checkpoint);
+    accumulate_operation(target.retention, source.retention);
+    accumulate_operation(target.recovery, source.recovery);
+    return target;
+}
+
 DurabilityTelemetrySnapshot& accumulate(DurabilityTelemetrySnapshot& target, const DurabilityTelemetrySnapshot& source)
 {
     target.last_commit_lsn = std::max(target.last_commit_lsn, source.last_commit_lsn);
@@ -1071,6 +1080,54 @@ void StorageTelemetryRegistry::visit_planner(const PlannerVisitor& visitor) cons
             continue;
         }
         visitor(identifier, sampler());
+    }
+}
+
+void StorageTelemetryRegistry::register_control(std::string identifier, ControlSampler sampler)
+{
+    if (!sampler) {
+        return;
+    }
+    std::lock_guard guard(mutex_);
+    control_samplers_.insert_or_assign(std::move(identifier), std::move(sampler));
+}
+
+void StorageTelemetryRegistry::unregister_control(const std::string& identifier)
+{
+    std::lock_guard guard(mutex_);
+    control_samplers_.erase(identifier);
+}
+
+StorageControlTelemetrySnapshot StorageTelemetryRegistry::aggregate_control() const
+{
+    std::vector<ControlSampler> samplers;
+    {
+        std::lock_guard guard(mutex_);
+        samplers.reserve(control_samplers_.size());
+        for (const auto& [_, sampler] : control_samplers_) {
+            samplers.push_back(sampler);
+        }
+    }
+    return aggregate_snapshots<StorageControlTelemetrySnapshot>(samplers);
+}
+
+void StorageTelemetryRegistry::visit_control(const ControlVisitor& visitor) const
+{
+    if (!visitor) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, ControlSampler>> entries;
+    {
+        std::lock_guard guard(mutex_);
+        entries.reserve(control_samplers_.size());
+        for (const auto& [identifier, sampler] : control_samplers_) {
+            entries.emplace_back(identifier, sampler);
+        }
+    }
+
+    for (const auto& [identifier, sampler] : entries) {
+        visitor(identifier, sampler ? sampler() : StorageControlTelemetrySnapshot{});
     }
 }
 

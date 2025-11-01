@@ -125,6 +125,7 @@ public:
     [[nodiscard]] bool is_closed() const noexcept;
     [[nodiscard]] std::uint64_t next_lsn() const noexcept;
     [[nodiscard]] std::filesystem::path segment_path(std::uint64_t segment_id) const;
+    [[nodiscard]] std::uint64_t current_segment_id() const noexcept;
     [[nodiscard]] WalWriterTelemetrySnapshot telemetry_snapshot() const;
     [[nodiscard]] std::shared_ptr<WalDurabilityHorizon> durability_horizon() const noexcept;
 

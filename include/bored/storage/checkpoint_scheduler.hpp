@@ -57,7 +57,8 @@ public:
     [[nodiscard]] std::error_code maybe_run(std::chrono::steady_clock::time_point now,
                                             const SnapshotProvider& provider,
                                             bool force,
-                                            std::optional<WalAppendResult>& out_result);
+                                            std::optional<WalAppendResult>& out_result,
+                                            std::optional<bool> dry_run_override = std::nullopt);
 
     void update_retention_config(const WalRetentionConfig& config);
     [[nodiscard]] WalRetentionConfig retention_config() const noexcept;
