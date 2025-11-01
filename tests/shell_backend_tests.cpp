@@ -22,8 +22,10 @@ struct ShellBackendHarness final {
         auto create = engine.execute_sql("CREATE TABLE metrics (id BIGINT, counter BIGINT, name TEXT);");
         REQUIRE(create.success);
 
-        auto insert = engine.execute_sql("INSERT INTO metrics (id, counter, name) VALUES (1, 7, 'alpha');");
-        REQUIRE(insert.success);
+    auto insert = engine.execute_sql("INSERT INTO metrics (id, counter, name) VALUES (1, 7, 'alpha');");
+    REQUIRE(insert.success);
+    CHECK(insert.rows_touched == 1U);
+    CHECK(insert.wal_bytes > 0U);
     }
 
     ShellBackend backend{};
@@ -43,6 +45,8 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for SELECT")
 
     const auto metrics = harness.engine.execute_sql("SELECT id, counter FROM metrics;");
     REQUIRE(metrics.success);
+    CHECK(metrics.rows_touched == 1U);
+    CHECK(metrics.wal_bytes == 0U);
 
     auto logical_root_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "logical.root=");
@@ -83,6 +87,8 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for INSERT")
     const auto metrics = harness.engine.execute_sql("INSERT INTO metrics (id, counter, name) VALUES (2, 11, 'beta');");
     REQUIRE(metrics.success);
     CHECK_THAT(metrics.summary, ContainsSubstring("Inserted 1 row"));
+    CHECK(metrics.rows_touched == 1U);
+    CHECK(metrics.wal_bytes > 0U);
 
     auto logical_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "logical.insert");
@@ -115,6 +121,8 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
 
     const auto metrics = harness.engine.execute_sql("UPDATE metrics SET counter = counter + 1 WHERE id = 1;");
     REQUIRE(metrics.success);
+    CHECK(metrics.rows_touched == 1U);
+    CHECK(metrics.wal_bytes > 0U);
 
     auto logical_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "logical.update");
@@ -151,6 +159,8 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
     const auto metrics = harness.engine.execute_sql("DELETE FROM metrics WHERE id = 1;");
     REQUIRE(metrics.success);
     CHECK_THAT(metrics.summary, ContainsSubstring("Deleted 1 row"));
+    CHECK(metrics.rows_touched == 1U);
+    CHECK(metrics.wal_bytes > 0U);
 
     auto logical_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "logical.delete");
@@ -186,20 +196,30 @@ TEST_CASE("ShellBackend executes DML statements when preceded by comments")
     const auto insert = harness.engine.execute_sql("-- leading comment for insert\nINSERT INTO metrics (id, counter, name) VALUES (2, 3, 'beta');");
     REQUIRE(insert.success);
     CHECK_THAT(insert.summary, ContainsSubstring("Inserted 1 row"));
+    CHECK(insert.rows_touched == 1U);
+    CHECK(insert.wal_bytes > 0U);
 
     const auto update = harness.engine.execute_sql("/* block comment before update */\nUPDATE metrics SET counter = counter + 4 WHERE id = 2;");
     REQUIRE(update.success);
     CHECK_THAT(update.summary, ContainsSubstring("Updated 1 row"));
+    CHECK(update.rows_touched == 1U);
+    CHECK(update.wal_bytes > 0U);
 
     const auto select = harness.engine.execute_sql("-- leading comment for select\nSELECT id, counter FROM metrics;");
     REQUIRE(select.success);
     CHECK_THAT(select.summary, ContainsSubstring("Selected 2 rows"));
+    CHECK(select.rows_touched == 2U);
+    CHECK(select.wal_bytes == 0U);
 
     const auto remove = harness.engine.execute_sql("/* removal comment */\nDELETE FROM metrics WHERE id = 2;");
     REQUIRE(remove.success);
     CHECK_THAT(remove.summary, ContainsSubstring("Deleted 1 row"));
+    CHECK(remove.rows_touched == 1U);
+    CHECK(remove.wal_bytes > 0U);
 
     const auto final_select = harness.engine.execute_sql("SELECT id FROM metrics;");
     REQUIRE(final_select.success);
     CHECK_THAT(final_select.summary, ContainsSubstring("Selected 1 row"));
+    CHECK(final_select.rows_touched == 1U);
+    CHECK(final_select.wal_bytes == 0U);
 }
