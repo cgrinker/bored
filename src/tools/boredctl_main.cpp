@@ -1,5 +1,6 @@
 #include "bored/catalog/catalog_introspection.hpp"
 #include "bored/storage/lock_introspection.hpp"
+#include "bored/storage/storage_control.hpp"
 #include "bored/storage/storage_diagnostics.hpp"
 #include "bored/storage/storage_metrics.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
@@ -422,19 +423,43 @@ void run_diagnostics_repl(bool allow_mock)
     }
 }
 
-std::error_code run_checkpoint_control(bool /*force*/, bool /*dry_run*/)
+std::error_code run_checkpoint_control(bool force, bool dry_run)
 {
-    return std::make_error_code(std::errc::operation_not_permitted);
+    const auto handlers = bored::storage::get_global_storage_control_handlers();
+    if (!handlers.checkpoint) {
+        return std::make_error_code(std::errc::operation_not_permitted);
+    }
+
+    bored::storage::StorageCheckpointRequest request{};
+    request.force = force;
+    request.dry_run = dry_run;
+    return handlers.checkpoint(request);
 }
 
-std::error_code run_retention_control()
+std::error_code run_retention_control(bool include_index_retention)
 {
-    return std::make_error_code(std::errc::operation_not_permitted);
+    const auto handlers = bored::storage::get_global_storage_control_handlers();
+    if (!handlers.retention) {
+        return std::make_error_code(std::errc::operation_not_permitted);
+    }
+
+    bored::storage::StorageRetentionRequest request{};
+    request.include_index_retention = include_index_retention;
+    return handlers.retention(request);
 }
 
-std::error_code run_recovery_control(bool /*redo*/, bool /*undo*/, bool /*cleanup_only*/)
+std::error_code run_recovery_control(bool redo, bool undo, bool cleanup_only)
 {
-    return std::make_error_code(std::errc::operation_not_permitted);
+    const auto handlers = bored::storage::get_global_storage_control_handlers();
+    if (!handlers.recovery) {
+        return std::make_error_code(std::errc::operation_not_permitted);
+    }
+
+    bored::storage::StorageRecoveryRequest request{};
+    request.run_redo = redo;
+    request.run_undo = undo;
+    request.cleanup_only = cleanup_only;
+    return handlers.recovery(request);
 }
 
 }  // namespace
@@ -512,8 +537,14 @@ int main(int argc, char** argv)
     control->require_subcommand(1);
 
     auto* checkpoint_control = control->add_subcommand("checkpoint", "Request a checkpoint run");
+    bool checkpoint_force = true;
+    bool checkpoint_dry_run = false;
+    checkpoint_control->add_option("--force", checkpoint_force, "Force checkpoint evaluation (default true)")
+        ->default_val("true");
+    checkpoint_control->add_option("--dry-run", checkpoint_dry_run, "Collect checkpoint telemetry without emitting WAL")
+        ->default_val("false");
     checkpoint_control->callback([&]() {
-        auto ec = run_checkpoint_control(true, false);
+        auto ec = run_checkpoint_control(checkpoint_force, checkpoint_dry_run);
         if (ec) {
             std::ostringstream stream;
             stream << "checkpoint request failed: " << ec.message();
@@ -523,8 +554,11 @@ int main(int argc, char** argv)
     });
 
     auto* retention_control = control->add_subcommand("retention", "Trigger WAL retention using current policy");
+    bool retention_include_index = true;
+    retention_control->add_option("--index", retention_include_index, "Include index retention pass (default true)")
+        ->default_val("true");
     retention_control->callback([&]() {
-        auto ec = run_retention_control();
+        auto ec = run_retention_control(retention_include_index);
         if (ec) {
             std::ostringstream stream;
             stream << "retention request failed: " << ec.message();
@@ -534,8 +568,17 @@ int main(int argc, char** argv)
     });
 
     auto* recovery_control = control->add_subcommand("recovery", "Run a recovery planning pass");
+    bool recovery_redo = true;
+    bool recovery_undo = true;
+    bool recovery_cleanup_only = false;
+    recovery_control->add_option("--redo", recovery_redo, "Run redo planning (default true)")
+        ->default_val("true");
+    recovery_control->add_option("--undo", recovery_undo, "Run undo planning (default true)")
+        ->default_val("true");
+    recovery_control->add_option("--cleanup-only", recovery_cleanup_only, "Cleanup temporary state without planning redo/undo")
+        ->default_val("false");
     recovery_control->callback([&]() {
-        auto ec = run_recovery_control(true, true, false);
+        auto ec = run_recovery_control(recovery_redo, recovery_undo, recovery_cleanup_only);
         if (ec) {
             std::ostringstream stream;
             stream << "recovery request failed: " << ec.message();

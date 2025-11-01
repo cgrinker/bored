@@ -54,6 +54,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/wal_retention.cpp
     src/storage/wal_telemetry_registry.cpp
     src/storage/storage_runtime.cpp
+    src/storage/storage_control.cpp
     src/storage/storage_telemetry_registry.cpp
     src/storage/storage_diagnostics.cpp
     src/storage/storage_metrics.cpp
