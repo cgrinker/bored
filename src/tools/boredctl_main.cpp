@@ -19,6 +19,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -421,6 +422,21 @@ void run_diagnostics_repl(bool allow_mock)
     }
 }
 
+std::error_code run_checkpoint_control(bool /*force*/, bool /*dry_run*/)
+{
+    return std::make_error_code(std::errc::operation_not_permitted);
+}
+
+std::error_code run_retention_control()
+{
+    return std::make_error_code(std::errc::operation_not_permitted);
+}
+
+std::error_code run_recovery_control(bool /*redo*/, bool /*undo*/, bool /*cleanup_only*/)
+{
+    return std::make_error_code(std::errc::operation_not_permitted);
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -490,6 +506,42 @@ int main(int argc, char** argv)
     repl->add_flag("--live", repl_live_only, "Require a live registry (disable mock fallback)");
     repl->callback([&]() {
         run_diagnostics_repl(!repl_live_only);
+    });
+
+    auto* control = app.add_subcommand("control", "Storage control commands");
+    control->require_subcommand(1);
+
+    auto* checkpoint_control = control->add_subcommand("checkpoint", "Request a checkpoint run");
+    checkpoint_control->callback([&]() {
+        auto ec = run_checkpoint_control(true, false);
+        if (ec) {
+            std::ostringstream stream;
+            stream << "checkpoint request failed: " << ec.message();
+            throw std::runtime_error(stream.str());
+        }
+        std::cout << "Checkpoint requested." << '\n';
+    });
+
+    auto* retention_control = control->add_subcommand("retention", "Trigger WAL retention using current policy");
+    retention_control->callback([&]() {
+        auto ec = run_retention_control();
+        if (ec) {
+            std::ostringstream stream;
+            stream << "retention request failed: " << ec.message();
+            throw std::runtime_error(stream.str());
+        }
+        std::cout << "Retention run requested." << '\n';
+    });
+
+    auto* recovery_control = control->add_subcommand("recovery", "Run a recovery planning pass");
+    recovery_control->callback([&]() {
+        auto ec = run_recovery_control(true, true, false);
+        if (ec) {
+            std::ostringstream stream;
+            stream << "recovery request failed: " << ec.message();
+            throw std::runtime_error(stream.str());
+        }
+        std::cout << "Recovery plan requested." << '\n';
     });
 
     try {

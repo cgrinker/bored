@@ -42,10 +42,12 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 		- 2025-10-31: `execute_insert`, `execute_update`, `execute_delete`, and `execute_select` now build physical plans via `plan_query` and drain them through real executor pipelines; SELECT renders results from sequential scan output while the in-memory cache remains the backing store.
 	2. [x] Remove the in-memory `TableData::rows` mutation logic once executor pipelines write/read from catalog-backed storage or executor buffers.
 		- 2025-10-31: Shell DML now reads/writes table payloads via `InMemoryCatalogStorage`; the row cache has been removed and sequential scans stream executor tuples directly from storage.
-	3. Validate telemetry propagation by asserting `CommandMetrics.rows_touched`/`wal_bytes` reflect executor metrics in updated end-to-end tests.
-		- 2025-10-31: Insert/update/delete/select command metrics now consume executor row counters and wal byte counters from executor telemetry; WAL byte propagation to disk-backed storage remains TODO until shell persistence lands.
-		- 2025-10-31: Shell backend tests now assert non-zero DML row counters and WAL bytes, mirroring the smoke script workload so Release smoke runs surface telemetry regressions immediately.
-		- Next task: extend CLI JSON logging coverage to assert DML `wal_bytes` telemetry appears in `--log-json` output for automation.
+    3. Validate telemetry propagation by asserting `CommandMetrics.rows_touched`/`wal_bytes` reflect executor metrics in updated end-to-end tests.
+		- [x] 2025-10-31: Insert/update/delete/select command metrics now consume executor row counters and wal byte counters from executor telemetry; WAL byte propagation to disk-backed storage remains TODO until shell persistence lands.
+		- [x] 2025-10-31: Shell backend tests now assert non-zero DML row counters and WAL bytes, mirroring the smoke script workload so Release smoke runs surface telemetry regressions immediately.
+		- [ ] Add retention, checkpoint, and recovery control verbs to `src/tools/boredctl_main.cpp` so shell telemetry hooks expose operator triggers.
+		- [ ] Wire the new CLI verbs into the storage runtime so scheduler, retention, and recovery paths update command metrics and telemetry counters for shell-driven operations.
+		- [ ] Refresh `docs/storage_shell_recipes.md` and `docs/storage_incident_playbooks.md` to document the supported CLI workflow and telemetry expectations.
 - **Iteration guidance**: if integrating planner and executor together is too large, split into subtasks (e.g., planning integration first, executor wiring second) and track them explicitly.
 
 ## Milestone 3 — Persistent Storage Backend _(Status: Planned)_
