@@ -100,6 +100,7 @@ TEST_CASE("WalCommitPipeline flushes staged commit to WAL", "[txn][wal]")
     request.next_transaction_id = 43U;
     request.oldest_active_transaction_id = 24U;
     request.snapshot.read_lsn = 77U;
+    request.oldest_snapshot_read_lsn = request.snapshot.read_lsn;
 
     const auto initial_lsn = writer->next_lsn();
 
@@ -146,7 +147,7 @@ TEST_CASE("WalCommitPipeline flushes staged commit to WAL", "[txn][wal]")
     CHECK(decoded->commit_lsn == ticket.commit_sequence);
     CHECK(decoded->next_transaction_id == request.next_transaction_id);
     CHECK(decoded->oldest_active_transaction_id == request.oldest_active_transaction_id);
-    CHECK(decoded->oldest_active_commit_lsn == request.snapshot.read_lsn);
+    CHECK(decoded->oldest_active_commit_lsn == request.oldest_snapshot_read_lsn);
 
     auto close_ec = writer->close();
     CHECK_FALSE(close_ec);
@@ -174,6 +175,7 @@ TEST_CASE("WalCommitPipeline default hook advances durability horizon", "[txn][w
     request.next_transaction_id = 92U;
     request.oldest_active_transaction_id = 60U;
     request.snapshot.read_lsn = 1234U;
+    request.oldest_snapshot_read_lsn = request.snapshot.read_lsn;
 
     bored::txn::CommitTicket ticket{};
     REQUIRE_FALSE(pipeline.prepare_commit(request, ticket));
@@ -181,7 +183,7 @@ TEST_CASE("WalCommitPipeline default hook advances durability horizon", "[txn][w
     pipeline.confirm_commit(ticket);
 
     CHECK(horizon->last_commit_lsn() == ticket.commit_sequence);
-    CHECK(horizon->oldest_active_commit_lsn() == request.snapshot.read_lsn);
+    CHECK(horizon->oldest_active_commit_lsn() == request.oldest_snapshot_read_lsn);
     CHECK(horizon->last_commit_segment_id() == 0U);
 
     REQUIRE_FALSE(writer->close());
@@ -211,6 +213,7 @@ TEST_CASE("WalCommitPipeline publishes durability telemetry", "[txn][wal]")
     request.next_transaction_id = 402U;
     request.oldest_active_transaction_id = 250U;
     request.snapshot.read_lsn = 2048U;
+    request.oldest_snapshot_read_lsn = request.snapshot.read_lsn;
 
     bored::txn::CommitTicket ticket{};
     REQUIRE_FALSE(pipeline.prepare_commit(request, ticket));
@@ -219,7 +222,7 @@ TEST_CASE("WalCommitPipeline publishes durability telemetry", "[txn][wal]")
 
     const auto snapshot = registry.aggregate_durability_horizons();
     CHECK(snapshot.last_commit_lsn == ticket.commit_sequence);
-    CHECK(snapshot.oldest_active_commit_lsn == request.snapshot.read_lsn);
+    CHECK(snapshot.oldest_active_commit_lsn == request.oldest_snapshot_read_lsn);
     CHECK(snapshot.last_commit_segment_id == 0U);
 
     REQUIRE_FALSE(writer->close());
@@ -244,6 +247,7 @@ TEST_CASE("WalCommitPipeline rollback restores staged state", "[txn][wal]")
     request.next_transaction_id = 513U;
     request.oldest_active_transaction_id = 256U;
     request.snapshot.read_lsn = 2048U;
+    request.oldest_snapshot_read_lsn = request.snapshot.read_lsn;
 
     const auto initial_lsn = writer->next_lsn();
 

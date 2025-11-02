@@ -11,6 +11,7 @@ struct CommitRequest final {
     Snapshot snapshot{};
     TransactionId next_transaction_id = 0U;
     TransactionId oldest_active_transaction_id = 0U;
+    CommitSequence oldest_snapshot_read_lsn = 0U;
 };
 
 struct CommitTicket final {

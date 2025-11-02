@@ -70,9 +70,10 @@ std::error_code WalCommitPipeline::prepare_commit(const CommitRequest& request, 
     pending.header.commit_lsn = wal_writer_->next_lsn();
     pending.header.next_transaction_id = request.next_transaction_id;
     pending.header.oldest_active_transaction_id = request.oldest_active_transaction_id;
-    pending.header.oldest_active_commit_lsn = request.snapshot.read_lsn != 0U
-        ? request.snapshot.read_lsn
-        : pending.header.commit_lsn;
+    const auto retention_guard_lsn = request.oldest_snapshot_read_lsn != 0U
+        ? request.oldest_snapshot_read_lsn
+        : (request.snapshot.read_lsn != 0U ? request.snapshot.read_lsn : pending.header.commit_lsn);
+    pending.header.oldest_active_commit_lsn = retention_guard_lsn;
 
     auto ec = wal_writer_->stage_commit_record(pending.header, pending.append_result, pending.stage);
     if (ec) {

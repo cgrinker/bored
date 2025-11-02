@@ -13,11 +13,13 @@ namespace {
 class RecordingCommitPipeline final : public bored::txn::CommitPipeline {
 public:
     std::vector<std::string> events;
+    std::vector<bored::txn::CommitRequest> prepared_requests;
     bored::txn::CommitTicket confirmed_ticket{};
 
     std::error_code prepare_commit(const bored::txn::CommitRequest& request, bored::txn::CommitTicket& out_ticket) override
     {
         events.emplace_back("prepare");
+        prepared_requests.push_back(request);
         out_ticket.transaction_id = request.transaction_id;
         out_ticket.commit_sequence = 101U;
         return {};
@@ -293,6 +295,30 @@ TEST_CASE("TransactionManager commit drives commit pipeline", "[txn]")
     auto telemetry = manager.telemetry_snapshot();
     CHECK(telemetry.committed_transactions == 1U);
     CHECK(telemetry.aborted_transactions == 0U);
+}
+
+TEST_CASE("TransactionManager provides oldest snapshot read lsn to commit pipeline", "[txn]")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{300U};
+    RecordingCommitPipeline pipeline{};
+    bored::txn::TransactionManager manager{allocator, &pipeline};
+
+    auto guard = manager.begin();
+    auto first = manager.begin();
+
+    manager.commit(first);
+    REQUIRE_FALSE(pipeline.prepared_requests.empty());
+    const auto first_request = pipeline.prepared_requests.back();
+    CHECK(first_request.oldest_snapshot_read_lsn == guard.snapshot().read_lsn);
+
+    auto second = manager.begin();
+    manager.commit(second);
+    REQUIRE(pipeline.prepared_requests.size() >= 2U);
+    const auto second_request = pipeline.prepared_requests.back();
+    CHECK(second_request.oldest_snapshot_read_lsn == guard.snapshot().read_lsn);
+    CHECK(second_request.snapshot.read_lsn == manager.durable_commit_lsn());
+
+    manager.commit(guard);
 }
 
 TEST_CASE("TransactionManager commit failure rolls back pipeline", "[txn]")

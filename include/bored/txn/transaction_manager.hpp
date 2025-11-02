@@ -123,6 +123,8 @@ private:
     void recompute_oldest_locked();
     std::size_t count_active_locked() const;
     Snapshot build_snapshot_locked(TransactionId self_id) const;
+    CommitSequence oldest_snapshot_lsn_locked(TransactionId exclude_id,
+                                              CommitSequence fallback) const;
     void complete_abort(TransactionContext& ctx);
     [[noreturn]] void fail_commit(TransactionContext& ctx, const char* stage, std::error_code ec);
     void update_durable_commit_lsn(CommitSequence commit_lsn) noexcept;

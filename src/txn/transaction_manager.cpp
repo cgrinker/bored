@@ -238,6 +238,7 @@ void TransactionManager::commit(TransactionContext& ctx)
             request.snapshot = state->snapshot;
             request.next_transaction_id = id_allocator_ != nullptr ? id_allocator_->peek_next() : 0U;
             request.oldest_active_transaction_id = oldest_active_ != 0U ? oldest_active_ : external_low_water_mark_;
+            request.oldest_snapshot_read_lsn = oldest_snapshot_lsn_locked(state->id, request.snapshot.read_lsn);
         }
     }
 
@@ -558,6 +559,36 @@ std::size_t TransactionManager::count_active_locked() const
         ++it;
     }
     return count;
+}
+
+CommitSequence TransactionManager::oldest_snapshot_lsn_locked(TransactionId exclude_id,
+                                                              CommitSequence fallback) const
+{
+    CommitSequence candidate = 0U;
+    bool found = false;
+    for (auto it = active_.begin(); it != active_.end();) {
+        auto shared = it->second.lock();
+        if (!shared) {
+            it = active_.erase(it);
+            continue;
+        }
+        if (it->first == exclude_id) {
+            ++it;
+            continue;
+        }
+        const auto read_lsn = shared->snapshot.read_lsn;
+        if (!found || read_lsn < candidate) {
+            candidate = read_lsn;
+            found = true;
+        }
+        ++it;
+    }
+
+    if (!found) {
+        candidate = fallback != 0U ? fallback : durable_commit_lsn_.load(std::memory_order_acquire);
+    }
+
+    return candidate;
 }
 
 Snapshot TransactionManager::build_snapshot_locked(TransactionId self_id) const
