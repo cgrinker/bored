@@ -3,6 +3,7 @@
 #include "bored/catalog/catalog_ids.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <string_view>
 
 namespace bored::catalog {
@@ -22,6 +23,14 @@ enum class CatalogTableType : std::uint16_t {
 enum class CatalogIndexType : std::uint16_t {
     Unknown = 0,
     BTree = 1
+};
+
+enum class CatalogConstraintType : std::uint16_t {
+    Unknown = 0,
+    PrimaryKey = 1,
+    Unique = 2,
+    ForeignKey = 3,
+    Check = 4
 };
 
 enum class CatalogColumnType : std::uint32_t {
@@ -142,6 +151,81 @@ struct CatalogIndexDescriptor final {
         , root_page_id{root_page}
         , max_fanout{fanout}
         , comparator{comparator_view}
+        , name{name_view}
+    {}
+};
+
+struct CatalogConstraintDescriptor final {
+    CatalogTupleDescriptor tuple{};
+    ConstraintId constraint_id{};
+    RelationId relation_id{};
+    CatalogConstraintType constraint_type = CatalogConstraintType::Unknown;
+    IndexId backing_index_id{};
+    RelationId referenced_relation_id{};
+    std::string_view key_columns{};
+    std::string_view referenced_columns{};
+    std::string_view name{};
+
+    constexpr CatalogConstraintDescriptor() = default;
+    constexpr CatalogConstraintDescriptor(const CatalogTupleDescriptor& tuple_descriptor,
+                                         ConstraintId constraint,
+                                         RelationId relation,
+                                         CatalogConstraintType type,
+                                         IndexId backing_index,
+                                         RelationId referenced_relation,
+                                         std::string_view key_columns_view,
+                                         std::string_view referenced_columns_view,
+                                         std::string_view name_view) noexcept
+        : tuple{tuple_descriptor}
+        , constraint_id{constraint}
+        , relation_id{relation}
+        , constraint_type{type}
+        , backing_index_id{backing_index}
+        , referenced_relation_id{referenced_relation}
+        , key_columns{key_columns_view}
+        , referenced_columns{referenced_columns_view}
+        , name{name_view}
+    {}
+};
+
+struct CatalogSequenceDescriptor final {
+    CatalogTupleDescriptor tuple{};
+    SequenceId sequence_id{};
+    SchemaId schema_id{};
+    RelationId owning_relation_id{};
+    ColumnId owning_column_id{};
+    std::uint64_t start_value = 1U;
+    std::int64_t increment = 1;
+    std::uint64_t min_value = 1U;
+    std::uint64_t max_value = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t cache_size = 1U;
+    bool cycle = false;
+    std::string_view name{};
+
+    constexpr CatalogSequenceDescriptor() = default;
+    constexpr CatalogSequenceDescriptor(const CatalogTupleDescriptor& tuple_descriptor,
+                                       SequenceId sequence,
+                                       SchemaId schema,
+                                       RelationId owning_relation,
+                                       ColumnId owning_column,
+                                       std::uint64_t start,
+                                       std::int64_t increment_value,
+                                       std::uint64_t min,
+                                       std::uint64_t max,
+                                       std::uint64_t cache,
+                                       bool cycle_flag,
+                                       std::string_view name_view) noexcept
+        : tuple{tuple_descriptor}
+        , sequence_id{sequence}
+        , schema_id{schema}
+        , owning_relation_id{owning_relation}
+        , owning_column_id{owning_column}
+        , start_value{start}
+        , increment{increment_value}
+        , min_value{min}
+        , max_value{max}
+        , cache_size{cache}
+        , cycle{cycle_flag}
         , name{name_view}
     {}
 };

@@ -2,13 +2,13 @@
 
 _Last updated: 2025-11-02_
 
-Latest validation: Release `ctest` (402/402) on 2025-11-02.
+Latest validation: Debug `ctest` (406/406) on 2025-11-02.
 
 ## Current Capabilities
 
 - **Storage Durability**: WAL writer/reader/replayer pipeline complete with retention, checkpoint scheduling, crash recovery, and page manager integration.
 - **Catalog & DDL**: Persistent catalog with fully wired DDL handlers (create/alter/drop) for schemas, tables, and indexes, including restart-safe catalog bootstrap.
-- **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell INSERT/UPDATE/DELETE/SELECT flows now execute on live transaction contexts with executor snapshots; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard now propagates oldest reader LSNs and multi-statement orchestration remains.
+- **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell now supports BEGIN/COMMIT/ROLLBACK so INSERT/UPDATE/DELETE/SELECT flows can share session-scoped transactions with executor snapshots; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard now propagates oldest reader LSNs while cross-session isolation and deadlock handling remain on the roadmap.
 - **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs; binder resolves identifiers and types; lowering and normalization stages generate logical plans for select/join queries.
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators.
 - **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up.
@@ -39,7 +39,8 @@ Latest validation: Release `ctest` (402/402) on 2025-11-02.
    - Shell DML and SELECT pipelines now share live TransactionManager contexts with catalog cache refreshes and planner/executor visibility checks.
    - Added regression coverage verifying catalog accessor tuples are re-evaluated when snapshots advance without extra scans.
    - Wired snapshot-aware retention guard through the commit pipeline so WAL retention honors active reader horizons.
-   - Next: extend crash/restart drills for undo walker coverage and formalize multi-statement transaction orchestration.
+   - Landed multi-page crash drill verifying committed pages replay while in-flight pages roll back with fragment-aware undo.
+   - Next: broaden undo walker crash drills across overflow chains and add regression cases for session rollback edge conditions.
 
 2. **Constraint & Sequence Foundations**
    - Extend catalog metadata for constraints and sequences; persist via WAL and recovery hooks.

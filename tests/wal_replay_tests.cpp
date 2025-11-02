@@ -1699,6 +1699,169 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
+TEST_CASE("Wal crash drill replays committed page and rolls back in-flight page")
+{
+    using namespace bored::storage;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_crash_multi_page_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 128U * kWalBlockSize;
+    config.buffer_size = 2U * kWalBlockSize;
+    config.start_lsn = kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_a_id = 565656U;
+    constexpr std::uint32_t page_b_id = 575757U;
+
+    alignas(8) std::array<std::byte, kPageSize> page_a_buffer{};
+    alignas(8) std::array<std::byte, kPageSize> page_b_buffer{};
+
+    auto page_a_span = std::span<std::byte>(page_a_buffer.data(), page_a_buffer.size());
+    auto page_b_span = std::span<std::byte>(page_b_buffer.data(), page_b_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_a_span, PageType::Table, page_a_id));
+    REQUIRE_FALSE(manager.initialize_page(page_b_span, PageType::Table, page_b_id));
+
+    std::vector<std::byte> committed_payload(384U);
+    for (std::size_t index = 0; index < committed_payload.size(); ++index) {
+        committed_payload[index] = static_cast<std::byte>((index * 13U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult committed_insert{};
+    REQUIRE_FALSE(manager.insert_tuple(page_a_span,
+                                       std::span<const std::byte>(committed_payload.data(), committed_payload.size()),
+                                       0xAA0001ULL,
+                                       committed_insert));
+
+    const auto committed_snapshot_a = page_a_buffer;
+    const auto committed_free_bytes_a = fsm.current_free_bytes(page_a_id);
+
+    auto commit_header_a = make_commit_header(wal_writer, page_a_id, page_a_id + 1U, page_a_id);
+    WalAppendResult commit_result_a{};
+    REQUIRE_FALSE(wal_writer->append_commit_record(commit_header_a, commit_result_a));
+
+    const auto baseline_page_b = page_b_buffer;
+    const auto baseline_free_bytes_b = fsm.current_free_bytes(page_b_id);
+    const auto baseline_fragment_count_b = fsm.current_fragment_count(page_b_id);
+
+    std::vector<std::byte> inflight_payload(256U);
+    for (std::size_t index = 0; index < inflight_payload.size(); ++index) {
+        inflight_payload[index] = static_cast<std::byte>((index * 7U) & 0xFFU);
+    }
+
+    PageManager::TupleInsertResult inflight_insert{};
+    REQUIRE_FALSE(manager.insert_tuple(page_b_span,
+                                       std::span<const std::byte>(inflight_payload.data(), inflight_payload.size()),
+                                       0xBB0002ULL,
+                                       inflight_insert));
+
+    const auto crash_free_bytes_b = fsm.current_free_bytes(page_b_id);
+    const auto crash_fragment_count_b = fsm.current_fragment_count(page_b_id);
+
+    const auto crash_page_a = page_a_buffer;
+    const auto crash_page_b = page_b_buffer;
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    REQUIRE(plan.transactions.size() == 2U);
+
+    auto find_transaction = [&](std::uint64_t id) -> const WalRecoveredTransaction* {
+        const auto it = std::find_if(plan.transactions.begin(), plan.transactions.end(), [&](const WalRecoveredTransaction& txn) {
+            return txn.transaction_id == id;
+        });
+        return it != plan.transactions.end() ? &(*it) : nullptr;
+    };
+
+    const auto* committed_tx = find_transaction(page_a_id);
+    REQUIRE(committed_tx != nullptr);
+    CHECK(committed_tx->state == WalRecoveredTransactionState::Committed);
+    CHECK(committed_tx->commit_lsn == commit_header_a.commit_lsn);
+
+    const auto* inflight_tx = find_transaction(page_b_id);
+    REQUIRE(inflight_tx != nullptr);
+    CHECK(inflight_tx->state == WalRecoveredTransactionState::InFlight);
+    CHECK_FALSE(inflight_tx->commit_record.has_value());
+
+    auto span_b = std::find_if(plan.undo_spans.begin(), plan.undo_spans.end(), [&](const WalUndoSpan& span) {
+        return span.owner_page_id == page_b_id;
+    });
+    REQUIRE(span_b != plan.undo_spans.end());
+    CHECK(span_b->count >= 1U);
+
+    auto span_a = std::find_if(plan.undo_spans.begin(), plan.undo_spans.end(), [&](const WalUndoSpan& span) {
+        return span.owner_page_id == page_a_id;
+    });
+    CHECK(span_a == plan.undo_spans.end());
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Table, &replay_fsm};
+    context.set_page(page_a_id, std::span<const std::byte>(crash_page_a.data(), crash_page_a.size()));
+    context.set_page(page_b_id, std::span<const std::byte>(crash_page_b.data(), crash_page_b.size()));
+    WalReplayer replayer{context};
+
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    auto replay_page_a = context.get_page(page_a_id);
+    auto replay_span_a = std::span<const std::byte>(replay_page_a.data(), replay_page_a.size());
+    auto directory_a = slot_directory(replay_span_a);
+    REQUIRE(committed_insert.slot.index < directory_a.size());
+    CHECK(directory_a[committed_insert.slot.index].length == committed_insert.slot.length);
+
+    auto restored_tuple_a = read_tuple(replay_span_a, committed_insert.slot.index);
+    REQUIRE(restored_tuple_a.size() == committed_payload.size());
+    REQUIRE(std::equal(restored_tuple_a.begin(), restored_tuple_a.end(), committed_payload.begin(), committed_payload.end()));
+
+    auto replay_header_a = page_header(replay_span_a);
+    auto baseline_span_a = std::span<const std::byte>(committed_snapshot_a.data(), committed_snapshot_a.size());
+    auto baseline_header_a = page_header(baseline_span_a);
+    CHECK(replay_header_a.tuple_count == baseline_header_a.tuple_count);
+    CHECK(replay_fsm.current_free_bytes(page_a_id) == committed_free_bytes_a);
+
+    auto replay_page_b = context.get_page(page_b_id);
+    auto replay_span_b = std::span<const std::byte>(replay_page_b.data(), replay_page_b.size());
+    auto directory_b = slot_directory(replay_span_b);
+    REQUIRE(inflight_insert.slot.index < directory_b.size());
+    CHECK(directory_b[inflight_insert.slot.index].length == 0U);
+
+    auto undone_tuple = read_tuple(replay_span_b, inflight_insert.slot.index);
+    CHECK(undone_tuple.empty());
+
+    auto replay_header_b = page_header(replay_span_b);
+    auto baseline_span_b = std::span<const std::byte>(baseline_page_b.data(), baseline_page_b.size());
+    auto baseline_header_b = page_header(baseline_span_b);
+    auto crash_span_b = std::span<const std::byte>(crash_page_b.data(), crash_page_b.size());
+    auto crash_header_b = page_header(crash_span_b);
+
+    REQUIRE(crash_header_b.tuple_count == static_cast<std::uint16_t>(baseline_header_b.tuple_count + 1U));
+    CHECK(baseline_fragment_count_b == 0U);
+    CHECK(crash_fragment_count_b == baseline_fragment_count_b);
+    CHECK(crash_free_bytes_b < baseline_free_bytes_b);
+    CHECK(crash_header_b.fragment_count == crash_fragment_count_b);
+
+    const auto expected_fragment_count_b = static_cast<std::uint16_t>(crash_fragment_count_b + 1U);
+    // Undo leaves a fragment so free space metrics remain at their crash-time values.
+    CHECK(replay_header_b.tuple_count == crash_header_b.tuple_count);
+    CHECK(replay_header_b.free_start == crash_header_b.free_start);
+    CHECK(replay_header_b.free_end == crash_header_b.free_end);
+    CHECK(replay_header_b.fragment_count == expected_fragment_count_b);
+    CHECK(replay_fsm.current_free_bytes(page_b_id) == crash_free_bytes_b);
+    CHECK(replay_fsm.current_fragment_count(page_b_id) == expected_fragment_count_b);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
 TEST_CASE("Wal crash drill restores overflow tuple metadata")
 {
     auto io = make_async_io();

@@ -210,6 +210,7 @@ if(BORED_ENABLE_TESTS)
         tests/index_wal_payload_tests.cpp
         tests/catalog_ddl_tests.cpp
         tests/catalog_cache_tests.cpp
+        tests/catalog_encoding_tests.cpp
     tests/catalog_mutator_tests.cpp
     tests/catalog_checkpoint_registry_tests.cpp
     tests/index_checkpoint_registry_tests.cpp
