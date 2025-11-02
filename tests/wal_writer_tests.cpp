@@ -327,7 +327,7 @@ TEST_CASE("WalWriter flushes on time interval")
     config.segment_size = 4U * bored::storage::kWalBlockSize;
     config.buffer_size = 2U * bored::storage::kWalBlockSize;
     config.size_flush_threshold = 0U;
-    config.time_flush_interval = std::chrono::milliseconds{5};
+    config.time_flush_interval = std::chrono::milliseconds{50};
     config.flush_on_commit = false;
 
     WalWriter writer{io, config};
@@ -346,15 +346,24 @@ TEST_CASE("WalWriter flushes on time interval")
 
     auto segment = writer.segment_path(0U);
     REQUIRE(std::filesystem::exists(segment));
+
+    auto flushes_before = writer.telemetry_snapshot().flush_calls;
     auto bytes_before = read_file_bytes(segment);
     const auto* header_before = reinterpret_cast<const WalSegmentHeader*>(bytes_before.data());
-    REQUIRE(header_before->end_lsn == config.start_lsn);
+    if (flushes_before == 0U) {
+        REQUIRE(header_before->end_lsn == config.start_lsn);
+    } else {
+        REQUIRE(header_before->end_lsn == first.lsn + first.written_bytes);
+    }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    std::this_thread::sleep_for(config.time_flush_interval + std::chrono::milliseconds{50});
 
     WalAppendResult second{};
     ec = writer.append_record(descriptor, second);
     REQUIRE_FALSE(ec);
+
+    auto flushes_after = writer.telemetry_snapshot().flush_calls;
+    REQUIRE(flushes_after == flushes_before + 1U);
 
     auto bytes_after = read_file_bytes(segment);
     const auto* header_after = reinterpret_cast<const WalSegmentHeader*>(bytes_after.data());
