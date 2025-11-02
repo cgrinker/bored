@@ -42,20 +42,24 @@ The goal is to evolve `bored_shell` from a demo harness into a thin client over 
 		- 2025-10-31: `execute_insert`, `execute_update`, `execute_delete`, and `execute_select` now build physical plans via `plan_query` and drain them through real executor pipelines; SELECT renders results from sequential scan output while the in-memory cache remains the backing store.
 	2. [x] Remove the in-memory `TableData::rows` mutation logic once executor pipelines write/read from catalog-backed storage or executor buffers.
 		- 2025-10-31: Shell DML now reads/writes table payloads via `InMemoryCatalogStorage`; the row cache has been removed and sequential scans stream executor tuples directly from storage.
+		- 2025-11-02: Shell DML now persists catalog rows through the page-manager-backed `CatalogStorage`, mirroring server WAL + page mutations while executor scans stream from disk-backed buffers.
     3. Validate telemetry propagation by asserting `CommandMetrics.rows_touched`/`wal_bytes` reflect executor metrics in updated end-to-end tests.
 		- [x] 2025-10-31: Insert/update/delete/select command metrics now consume executor row counters and wal byte counters from executor telemetry; WAL byte propagation to disk-backed storage remains TODO until shell persistence lands.
 		- [x] 2025-10-31: Shell backend tests now assert non-zero DML row counters and WAL bytes, mirroring the smoke script workload so Release smoke runs surface telemetry regressions immediately.
 		- [x] 2025-10-31: Added `boredctl control` verbs for checkpoint, retention, and recovery in `src/tools/boredctl_main.cpp` with flaggable options ready for runtime wiring.
 		- [x] Wire the new CLI verbs into the storage runtime so scheduler, retention, and recovery paths update command metrics and telemetry counters for shell-driven operations. ✓ _2025-11-01: `StorageRuntime` now installs global control handlers that invoke the scheduler, retention hooks, and recovery driver while recording control telemetry snapshots._
-		- [ ] Refresh `docs/storage_shell_recipes.md` and `docs/storage_incident_playbooks.md` to document the supported CLI workflow and telemetry expectations.
+		- [x] Refresh `docs/storage_shell_recipes.md` and `docs/storage_incident_playbooks.md` to document the supported CLI workflow and telemetry expectations. ✓ _2025-11-01: Added boredctl control walkthroughs, telemetry capture guidance, and playbook mitigation steps for checkpoint, retention, and recovery verbs._
 - **Iteration guidance**: if integrating planner and executor together is too large, split into subtasks (e.g., planning integration first, executor wiring second) and track them explicitly.
 
-## Milestone 3 — Persistent Storage Backend _(Status: Planned)_
+## Milestone 3 — Persistent Storage Backend _(Status: In Progress)_
 - **Relevant code**: `src/storage/page_manager.cpp`, `src/storage/wal_writer.cpp`, `src/storage/wal_replayer.cpp`, IO configuration in `include/bored/storage/storage_configuration.hpp`, shell bootstrap in `src/shell/shell_backend.cpp`.
 - **Action items**
-	1. Replace `InMemoryCatalogStorage` with a bootstrap path that instantiates the page manager and WAL writer (mirroring the server runtime) and seeds catalog state via `catalog::CatalogBootstrap`.
+	1. [x] Replace `InMemoryCatalogStorage` with a bootstrap path that instantiates the page manager and WAL writer (mirroring the server runtime) and seeds catalog state via `catalog::CatalogBootstrap`.
+		- 2025-11-01: CatalogStorage teardown now preserves WAL telemetry registry lifetime so shell WAL writers close cleanly; Catch2 shell logging telemetry stays green under persistent storage.
+		- 2025-11-02: Shell backend now constructs `CatalogStorage` with async IO, WAL writer, page manager, and seeds catalog pages via `CatalogBootstrapper`; DDL + DML threads catalog mutations through page-managed buffers.
 	2. Extend CLI/config (`src/tools/bored_shell_main.cpp`) to accept database directories, WAL retention knobs, and IO_uring settings, and pass them to the backend.
-	3. Add integration tests (Catch2 or scripted) that start the shell on disk, execute the smoke script, restart the process, and verify catalog/data persistence.
+		- 2025-11-02: Backend honors persistence when directories are supplied programmatically; CLI flag plumbing for `--data-dir`, `--wal-dir`, retention knobs, and IO settings remains TODO.
+	3. [x] Add integration tests (Catch2 or scripted) that start the shell on disk, execute the smoke script, restart the process, and verify catalog/data persistence. ✓ _2025-11-02: Added `tests/shell_persistence_tests.cpp` covering restart/persistence; Release suite now passes with disk-backed catalog._
 - **Iteration guidance**: each step must have verifiable outputs (e.g., config flag recognized, test cases added). When a task cannot finish in one iteration, decompose it into labelled subtasks before committing code.
 
 ## Verification Checklist Template

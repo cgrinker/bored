@@ -8,11 +8,14 @@
 #include "bored/planner/physical_plan.hpp"
 #include "bored/shell/shell_engine.hpp"
 #include "bored/ddl/ddl_command.hpp"
+#include "bored/storage/async_io.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
+#include "bored/storage/wal_retention.hpp"
 #include "bored/storage/wal_telemetry_registry.hpp"
 #include "bored/txn/transaction_manager.hpp"
 #include "bored/txn/transaction_types.hpp"
 
+#include <chrono>
 #include <functional>
 #include <cstddef>
 #include <cstdint>
@@ -59,6 +62,13 @@ public:
         std::optional<catalog::SchemaId> default_schema_id{};
         std::filesystem::path storage_directory{};
         std::filesystem::path wal_directory{};
+        std::size_t io_worker_threads = 1U;
+        std::size_t io_queue_depth = 8U;
+        storage::AsyncIoBackend io_backend = storage::AsyncIoBackend::Auto;
+    bool io_use_full_fsync = storage::AsyncIoConfig{}.use_full_fsync;
+        std::size_t wal_retention_segments = 0U;
+        std::chrono::hours wal_retention_hours{0};
+        std::filesystem::path wal_archive_directory{};
     };
 
     ShellBackend();

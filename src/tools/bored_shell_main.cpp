@@ -11,6 +11,7 @@
 #pragma comment(lib, "Dbghelp.lib")
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
@@ -524,6 +525,15 @@ int main(int argc, char** argv)
     std::vector<std::string> execute_commands;
     std::vector<std::string> script_files;
     std::string log_json_path;
+    std::string data_directory;
+    std::string wal_directory_override;
+    std::size_t wal_retention_segments = 0U;
+    int wal_retention_hours = 0;
+    std::string wal_archive_directory;
+    std::size_t io_threads = 0U;
+    std::size_t io_queue_depth = 0U;
+    std::string io_backend_name;
+    bool io_disable_full_fsync = false;
 
     app.add_flag("-q,--quiet", quiet, "Suppress startup banner");
     app.add_option("-c,--command", execute_commands, "Execute the provided SQL command and exit")
@@ -533,6 +543,22 @@ int main(int argc, char** argv)
         ->type_name("PATH")
         ->expected(1);
     app.add_option("--log-json", log_json_path, "Write structured command logs as JSON Lines (use '-' for stdout)");
+    app.add_option("--data-dir", data_directory, "Directory for persistent shell catalog storage")
+        ->type_name("PATH");
+    app.add_option("--wal-dir", wal_directory_override, "Directory for shell WAL files (defaults to <data-dir>/wal)")
+        ->type_name("PATH");
+    app.add_option("--wal-retention-segments", wal_retention_segments, "Maximum WAL segments to keep before pruning")
+        ->check(CLI::NonNegativeNumber);
+    app.add_option("--wal-retention-hours", wal_retention_hours, "Retain WAL segments newer than this many hours")
+        ->check(CLI::NonNegativeNumber);
+    app.add_option("--wal-archive-dir", wal_archive_directory, "Archive directory for retained WAL segments")
+        ->type_name("PATH");
+    app.add_option("--io-threads", io_threads, "Async IO worker thread count")
+        ->check(CLI::PositiveNumber);
+    app.add_option("--io-depth", io_queue_depth, "Async IO queue depth")
+        ->check(CLI::PositiveNumber);
+    app.add_option("--io-backend", io_backend_name, "Async IO backend (auto, thread-pool, windows-ioring, linux-iouring, mac-dispatch)");
+    app.add_flag("--io-no-full-fsync", io_disable_full_fsync, "Disable fsync after WAL flush (may risk data loss)");
 
     try {
         app.parse(argc, argv);
@@ -546,7 +572,52 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    bored::shell::ShellBackend backend;
+    bored::shell::ShellBackend::Config backend_config;
+    if (!data_directory.empty()) {
+        backend_config.storage_directory = std::filesystem::path(data_directory);
+    }
+    if (!wal_directory_override.empty()) {
+        backend_config.wal_directory = std::filesystem::path(wal_directory_override);
+    }
+    if (wal_retention_segments > 0U) {
+        backend_config.wal_retention_segments = wal_retention_segments;
+    }
+    backend_config.wal_retention_hours = std::chrono::hours{static_cast<std::int64_t>(wal_retention_hours)};
+    if (!wal_archive_directory.empty()) {
+        backend_config.wal_archive_directory = std::filesystem::path(wal_archive_directory);
+    }
+    if (io_threads > 0U) {
+        backend_config.io_worker_threads = io_threads;
+    }
+    if (io_queue_depth > 0U) {
+        backend_config.io_queue_depth = io_queue_depth;
+    }
+    if (!io_backend_name.empty()) {
+        std::string backend_text = io_backend_name;
+        std::transform(backend_text.begin(), backend_text.end(), backend_text.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        if (backend_text == "auto") {
+            backend_config.io_backend = bored::storage::AsyncIoBackend::Auto;
+        } else if (backend_text == "thread-pool" || backend_text == "thread_pool" || backend_text == "threadpool") {
+            backend_config.io_backend = bored::storage::AsyncIoBackend::ThreadPool;
+        } else if (backend_text == "windows-ioring" || backend_text == "windows_ioring" || backend_text == "windowsioring") {
+            backend_config.io_backend = bored::storage::AsyncIoBackend::WindowsIoRing;
+        } else if (backend_text == "linux-iouring" || backend_text == "linux_iouring" || backend_text == "linuxiouring") {
+            backend_config.io_backend = bored::storage::AsyncIoBackend::LinuxIoUring;
+        } else if (backend_text == "mac-dispatch" || backend_text == "mac_dispatch" || backend_text == "macdispatch") {
+            backend_config.io_backend = bored::storage::AsyncIoBackend::MacDispatch;
+        } else {
+            std::cerr << "error: unknown async IO backend '" << io_backend_name << "'" << '\n';
+            std::cerr << "[debug] exiting main due to invalid io backend code=1\n";
+            return 1;
+        }
+    }
+    if (io_disable_full_fsync) {
+        backend_config.io_use_full_fsync = false;
+    }
+
+    bored::shell::ShellBackend backend{backend_config};
     auto config = backend.make_config();
     std::unique_ptr<std::ofstream> log_file;
     std::ostream* log_stream = nullptr;

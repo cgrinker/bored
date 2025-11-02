@@ -5,15 +5,43 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cctype>
+#include <filesystem>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace {
 
+std::filesystem::path make_unique_shell_path()
+{
+    const auto base = std::filesystem::temp_directory_path();
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    return base / ("bored_shell_log_" + std::to_string(stamp));
+}
+
+struct TempShellDirectory final {
+    TempShellDirectory()
+        : path{make_unique_shell_path()}
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+
+    ~TempShellDirectory()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+
+    std::filesystem::path path;
+};
+
 struct ShellLogHarness final {
     ShellLogHarness()
-        : backend{}
+        : temp{}
+        , backend{make_backend_config(temp.path)}
         , engine{backend.make_config()}
     {
         auto create = engine.execute_sql("CREATE TABLE metrics (id BIGINT, counter BIGINT, name TEXT);");
@@ -28,6 +56,15 @@ struct ShellLogHarness final {
         CHECK(insert.wal_bytes > 0U);
     }
 
+    static bored::shell::ShellBackend::Config make_backend_config(const std::filesystem::path& data_directory)
+    {
+        bored::shell::ShellBackend::Config config;
+        config.storage_directory = data_directory;
+        config.wal_directory = data_directory / "wal";
+        return config;
+    }
+
+    TempShellDirectory temp;
     bored::shell::ShellBackend backend{};
     bored::shell::ShellEngine engine;
 };

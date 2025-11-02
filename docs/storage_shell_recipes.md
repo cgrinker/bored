@@ -9,6 +9,28 @@ These SQL shell recipes help operators triage storage incidents with the interac
   ```
 - When scraping metrics, run the storage engine or mocks with `boredctl diagnostics metrics --mock` in development environments.
 
+## Manual Storage Control Hooks
+1. Ensure `boredctl` is executing inside the process that hosts `StorageRuntime::initialize`; otherwise the control handlers are absent and the CLI returns `checkpoint request failed: operation not permitted`.
+2. Inspect available verbs:
+   ```powershell
+   .\build\RelWithDebInfo\boredctl.exe control --help
+   ```
+3. Request a dry-run checkpoint to sample scheduler state without emitting WAL:
+   ```powershell
+   .\build\RelWithDebInfo\boredctl.exe control checkpoint --dry-run true
+   ```
+   Each invocation records an attempt/failure/duration sample in the storage telemetry registry under the configured control telemetry identifier (for example `runtime_control`). Surface those counters from `StorageControlTelemetrySnapshot` to dashboards or ad-hoc diagnostics.
+4. Trigger retention maintenance when backlog thresholds are exceeded:
+   ```powershell
+   .\build\RelWithDebInfo\boredctl.exe control retention --index true
+   ```
+   Disable the index sweep with `--index false` when validating WAL pruning only.
+5. Exercise crash-recovery planning paths:
+   ```powershell
+   .\build\RelWithDebInfo\boredctl.exe control recovery --redo true --undo true
+   ```
+   Use `--cleanup-only true` to purge scratch state after testing. Redo/undo attempts and failures surface in the control telemetry snapshot alongside checkpoint and retention counters.
+
 ## Identify Checkpoint Lag
 1. List recent checkpoints and retention metadata:
    ```sql
@@ -27,6 +49,11 @@ These SQL shell recipes help operators triage storage incidents with the interac
    ```bash
    boredctl diagnostics metrics | grep bored_checkpoint_lag_seconds
    ```
+4. Kick the scheduler if lag exceeds policy targets:
+   ```powershell
+   .\build\RelWithDebInfo\boredctl.exe control checkpoint --force true
+   ```
+   Record the resulting run duration in incident notes by sampling the control telemetry snapshot (`StorageControlTelemetrySnapshot::checkpoint`).
 
 ## Track WAL Retention Backlog
 1. Summarise WAL backlog buckets:
@@ -41,10 +68,15 @@ These SQL shell recipes help operators triage storage incidents with the interac
    ```bash
    boredctl diagnostics metrics | grep bored_wal_replay_backlog_bytes
    ```
-3. If backlog exceeds two active segments, schedule a checkpoint:
-   ```sql
-   SELECT bored_storage.request_checkpoint('force_retention');
+3. If backlog exceeds two active segments, schedule maintenance directly through the CLI:
+   ```powershell
+   .\build\RelWithDebInfo\boredctl.exe control retention --index true
    ```
+   Follow up with a forced checkpoint when latency budgets allow:
+   ```powershell
+   .\build\RelWithDebInfo\boredctl.exe control checkpoint --force true --dry-run false
+   ```
+   Retention attempts, failures, and last-run durations surface alongside checkpoint counters in the control telemetry snapshot.
 
 ## Lock Contention Snapshot
 1. Collect long-running locks:
@@ -67,11 +99,16 @@ These SQL shell recipes help operators triage storage incidents with the interac
    ```bash
    boredctl diagnostics metrics | grep backlog
    ```
-3. Run recovery dry-run against archived WAL:
+3. Run recovery dry-runs against archived WAL:
    ```bash
    boredctl diagnostics repl --script scripts/recovery_drill.sql
    ```
-4. Review shell logs for commands exceeding 1s by filtering the JSON log:
+4. Validate runtime recovery handlers without replaying changes:
+   ```powershell
+   .\build\RelWithDebInfo\boredctl.exe control recovery --redo false --undo false --cleanup-only true
+   ```
+   Capture the resulting cleanup duration from the control telemetry snapshot to compare against historical baselines.
+5. Review shell logs for commands exceeding 1s by filtering the JSON log:
    ```bash
    jq 'select(.duration_ms > 1000)' /var/log/bored/sql.log
    ```

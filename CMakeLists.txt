@@ -256,6 +256,7 @@ if(BORED_ENABLE_TESTS)
     tests/wal_commit_pipeline_tests.cpp
             tests/shell_engine_tests.cpp
             tests/shell_log_tests.cpp
+            tests/shell_persistence_tests.cpp
         tests/executor_scaffolding_tests.cpp
         tests/executor_nested_loop_join_tests.cpp
     tests/executor_hash_join_tests.cpp

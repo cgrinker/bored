@@ -42,6 +42,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstddef>
+#include <fstream>
 #include <iomanip>
 #include <filesystem>
 #include <limits>
@@ -186,6 +187,14 @@ std::string strip_trailing_semicolon(std::string_view text)
         stripped = trim_copy(stripped);
     }
     return stripped;
+}
+
+txn::Snapshot make_shell_snapshot()
+{
+    txn::Snapshot snapshot{};
+    snapshot.xmin = 1U;
+    snapshot.xmax = std::numeric_limits<txn::TransactionId>::max();
+    return snapshot;
 }
 
 std::optional<std::string> last_identifier_part(const parser::relational::QualifiedName& name)
@@ -557,9 +566,23 @@ struct ShellBackend::CatalogStorage final {
             return ec;
         }
 
-        storage::AsyncIoConfig io_config{};
-        io_config.worker_threads = 1U;
-        io_config.queue_depth = 8U;
+        page_directory_ = config_.storage_directory / "catalog_pages";
+        std::filesystem::create_directories(page_directory_, ec);
+        if (ec) {
+            return ec;
+        }
+
+        table_directory_ = config_.storage_directory / "table_data";
+        std::filesystem::create_directories(table_directory_, ec);
+        if (ec) {
+            return ec;
+        }
+
+    storage::AsyncIoConfig io_config{};
+    io_config.worker_threads = std::max<std::size_t>(1U, config_.io_worker_threads);
+    io_config.queue_depth = std::max<std::size_t>(1U, config_.io_queue_depth);
+    io_config.backend = config_.io_backend;
+    io_config.use_full_fsync = config_.io_use_full_fsync;
         auto async = storage::create_async_io(io_config);
         if (!async) {
             return std::make_error_code(std::errc::not_enough_memory);
@@ -577,8 +600,13 @@ struct ShellBackend::CatalogStorage final {
         wal_config.buffer_size = 4U * storage::kWalBlockSize;
         wal_config.segment_size = storage::kWalSegmentSize;
         wal_config.start_lsn = storage::kWalBlockSize;
-    wal_config.telemetry_registry = wal_registry_;
-    wal_config.storage_telemetry_registry = storage_registry_;
+        wal_config.telemetry_registry = wal_registry_;
+        wal_config.storage_telemetry_registry = storage_registry_;
+        wal_config.retention.retention_segments = config_.wal_retention_segments;
+        wal_config.retention.retention_hours = config_.wal_retention_hours;
+        if (!config_.wal_archive_directory.empty()) {
+            wal_config.retention.archive_path = config_.wal_archive_directory;
+        }
         wal_config.telemetry_identifier = "shell.catalog_wal";
 
         try {
@@ -590,7 +618,7 @@ struct ShellBackend::CatalogStorage final {
         }
 
         storage::PageManager::Config page_config{};
-    page_config.telemetry_registry = storage_registry_;
+        page_config.telemetry_registry = storage_registry_;
         page_config.telemetry_identifier = "shell.catalog_page_manager";
 
         page_manager_ = std::make_unique<storage::PageManager>(&fsm_, wal_writer_, page_config);
@@ -612,6 +640,8 @@ struct ShellBackend::CatalogStorage final {
         }
 
         reload_catalog_relations();
+        persist_all_pages();
+        load_user_tables_from_disk();
 
         initialized_ = true;
         return {};
@@ -625,6 +655,9 @@ struct ShellBackend::CatalogStorage final {
             page_manager_registered_ = false;
         }
 
+        persist_all_pages();
+        persist_all_user_tables();
+
         if (wal_writer_) {
             (void)wal_writer_->close();
             wal_writer_.reset();
@@ -634,6 +667,8 @@ struct ShellBackend::CatalogStorage final {
         async_io_.reset();
         relation_pages_.clear();
         page_buffers_.clear();
+        page_directory_.clear();
+        table_directory_.clear();
         initialized_ = false;
     }
 
@@ -686,6 +721,7 @@ struct ShellBackend::CatalogStorage final {
                 break;
             }
             refresh_relation_cache(mutation.relation_id);
+            persist_relation_page(mutation.relation_id);
         }
     }
 
@@ -805,6 +841,7 @@ struct ShellBackend::CatalogStorage final {
             return;
         }
         it->second.erase(row_id);
+        persist_table_rows(relation_id);
     }
 
     [[nodiscard]] const Relation* relation(catalog::RelationId relation_id) const
@@ -820,6 +857,7 @@ struct ShellBackend::CatalogStorage final {
     {
         auto& relation = relations_[relation_id.value];
         relation[row_id] = std::vector<std::byte>(payload.begin(), payload.end());
+        persist_table_rows(relation_id);
     }
 
     bool fetch_row(catalog::RelationId relation_id,
@@ -854,6 +892,7 @@ struct ShellBackend::CatalogStorage final {
             *out_payload = row_it->second;
         }
         it->second.erase(row_it);
+        persist_table_rows(relation_id);
         return true;
     }
 
@@ -893,14 +932,27 @@ struct ShellBackend::CatalogStorage final {
     void register_catalog_relation(catalog::RelationId relation_id, std::uint32_t page_id)
     {
         relation_pages_[relation_id.value] = page_id;
-        if (page_buffers_.find(page_id) == page_buffers_.end()) {
+        auto buffer_it = page_buffers_.find(page_id);
+        if (buffer_it == page_buffers_.end()) {
             std::array<std::byte, storage::kPageSize> buffer{};
             buffer.fill(std::byte{0});
-            page_buffers_[page_id] = buffer;
-            auto span = std::span<std::byte>(page_buffers_[page_id].data(), page_buffers_[page_id].size());
+            buffer_it = page_buffers_.emplace(page_id, buffer).first;
+            auto span = std::span<std::byte>(buffer_it->second.data(), buffer_it->second.size());
             (void)page_manager_->initialize_page(span, storage::PageType::Meta, page_id);
         }
+
+        const bool loaded = load_page_from_disk(page_id, buffer_it->second);
+        if (!loaded) {
+            auto span = std::span<std::byte>(buffer_it->second.data(), buffer_it->second.size());
+            if (storage::page_header(span).page_id != page_id) {
+                (void)page_manager_->initialize_page(span, storage::PageType::Meta, page_id);
+            }
+        }
+
         refresh_relation_cache(relation_id);
+        if (!loaded) {
+            persist_relation_page(relation_id);
+        }
     }
 
     void refresh_relation_cache(catalog::RelationId relation_id)
@@ -1006,6 +1058,177 @@ struct ShellBackend::CatalogStorage final {
         return std::nullopt;
     }
 
+    [[nodiscard]] std::filesystem::path page_file_path(std::uint32_t page_id) const
+    {
+        if (page_directory_.empty()) {
+            return {};
+        }
+        return page_directory_ / ("page_" + std::to_string(page_id) + ".bin");
+    }
+
+    bool load_page_from_disk(std::uint32_t page_id, std::array<std::byte, storage::kPageSize>& buffer)
+    {
+        const auto path = page_file_path(page_id);
+        if (path.empty()) {
+            return false;
+        }
+        std::ifstream input{path, std::ios::binary};
+        if (!input.is_open()) {
+            return false;
+        }
+        input.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+        if (input.gcount() != static_cast<std::streamsize>(buffer.size()) || input.fail()) {
+            buffer.fill(std::byte{0});
+            return false;
+        }
+        return true;
+    }
+
+    void persist_page_to_disk(std::uint32_t page_id, const std::array<std::byte, storage::kPageSize>& buffer) const
+    {
+        const auto path = page_file_path(page_id);
+        if (path.empty()) {
+            return;
+        }
+        std::ofstream output{path, std::ios::binary | std::ios::trunc};
+        if (!output.is_open()) {
+            return;
+        }
+        output.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+        output.flush();
+    }
+
+    void persist_relation_page(catalog::RelationId relation_id)
+    {
+        auto page_it = relation_pages_.find(relation_id.value);
+        if (page_it == relation_pages_.end()) {
+            return;
+        }
+        auto buffer_it = page_buffers_.find(page_it->second);
+        if (buffer_it == page_buffers_.end()) {
+            return;
+        }
+        persist_page_to_disk(page_it->second, buffer_it->second);
+    }
+
+    void persist_all_pages()
+    {
+        for (const auto& [page_id, buffer] : page_buffers_) {
+            persist_page_to_disk(page_id, buffer);
+        }
+    }
+
+    [[nodiscard]] std::filesystem::path table_file_path(catalog::RelationId relation_id) const
+    {
+        if (table_directory_.empty()) {
+            return {};
+        }
+        return table_directory_ / ("table_" + std::to_string(relation_id.value) + ".bin");
+    }
+
+    void persist_table_rows(catalog::RelationId relation_id)
+    {
+        if (is_catalog_relation(relation_id)) {
+            return;
+        }
+
+        const auto path = table_file_path(relation_id);
+        if (path.empty()) {
+            return;
+        }
+
+        auto relation_it = relations_.find(relation_id.value);
+        if (relation_it == relations_.end() || relation_it->second.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            return;
+        }
+
+        std::ofstream output{path, std::ios::binary | std::ios::trunc};
+        if (!output.is_open()) {
+            return;
+        }
+
+        for (const auto& [row_id, payload] : relation_it->second) {
+            const std::uint64_t id = row_id;
+            const std::uint32_t size = static_cast<std::uint32_t>(payload.size());
+            output.write(reinterpret_cast<const char*>(&id), sizeof(id));
+            output.write(reinterpret_cast<const char*>(&size), sizeof(size));
+            if (size > 0U) {
+                output.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(size));
+            }
+        }
+
+        output.flush();
+    }
+
+    void persist_all_user_tables()
+    {
+        for (const auto& [relation_key, relation] : relations_) {
+            (void)relation;
+            catalog::RelationId relation_id{relation_key};
+            if (is_catalog_relation(relation_id)) {
+                continue;
+            }
+            persist_table_rows(relation_id);
+        }
+    }
+
+    void load_table_from_disk(catalog::RelationId relation_id)
+    {
+        if (is_catalog_relation(relation_id)) {
+            return;
+        }
+
+        const auto path = table_file_path(relation_id);
+        if (path.empty()) {
+            return;
+        }
+
+        std::ifstream input{path, std::ios::binary};
+        if (!input.is_open()) {
+            relations_.erase(relation_id.value);
+            return;
+        }
+
+        Relation relation;
+        while (true) {
+            std::uint64_t row_id = 0U;
+            std::uint32_t payload_size = 0U;
+            if (!input.read(reinterpret_cast<char*>(&row_id), sizeof(row_id))) {
+                break;
+            }
+            if (!input.read(reinterpret_cast<char*>(&payload_size), sizeof(payload_size))) {
+                relation.clear();
+                relations_.erase(relation_id.value);
+                return;
+            }
+            std::vector<std::byte> payload(payload_size);
+            if (payload_size > 0U) {
+                if (!input.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload_size))) {
+                    relation.clear();
+                    relations_.erase(relation_id.value);
+                    return;
+                }
+            }
+            relation[row_id] = std::move(payload);
+        }
+
+        relations_[relation_id.value] = std::move(relation);
+    }
+
+    void load_user_tables_from_disk()
+    {
+        if (table_directory_.empty()) {
+            return;
+        }
+
+        const auto tables = list_tables();
+        for (const auto& table : tables) {
+            load_table_from_disk(table.relation_id);
+        }
+    }
+
     Config config_{};
     storage::StorageTelemetryRegistry* storage_registry_ = nullptr;
     storage::WalTelemetryRegistry* wal_registry_ = nullptr;
@@ -1017,6 +1240,8 @@ struct ShellBackend::CatalogStorage final {
     std::unordered_map<std::uint64_t, std::uint32_t> relation_pages_{};
     std::unordered_map<std::uint32_t, std::array<std::byte, storage::kPageSize>> page_buffers_{};
     std::filesystem::path wal_directory_{};
+    std::filesystem::path page_directory_{};
+    std::filesystem::path table_directory_{};
     bool initialized_ = false;
     bool page_manager_registered_ = false;
     std::string page_manager_identifier_{};
@@ -1223,7 +1448,10 @@ public:
 
     bool next(bored::storage::TableTuple& out_tuple) override
     {
-        if (relation_ == nullptr || iterator_ == end_iterator_) {
+        if (relation_ == nullptr) {
+            return false;
+        }
+        if (iterator_ == end_iterator_) {
             return false;
         }
 
@@ -2355,6 +2583,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     bored::executor::InsertExecutor insert_executor{std::move(values_executor), insert_config};
 
     bored::executor::ExecutorContext executor_context{};
+    executor_context.set_snapshot(make_shell_snapshot());
     bored::executor::TupleBuffer executor_buffer{};
     insert_executor.open(executor_context);
     while (insert_executor.next(executor_context, executor_buffer)) {
@@ -2719,6 +2948,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     bored::executor::UpdateExecutor update_executor{std::move(projection_node), update_config};
 
     bored::executor::ExecutorContext executor_context{};
+    executor_context.set_snapshot(make_shell_snapshot());
     bored::executor::TupleBuffer executor_buffer{};
     update_executor.open(executor_context);
     while (update_executor.next(executor_context, executor_buffer)) {
@@ -2929,6 +3159,7 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     bored::executor::DeleteExecutor delete_executor{std::move(projection_node), delete_config};
 
     bored::executor::ExecutorContext executor_context{};
+    executor_context.set_snapshot(make_shell_snapshot());
     bored::executor::TupleBuffer executor_buffer{};
     delete_executor.open(executor_context);
     delete_executor.next(executor_context, executor_buffer);
@@ -3074,6 +3305,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
 
     bored::executor::SequentialScanExecutor scan_executor{scan_config};
     bored::executor::ExecutorContext executor_context{};
+    executor_context.set_snapshot(make_shell_snapshot());
     bored::executor::TupleBuffer executor_buffer{};
 
     std::vector<std::vector<ScalarValue>> materialized_rows;
@@ -3091,8 +3323,9 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
             return make_error_metrics(sql, "Executor returned null tuple payload.");
         }
 
+        std::uint64_t row_id = 0U;
         std::vector<ScalarValue> decoded_values;
-        if (!decode_values_payload(*table, payload_column.data, decoded_values)) {
+        if (!decode_row_payload(*table, payload_column.data, row_id, decoded_values)) {
             scan_executor.close(executor_context);
             return make_error_metrics(sql, "Failed to decode tuple payload.");
         }
