@@ -151,12 +151,16 @@ private:
         const parser::relational::TableBinding& table_binding,
         const TableData& table,
         std::string_view root_label,
-        std::string_view statement_label);
+        std::string_view statement_label,
+        const catalog::CatalogAccessor& accessor,
+        const txn::TransactionContext& txn_context);
     [[nodiscard]] std::variant<PlannerPlanDetails, CommandMetrics> plan_select_operation(
         const std::string& sql,
         const parser::relational::TableBinding& table_binding,
         const TableData& table,
-        std::vector<std::string> projection_columns);
+        std::vector<std::string> projection_columns,
+        const catalog::CatalogAccessor& accessor,
+        const txn::TransactionContext& txn_context);
     [[nodiscard]] std::vector<std::string> render_executor_plan(
         std::string_view statement_label,
         const planner::PhysicalPlan& plan);

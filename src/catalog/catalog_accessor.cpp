@@ -15,6 +15,14 @@ std::string make_string(std::string_view value)
     return std::string(value.begin(), value.end());
 }
 
+bool snapshots_equal(const CatalogSnapshot& lhs, const CatalogSnapshot& rhs)
+{
+    if (lhs.xmin != rhs.xmin || lhs.xmax != rhs.xmax) {
+        return false;
+    }
+    return lhs.in_progress == rhs.in_progress;
+}
+
 }  // namespace
 
 CatalogAccessor::CatalogAccessor(Config config)
@@ -220,8 +228,29 @@ std::uint64_t CatalogAccessor::current_epoch(RelationId relation_id) noexcept
     return CatalogCache::instance().epoch(relation_id);
 }
 
+void CatalogAccessor::ensure_snapshot_current() const
+{
+    const auto& current_snapshot = transaction_->snapshot();
+    if (!snapshot_initialized_ || !snapshots_equal(cached_snapshot_, current_snapshot)) {
+        cached_snapshot_ = current_snapshot;
+        snapshot_initialized_ = true;
+        reset_cached_state();
+    }
+}
+
+void CatalogAccessor::reset_cached_state() const
+{
+    databases_loaded_ = false;
+    schemas_loaded_ = false;
+    tables_loaded_ = false;
+    columns_loaded_ = false;
+    indexes_loaded_ = false;
+}
+
 void CatalogAccessor::ensure_databases_loaded() const
 {
+    ensure_snapshot_current();
+
     auto& cache = CatalogCache::instance();
     const auto current_epoch = cache.epoch(kCatalogDatabasesRelationId);
     if (databases_loaded_ && databases_epoch_ == current_epoch) {
@@ -263,6 +292,8 @@ void CatalogAccessor::ensure_databases_loaded() const
 
 void CatalogAccessor::ensure_schemas_loaded() const
 {
+    ensure_snapshot_current();
+
     auto& cache = CatalogCache::instance();
     const auto current_epoch = cache.epoch(kCatalogSchemasRelationId);
     if (schemas_loaded_ && schemas_epoch_ == current_epoch) {
@@ -304,6 +335,8 @@ void CatalogAccessor::ensure_schemas_loaded() const
 
 void CatalogAccessor::ensure_tables_loaded() const
 {
+    ensure_snapshot_current();
+
     auto& cache = CatalogCache::instance();
     const auto current_epoch = cache.epoch(kCatalogTablesRelationId);
     if (tables_loaded_ && tables_epoch_ == current_epoch) {
@@ -350,6 +383,8 @@ void CatalogAccessor::ensure_tables_loaded() const
 
 void CatalogAccessor::ensure_columns_loaded() const
 {
+    ensure_snapshot_current();
+
     auto& cache = CatalogCache::instance();
     const auto current_epoch = cache.epoch(kCatalogColumnsRelationId);
     if (columns_loaded_ && columns_epoch_ == current_epoch) {
@@ -394,6 +429,8 @@ void CatalogAccessor::ensure_columns_loaded() const
 
 void CatalogAccessor::ensure_indexes_loaded() const
 {
+    ensure_snapshot_current();
+
     auto& cache = CatalogCache::instance();
     const auto current_epoch = cache.epoch(kCatalogIndexesRelationId);
     if (indexes_loaded_ && indexes_epoch_ == current_epoch) {

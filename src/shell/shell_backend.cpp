@@ -2120,7 +2120,9 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     const parser::relational::TableBinding& table_binding,
     const TableData& table,
     std::string_view root_label,
-    std::string_view statement_label)
+    std::string_view statement_label,
+    const catalog::CatalogAccessor& accessor,
+    const txn::TransactionContext& txn_context)
 {
     auto planner_columns = collect_table_columns(table);
 
@@ -2143,7 +2145,10 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
         root_props);
 
     planner::LogicalPlan logical_plan{root_logical};
-    planner::PlannerContext planner_context{};
+    planner::PlannerContextConfig planner_cfg{};
+    planner_cfg.catalog = &accessor;
+    planner_cfg.snapshot = txn_context.snapshot();
+    planner::PlannerContext planner_context{planner_cfg};
     auto planner_result = planner::plan_query(planner_context, logical_plan);
     const auto plan_root = planner_result.plan.root();
     const auto statement = std::string(statement_label);
@@ -2175,7 +2180,9 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     const std::string& sql,
     const parser::relational::TableBinding& table_binding,
     const TableData& table,
-    std::vector<std::string> projection_columns)
+    std::vector<std::string> projection_columns,
+    const catalog::CatalogAccessor& accessor,
+    const txn::TransactionContext& txn_context)
 {
     auto planner_columns = collect_table_columns(table);
     if (projection_columns.empty()) {
@@ -2201,7 +2208,10 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
         projection_props);
 
     planner::LogicalPlan logical_plan{projection_logical};
-    planner::PlannerContext planner_context{};
+    planner::PlannerContextConfig planner_cfg{};
+    planner_cfg.catalog = &accessor;
+    planner_cfg.snapshot = txn_context.snapshot();
+    planner::PlannerContext planner_context{planner_cfg};
     auto planner_result = planner::plan_query(planner_context, logical_plan);
     const auto plan_root = planner_result.plan.root();
     if (!plan_root) {
@@ -2591,7 +2601,10 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
         insert_props);
 
     planner::LogicalPlan logical_plan{insert_logical};
-    planner::PlannerContext planner_context{};
+    planner::PlannerContextConfig planner_cfg{};
+    planner_cfg.catalog = &accessor;
+    planner_cfg.snapshot = txn_context.snapshot();
+    planner::PlannerContext planner_context{planner_cfg};
     auto planner_result = planner::plan_query(planner_context, logical_plan);
     if (!planner_result.plan.root()) {
         return make_planner_error_metrics(sql,
@@ -2795,7 +2808,9 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
                                            *table_binding,
                                            *table,
                                            "Update",
-                                           "UPDATE");
+                                           "UPDATE",
+                                           accessor,
+                                           txn_context);
     if (std::holds_alternative<CommandMetrics>(plan_result)) {
         return std::get<CommandMetrics>(std::move(plan_result));
     }
@@ -3161,7 +3176,9 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
                                            *table_binding,
                                            *table,
                                            "Delete",
-                                           "DELETE");
+                                           "DELETE",
+                                           accessor,
+                                           txn_context);
     if (std::holds_alternative<CommandMetrics>(plan_result)) {
         return std::get<CommandMetrics>(std::move(plan_result));
     }
@@ -3429,7 +3446,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         }
     }
 
-    auto plan_result = plan_select_operation(sql, *table_binding, *table, selected_columns);
+    auto plan_result = plan_select_operation(sql, *table_binding, *table, selected_columns, accessor, txn_context);
     if (std::holds_alternative<CommandMetrics>(plan_result)) {
         return std::get<CommandMetrics>(std::move(plan_result));
     }

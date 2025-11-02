@@ -50,6 +50,9 @@ public:
     [[nodiscard]] static std::uint64_t current_epoch(RelationId relation_id) noexcept;
 
 private:
+    void ensure_snapshot_current() const;
+    void reset_cached_state() const;
+
     struct DatabaseEntry final {
         CatalogTupleDescriptor tuple{};
         DatabaseId database_id{};
@@ -126,6 +129,9 @@ private:
     mutable std::uint64_t tables_epoch_ = 0U;
     mutable std::uint64_t columns_epoch_ = 0U;
     mutable std::uint64_t indexes_epoch_ = 0U;
+
+    mutable CatalogSnapshot cached_snapshot_{};
+    mutable bool snapshot_initialized_ = false;
 
     void ensure_databases_loaded() const;
     void ensure_schemas_loaded() const;

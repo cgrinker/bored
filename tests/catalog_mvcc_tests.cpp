@@ -169,7 +169,7 @@ TEST_CASE("Catalog accessor caches relation scans and filters visibility")
 
     bored::txn::Snapshot snapshot{};
     snapshot.xmin = 5U;
-    snapshot.xmax = 20U;
+    snapshot.xmax = 30U;
     snapshot.in_progress = {9U};
 
     bored::txn::TransactionIdAllocatorStub allocator{30U};
@@ -295,6 +295,71 @@ TEST_CASE("Catalog accessor cache invalidation reloads relation data")
     CHECK(std::find(schema_names.begin(), schema_names.end(), "base") != schema_names.end());
     CHECK(std::find(schema_names.begin(), schema_names.end(), "analytics") != schema_names.end());
     CHECK(scan_counts[kCatalogSchemasRelationId.value] == 2U);
+}
+
+TEST_CASE("Catalog accessor refreshes caches when transaction snapshot changes")
+{
+    CatalogCache::instance().reset();
+
+    bored::txn::Snapshot snapshot{};
+    snapshot.xmin = 5U;
+    snapshot.xmax = 20U;
+
+    bored::txn::TransactionIdAllocatorStub allocator{220U};
+    bored::txn::SnapshotManagerStub manager{snapshot};
+    CatalogTransaction transaction({&allocator, &manager});
+
+    RelationStorage storage;
+    std::unordered_map<std::uint64_t, std::size_t> scan_counts;
+
+    auto scanner = [&storage, &scan_counts](RelationId relation_id, const CatalogAccessor::TupleCallback& callback) {
+        ++scan_counts[relation_id.value];
+        auto it = storage.tuples.find(relation_id.value);
+        if (it == storage.tuples.end()) {
+            return;
+        }
+        for (const auto& buffer : it->second) {
+            callback(std::span<const std::byte>(buffer.data(), buffer.size()));
+        }
+    };
+
+    CatalogDatabaseDescriptor database{tuple_descriptor(4U, 0U), kSystemDatabaseId, kSystemSchemaId, "system"};
+    storage.add(kCatalogDatabasesRelationId, serialize_catalog_database(database));
+
+    const std::uint64_t pending_txn_id = 22U;
+    CatalogSchemaDescriptor base_schema{tuple_descriptor(4U, 0U), SchemaId{70U}, kSystemDatabaseId, "base"};
+    storage.add(kCatalogSchemasRelationId, serialize_catalog_schema(base_schema));
+    CatalogSchemaDescriptor pending_schema{tuple_descriptor(pending_txn_id, 0U), SchemaId{80U}, kSystemDatabaseId, "analytics"};
+    storage.add(kCatalogSchemasRelationId, serialize_catalog_schema(pending_schema));
+
+    snapshot.in_progress = {pending_txn_id};
+    manager.set_snapshot(snapshot);
+    transaction.refresh_snapshot();
+
+    CatalogAccessor accessor({&transaction, scanner});
+
+    auto first_pass = accessor.schemas(kSystemDatabaseId);
+    REQUIRE(first_pass.size() == 1U);
+    CHECK(first_pass.front().name == "base");
+    CHECK(scan_counts[kCatalogSchemasRelationId.value] == 1U);
+
+    bored::txn::Snapshot refreshed{};
+    refreshed.xmin = 5U;
+    refreshed.xmax = 60U;
+    refreshed.in_progress.clear();
+    manager.set_snapshot(refreshed);
+    transaction.refresh_snapshot();
+
+    auto second_pass = accessor.schemas(kSystemDatabaseId);
+    REQUIRE(second_pass.size() == 2U);
+    std::vector<std::string> schema_names;
+    schema_names.reserve(second_pass.size());
+    for (const auto& schema_descriptor : second_pass) {
+        schema_names.emplace_back(schema_descriptor.name.begin(), schema_descriptor.name.end());
+    }
+    CHECK(std::find(schema_names.begin(), schema_names.end(), "base") != schema_names.end());
+    CHECK(std::find(schema_names.begin(), schema_names.end(), "analytics") != schema_names.end());
+    CHECK(scan_counts[kCatalogSchemasRelationId.value] == 1U);
 }
 
 TEST_CASE("Catalog accessor snapshot differences affect visibility")
