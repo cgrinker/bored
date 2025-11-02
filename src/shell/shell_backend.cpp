@@ -1,11 +1,13 @@
 #include "bored/shell/shell_backend.hpp"
 
 #include "bored/catalog/catalog_accessor.hpp"
+#include "bored/catalog/catalog_bootstrapper.hpp"
 #include "bored/catalog/catalog_cache.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
 #include "bored/catalog/catalog_introspection.hpp"
 #include "bored/catalog/catalog_mutator.hpp"
 #include "bored/catalog/catalog_transaction.hpp"
+#include "bored/catalog/catalog_mvcc.hpp"
 #include "bored/ddl/ddl_dispatcher.hpp"
 #include "bored/ddl/ddl_handlers.hpp"
 #include "bored/ddl/ddl_validation.hpp"
@@ -27,18 +29,27 @@
 #include "bored/executor/tuple_buffer.hpp"
 #include "bored/executor/tuple_format.hpp"
 #include "bored/executor/update_executor.hpp"
+#include "bored/storage/async_io.hpp"
+#include "bored/storage/free_space_map.hpp"
+#include "bored/storage/page_manager.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/storage_reader.hpp"
+#include "bored/storage/wal_writer.hpp"
+#include "bored/storage/wal_telemetry_registry.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <cstddef>
 #include <iomanip>
+#include <filesystem>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <cstring>
+#include <iomanip>
 #include <stdexcept>
 #include <system_error>
 #include <optional>
@@ -431,8 +442,9 @@ std::string_view physical_operator_name(planner::PhysicalOperatorType type) noex
         return "Update";
     case PhysicalOperatorType::Delete:
         return "Delete";
+    default:
+        return "Unknown";
     }
-    return "Unknown";
 }
 
 std::string join_strings(const std::vector<std::string>& values, std::string_view separator)
@@ -467,8 +479,9 @@ std::string_view logical_operator_kind_name(parser::relational::LogicalOperatorK
         return "Sort";
     case LogicalOperatorKind::Limit:
         return "Limit";
+    default:
+        return "Unknown";
     }
-    return "Unknown";
 }
 
 std::vector<std::string> render_logical_plan_lines(const parser::relational::LogicalOperator& root)
@@ -502,30 +515,177 @@ struct InMemoryIdentifierAllocator final : catalog::CatalogIdentifierAllocator {
     std::uint64_t index_ids_ = 3'000U;
     std::uint64_t column_ids_ = 4'000U;
 };
- 
-struct ShellBackend::InMemoryCatalogStorage final {
+
+struct ShellBackend::CatalogStorage final {
     using Relation = std::map<std::uint64_t, std::vector<std::byte>>;
 
-    void seed(catalog::RelationId relation_id, std::uint64_t row_id, std::vector<std::byte> payload)
+    CatalogStorage(const Config& config,
+                   storage::StorageTelemetryRegistry* storage_registry,
+                   storage::WalTelemetryRegistry* wal_registry)
+        : config_{config}
+        , storage_registry_{storage_registry}
+        , wal_registry_{wal_registry}
+    {}
+
+    ~CatalogStorage()
     {
-        relations_[relation_id.value][row_id] = std::move(payload);
+        shutdown();
+    }
+
+    std::error_code initialize()
+    {
+        if (initialized_) {
+            return {};
+        }
+
+        if (config_.storage_directory.empty()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(config_.storage_directory, ec);
+        if (ec) {
+            return ec;
+        }
+
+        wal_directory_ = config_.wal_directory.empty()
+            ? (config_.storage_directory / "wal")
+            : config_.wal_directory;
+
+        std::filesystem::create_directories(wal_directory_, ec);
+        if (ec) {
+            return ec;
+        }
+
+        storage::AsyncIoConfig io_config{};
+        io_config.worker_threads = 1U;
+        io_config.queue_depth = 8U;
+        auto async = storage::create_async_io(io_config);
+        if (!async) {
+            return std::make_error_code(std::errc::not_enough_memory);
+        }
+
+        async_io_ = std::shared_ptr<storage::AsyncIo>(async.release(), [](storage::AsyncIo* io) {
+            if (io != nullptr) {
+                io->shutdown();
+                delete io;
+            }
+        });
+
+        storage::WalWriterConfig wal_config{};
+        wal_config.directory = wal_directory_;
+        wal_config.buffer_size = 4U * storage::kWalBlockSize;
+        wal_config.segment_size = storage::kWalSegmentSize;
+        wal_config.start_lsn = storage::kWalBlockSize;
+    wal_config.telemetry_registry = wal_registry_;
+    wal_config.storage_telemetry_registry = storage_registry_;
+        wal_config.telemetry_identifier = "shell.catalog_wal";
+
+        try {
+            wal_writer_ = std::make_shared<storage::WalWriter>(async_io_, wal_config);
+        } catch (const std::system_error& error) {
+            return error.code();
+        } catch (...) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        storage::PageManager::Config page_config{};
+    page_config.telemetry_registry = storage_registry_;
+        page_config.telemetry_identifier = "shell.catalog_page_manager";
+
+        page_manager_ = std::make_unique<storage::PageManager>(&fsm_, wal_writer_, page_config);
+
+        register_page_manager_sampler();
+
+        relations_.clear();
+        relation_pages_.clear();
+        page_buffers_.clear();
+
+        catalog::CatalogBootstrapper bootstrapper({page_manager_.get(), &fsm_, true});
+        catalog::CatalogBootstrapArtifacts artifacts;
+        if (auto bootstrap_ec = bootstrapper.run(artifacts); bootstrap_ec) {
+            return bootstrap_ec;
+        }
+
+        for (const auto& entry : artifacts.pages) {
+            page_buffers_[entry.first] = entry.second;
+        }
+
+        reload_catalog_relations();
+
+        initialized_ = true;
+        return {};
+    }
+
+    void shutdown() noexcept
+    {
+        if (storage_registry_ && page_manager_registered_) {
+            storage_registry_->unregister_page_manager(page_manager_identifier_);
+            page_manager_identifier_.clear();
+            page_manager_registered_ = false;
+        }
+
+        if (wal_writer_) {
+            (void)wal_writer_->close();
+            wal_writer_.reset();
+        }
+
+        page_manager_.reset();
+        async_io_.reset();
+        relation_pages_.clear();
+        page_buffers_.clear();
+        initialized_ = false;
     }
 
     void apply(const catalog::CatalogMutationBatch& batch)
     {
         for (const auto& mutation : batch.mutations) {
-            auto& relation = relations_[mutation.relation_id.value];
+            if (!is_catalog_relation(mutation.relation_id)) {
+                continue;
+            }
+            auto page_it = relation_pages_.find(mutation.relation_id.value);
+            if (page_it == relation_pages_.end()) {
+                continue;
+            }
+            auto buffer_it = page_buffers_.find(page_it->second);
+            if (buffer_it == page_buffers_.end()) {
+                continue;
+            }
+
+            auto page_span = std::span<std::byte>(buffer_it->second.data(), buffer_it->second.size());
+
             switch (mutation.kind) {
             case catalog::CatalogMutationKind::Insert:
+                if (mutation.after) {
+                    storage::PageManager::TupleInsertResult insert_result{};
+                    (void)page_manager_->insert_tuple(page_span,
+                                                      std::span<const std::byte>(mutation.after->payload.data(),
+                                                                                 mutation.after->payload.size()),
+                                                      mutation.row_id,
+                                                      insert_result);
+                }
+                break;
             case catalog::CatalogMutationKind::Update:
                 if (mutation.after) {
-                    relation[mutation.row_id] = mutation.after->payload;
+                    if (auto slot = find_slot(mutation.relation_id, page_span, mutation.row_id)) {
+                        storage::PageManager::TupleUpdateResult update_result{};
+                        (void)page_manager_->update_tuple(page_span,
+                                                          *slot,
+                                                          std::span<const std::byte>(mutation.after->payload.data(),
+                                                                                     mutation.after->payload.size()),
+                                                          mutation.row_id,
+                                                          update_result);
+                    }
                 }
                 break;
             case catalog::CatalogMutationKind::Delete:
-                relation.erase(mutation.row_id);
+                if (auto slot = find_slot(mutation.relation_id, page_span, mutation.row_id)) {
+                    storage::PageManager::TupleDeleteResult delete_result{};
+                    (void)page_manager_->delete_tuple(page_span, *slot, mutation.row_id, delete_result);
+                }
                 break;
             }
+            refresh_relation_cache(mutation.relation_id);
         }
     }
 
@@ -583,10 +743,7 @@ struct ShellBackend::InMemoryCatalogStorage final {
         }
         for (const auto& entry : it->second) {
             const auto view = catalog::decode_catalog_schema(std::span<const std::byte>(entry.second.data(), entry.second.size()));
-            if (!view) {
-                continue;
-            }
-            if (view->database_id == database_id && view->name == name) {
+            if (view && view->database_id == database_id && view->name == name) {
                 return view;
             }
         }
@@ -702,14 +859,167 @@ struct ShellBackend::InMemoryCatalogStorage final {
 
     [[nodiscard]] std::uint64_t max_row_id(catalog::RelationId relation_id) const
     {
-        auto rel = relation(relation_id);
-        if (rel == nullptr || rel->empty()) {
+        auto it = relations_.find(relation_id.value);
+        if (it == relations_.end() || it->second.empty()) {
             return 0U;
         }
-        return rel->rbegin()->first;
+        return it->second.rbegin()->first;
     }
 
+    void register_page_manager_sampler()
+    {
+        if (!storage_registry_ || page_manager_registered_) {
+            return;
+        }
+        page_manager_identifier_ = "shell.catalog";
+        storage_registry_->register_page_manager(page_manager_identifier_, [this]() {
+            if (this->page_manager_) {
+                return this->page_manager_->telemetry_snapshot();
+            }
+            return storage::PageManagerTelemetrySnapshot{};
+        });
+        page_manager_registered_ = true;
+    }
+
+    void reload_catalog_relations()
+    {
+        register_catalog_relation(catalog::kCatalogDatabasesRelationId, catalog::kCatalogDatabasesPageId);
+        register_catalog_relation(catalog::kCatalogSchemasRelationId, catalog::kCatalogSchemasPageId);
+        register_catalog_relation(catalog::kCatalogTablesRelationId, catalog::kCatalogTablesPageId);
+        register_catalog_relation(catalog::kCatalogColumnsRelationId, catalog::kCatalogColumnsPageId);
+        register_catalog_relation(catalog::kCatalogIndexesRelationId, catalog::kCatalogIndexesPageId);
+    }
+
+    void register_catalog_relation(catalog::RelationId relation_id, std::uint32_t page_id)
+    {
+        relation_pages_[relation_id.value] = page_id;
+        if (page_buffers_.find(page_id) == page_buffers_.end()) {
+            std::array<std::byte, storage::kPageSize> buffer{};
+            buffer.fill(std::byte{0});
+            page_buffers_[page_id] = buffer;
+            auto span = std::span<std::byte>(page_buffers_[page_id].data(), page_buffers_[page_id].size());
+            (void)page_manager_->initialize_page(span, storage::PageType::Meta, page_id);
+        }
+        refresh_relation_cache(relation_id);
+    }
+
+    void refresh_relation_cache(catalog::RelationId relation_id)
+    {
+        auto page_it = relation_pages_.find(relation_id.value);
+        if (page_it == relation_pages_.end()) {
+            return;
+        }
+        auto buffer_it = page_buffers_.find(page_it->second);
+        if (buffer_it == page_buffers_.end()) {
+            return;
+        }
+
+        auto page_span = std::span<const std::byte>(buffer_it->second.data(), buffer_it->second.size());
+        auto& relation = relations_[relation_id.value];
+        relation.clear();
+
+        const auto& header = storage::page_header(page_span);
+        for (std::uint16_t slot = 0U; slot < header.tuple_count; ++slot) {
+            auto tuple = storage::read_tuple(page_span, slot);
+            if (tuple.empty()) {
+                continue;
+            }
+            auto row_id = extract_row_id(relation_id, tuple);
+            if (!row_id) {
+                continue;
+            }
+            relation[*row_id] = std::vector<std::byte>(tuple.begin(), tuple.end());
+        }
+    }
+
+    static bool is_catalog_relation(catalog::RelationId relation_id)
+    {
+        switch (relation_id.value) {
+        case catalog::kCatalogDatabasesRelationId.value:
+        case catalog::kCatalogSchemasRelationId.value:
+        case catalog::kCatalogTablesRelationId.value:
+        case catalog::kCatalogColumnsRelationId.value:
+        case catalog::kCatalogIndexesRelationId.value:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    static std::optional<std::uint64_t> extract_row_id(catalog::RelationId relation_id,
+                                                       std::span<const std::byte> tuple)
+    {
+        using namespace catalog;
+        if (relation_id == kCatalogDatabasesRelationId) {
+            auto view = decode_catalog_database(tuple);
+            if (!view) {
+                return std::nullopt;
+            }
+            return view->database_id.value;
+        }
+        if (relation_id == kCatalogSchemasRelationId) {
+            auto view = decode_catalog_schema(tuple);
+            if (!view) {
+                return std::nullopt;
+            }
+            return view->schema_id.value;
+        }
+        if (relation_id == kCatalogTablesRelationId) {
+            auto view = decode_catalog_table(tuple);
+            if (!view) {
+                return std::nullopt;
+            }
+            return view->relation_id.value;
+        }
+        if (relation_id == kCatalogColumnsRelationId) {
+            auto view = decode_catalog_column(tuple);
+            if (!view) {
+                return std::nullopt;
+            }
+            return view->column_id.value;
+        }
+        if (relation_id == kCatalogIndexesRelationId) {
+            auto view = decode_catalog_index(tuple);
+            if (!view) {
+                return std::nullopt;
+            }
+            return view->index_id.value;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<std::uint16_t> find_slot(catalog::RelationId relation_id,
+                                           std::span<const std::byte> page_span,
+                                           std::uint64_t row_id) const
+    {
+        const auto& header = storage::page_header(page_span);
+        for (std::uint16_t slot = 0U; slot < header.tuple_count; ++slot) {
+            auto tuple = storage::read_tuple(page_span, slot);
+            if (tuple.empty()) {
+                continue;
+            }
+            auto candidate = extract_row_id(relation_id, tuple);
+            if (candidate && *candidate == row_id) {
+                return slot;
+            }
+        }
+        return std::nullopt;
+    }
+
+    Config config_{};
+    storage::StorageTelemetryRegistry* storage_registry_ = nullptr;
+    storage::WalTelemetryRegistry* wal_registry_ = nullptr;
+    std::shared_ptr<storage::AsyncIo> async_io_{};
+    std::shared_ptr<storage::WalWriter> wal_writer_{};
+    storage::FreeSpaceMap fsm_{};
+    std::unique_ptr<storage::PageManager> page_manager_{};
     std::unordered_map<std::uint64_t, Relation> relations_{};
+    std::unordered_map<std::uint64_t, std::uint32_t> relation_pages_{};
+    std::unordered_map<std::uint32_t, std::array<std::byte, storage::kPageSize>> page_buffers_{};
+    std::filesystem::path wal_directory_{};
+    bool initialized_ = false;
+    bool page_manager_registered_ = false;
+    std::string page_manager_identifier_{};
 };
 
 namespace {
@@ -904,7 +1214,7 @@ bool decode_row_payload(const ShellBackend::TableData& table,
 class ShellTableScanCursor final : public bored::storage::TableScanCursor {
 public:
     ShellTableScanCursor(const ShellBackend::TableData* table,
-                        const ShellBackend::InMemoryCatalogStorage* storage)
+                         const ShellBackend::CatalogStorage* storage)
         : table_{table}
         , storage_{storage}
     {
@@ -917,7 +1227,7 @@ public:
             return false;
         }
 
-    const auto& [row_id, payload] = *iterator_;
+        const auto& [row_id, payload] = *iterator_;
         payload_buffer_.clear();
         append_uint64(payload_buffer_, row_id);
         payload_buffer_.insert(payload_buffer_.end(), payload.begin(), payload.end());
@@ -940,16 +1250,16 @@ public:
     {
         if (storage_ == nullptr || table_ == nullptr) {
             relation_ = nullptr;
-            iterator_ = ShellBackend::InMemoryCatalogStorage::Relation::const_iterator{};
-            end_iterator_ = ShellBackend::InMemoryCatalogStorage::Relation::const_iterator{};
+            iterator_ = ShellBackend::CatalogStorage::Relation::const_iterator{};
+            end_iterator_ = ShellBackend::CatalogStorage::Relation::const_iterator{};
             slot_index_ = 0U;
             return;
         }
 
         relation_ = storage_->relation(table_->relation_id);
         if (relation_ == nullptr) {
-            iterator_ = ShellBackend::InMemoryCatalogStorage::Relation::const_iterator{};
-            end_iterator_ = ShellBackend::InMemoryCatalogStorage::Relation::const_iterator{};
+            iterator_ = ShellBackend::CatalogStorage::Relation::const_iterator{};
+            end_iterator_ = ShellBackend::CatalogStorage::Relation::const_iterator{};
             slot_index_ = 0U;
             return;
         }
@@ -961,10 +1271,10 @@ public:
 
 private:
     const ShellBackend::TableData* table_ = nullptr;
-    const ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
-    const ShellBackend::InMemoryCatalogStorage::Relation* relation_ = nullptr;
-    ShellBackend::InMemoryCatalogStorage::Relation::const_iterator iterator_{};
-    ShellBackend::InMemoryCatalogStorage::Relation::const_iterator end_iterator_{};
+    const ShellBackend::CatalogStorage* storage_ = nullptr;
+    const ShellBackend::CatalogStorage::Relation* relation_ = nullptr;
+    ShellBackend::CatalogStorage::Relation::const_iterator iterator_{};
+    ShellBackend::CatalogStorage::Relation::const_iterator end_iterator_{};
     std::size_t slot_index_ = 0U;
     std::vector<std::byte> payload_buffer_{};
     bored::storage::TupleHeader current_header_{};
@@ -973,7 +1283,7 @@ private:
 class ShellStorageReader final : public bored::storage::StorageReader {
 public:
     ShellStorageReader(const ShellBackend::TableData* table,
-                       const ShellBackend::InMemoryCatalogStorage* storage)
+                       const ShellBackend::CatalogStorage* storage)
         : table_{table}
         , storage_{storage}
     {}
@@ -986,7 +1296,7 @@ public:
 
 private:
     const ShellBackend::TableData* table_ = nullptr;
-    const ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
+    const ShellBackend::CatalogStorage* storage_ = nullptr;
 };
 
 class ShellValuesExecutor final : public bored::executor::ExecutorNode {
@@ -1025,7 +1335,7 @@ private:
 
 class ShellInsertTarget final : public bored::executor::InsertExecutor::Target {
 public:
-    ShellInsertTarget(ShellBackend::TableData* table, ShellBackend::InMemoryCatalogStorage* storage)
+    ShellInsertTarget(ShellBackend::TableData* table, ShellBackend::CatalogStorage* storage)
         : table_{table}
         , storage_{storage}
     {}
@@ -1064,14 +1374,14 @@ public:
 
 private:
     ShellBackend::TableData* table_ = nullptr;
-    ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
+    ShellBackend::CatalogStorage* storage_ = nullptr;
     std::vector<ScalarValue> decoded_values_{};
     std::size_t inserted_ = 0U;
 };
 
 class ShellUpdateTarget final : public bored::executor::UpdateExecutor::Target {
 public:
-    ShellUpdateTarget(ShellBackend::TableData* table, ShellBackend::InMemoryCatalogStorage* storage)
+    ShellUpdateTarget(ShellBackend::TableData* table, ShellBackend::CatalogStorage* storage)
         : table_{table}
         , storage_{storage}
     {}
@@ -1122,7 +1432,7 @@ public:
 
 private:
     ShellBackend::TableData* table_ = nullptr;
-    ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
+    ShellBackend::CatalogStorage* storage_ = nullptr;
     std::vector<ScalarValue> decoded_values_{};
     std::vector<std::byte> existing_payload_{};
     std::size_t updated_ = 0U;
@@ -1131,7 +1441,7 @@ private:
 
 class ShellDeleteTarget final : public bored::executor::DeleteExecutor::Target {
 public:
-    ShellDeleteTarget(ShellBackend::TableData* table, ShellBackend::InMemoryCatalogStorage* storage)
+    ShellDeleteTarget(ShellBackend::TableData* table, ShellBackend::CatalogStorage* storage)
         : table_{table}
         , storage_{storage}
     {}
@@ -1174,7 +1484,7 @@ public:
 
 private:
     ShellBackend::TableData* table_ = nullptr;
-    ShellBackend::InMemoryCatalogStorage* storage_ = nullptr;
+    ShellBackend::CatalogStorage* storage_ = nullptr;
     std::vector<std::byte> existing_payload_{};
     std::size_t deleted_ = 0U;
     std::size_t reclaimed_bytes_ = 0U;
@@ -1202,50 +1512,48 @@ ShellBackend::ShellBackend()
 
 ShellBackend::ShellBackend(Config config)
     : config_{std::move(config)}
-    , storage_{std::make_unique<InMemoryCatalogStorage>()}
     , snapshot_manager_{make_relaxed_snapshot()}
     , txn_manager_{txn_allocator_}
 {
+    if (config_.storage_directory.empty()) {
+        config_.storage_directory = std::filesystem::current_path() / "bored_shell_data";
+    }
+    if (config_.wal_directory.empty()) {
+        config_.wal_directory = config_.storage_directory / "wal";
+    }
+
     catalog::CatalogCache::instance().reset();
+
+    storage_ = std::make_unique<CatalogStorage>(config_, &storage_registry_, &wal_registry_);
+    if (auto init_ec = storage_->initialize(); init_ec) {
+        throw std::system_error(init_ec);
+    }
 
     identifier_allocator_ = std::make_unique<InMemoryIdentifierAllocator>();
 
-    {
-        catalog::CatalogDatabaseDescriptor descriptor{};
-        descriptor.tuple.xmin = catalog::kCatalogBootstrapTxnId;
-        descriptor.tuple.xmax = 0U;
-        descriptor.database_id = catalog::kSystemDatabaseId;
-        descriptor.default_schema_id = catalog::kSystemSchemaId;
-        descriptor.name = "system";
-        storage_->seed(catalog::kCatalogDatabasesRelationId,
-                       descriptor.database_id.value,
-                       catalog::serialize_catalog_database(descriptor));
-    }
-
-    {
-        catalog::CatalogSchemaDescriptor descriptor{};
-        descriptor.tuple.xmin = catalog::kCatalogBootstrapTxnId;
-        descriptor.tuple.xmax = 0U;
-        descriptor.schema_id = catalog::kSystemSchemaId;
-        descriptor.database_id = catalog::kSystemDatabaseId;
-        descriptor.name = "system";
-        storage_->seed(catalog::kCatalogSchemasRelationId,
-                       descriptor.schema_id.value,
-                       catalog::serialize_catalog_schema(descriptor));
-    }
-
     default_schema_id_ = config_.default_schema_id.value_or(catalog::SchemaId{42U});
-
-    {
+    if (!storage_->schema(default_database_id_, config_.default_schema_name)) {
         catalog::CatalogSchemaDescriptor descriptor{};
         descriptor.tuple.xmin = catalog::kCatalogBootstrapTxnId;
         descriptor.tuple.xmax = 0U;
+        descriptor.tuple.visibility_flags = catalog::to_value(catalog::CatalogVisibilityFlag::Frozen);
         descriptor.schema_id = default_schema_id_;
         descriptor.database_id = default_database_id_;
         descriptor.name = config_.default_schema_name;
-        storage_->seed(catalog::kCatalogSchemasRelationId,
-                       descriptor.schema_id.value,
-                       catalog::serialize_catalog_schema(descriptor));
+
+        catalog::CatalogMutationBatch bootstrap_batch{};
+        catalog::CatalogStagedMutation mutation{};
+        mutation.kind = catalog::CatalogMutationKind::Insert;
+        mutation.relation_id = catalog::kCatalogSchemasRelationId;
+        mutation.row_id = descriptor.schema_id.value;
+
+        catalog::CatalogTupleVersion version{};
+        version.descriptor = descriptor.tuple;
+        version.payload = catalog::serialize_catalog_schema(descriptor);
+        mutation.after = version;
+
+        bootstrap_batch.mutations.push_back(std::move(mutation));
+        storage_->apply(bootstrap_batch);
     }
 
     ddl::DdlCommandDispatcher::Config dispatcher_cfg{};
@@ -1699,13 +2007,25 @@ ddl::DdlCommandResponse ShellBackend::handle_create_database(ddl::DdlCommandCont
     catalog::CatalogDatabaseDescriptor descriptor{};
     descriptor.tuple.xmin = catalog::kCatalogBootstrapTxnId;
     descriptor.tuple.xmax = 0U;
+    descriptor.tuple.visibility_flags = catalog::to_value(catalog::CatalogVisibilityFlag::Frozen);
     descriptor.database_id = catalog::DatabaseId{candidate};
     descriptor.default_schema_id = default_schema_id_;
     descriptor.name = request.name;
 
-    storage_->seed(catalog::kCatalogDatabasesRelationId,
-                   descriptor.database_id.value,
-                   catalog::serialize_catalog_database(descriptor));
+    catalog::CatalogMutationBatch batch{};
+    catalog::CatalogStagedMutation mutation{};
+    mutation.kind = catalog::CatalogMutationKind::Insert;
+    mutation.relation_id = catalog::kCatalogDatabasesRelationId;
+    mutation.row_id = descriptor.database_id.value;
+
+    catalog::CatalogTupleVersion version{};
+    version.descriptor = descriptor.tuple;
+    version.payload = catalog::serialize_catalog_database(descriptor);
+    mutation.after = version;
+
+    batch.mutations.push_back(std::move(mutation));
+    storage_->apply(batch);
+    refresh_table_cache();
 
     next_database_id_ = candidate + 1U;
 
@@ -1743,31 +2063,100 @@ ddl::DdlCommandResponse ShellBackend::handle_drop_database(ddl::DdlCommandContex
         }
     }
 
+    catalog::CatalogMutationBatch batch{};
+
     std::unordered_set<std::uint64_t> relation_ids;
     const auto tables = storage_->list_tables();
     for (const auto& table : tables) {
-        if (schema_ids.count(table.schema_id.value) != 0U) {
-            relation_ids.insert(table.relation_id.value);
-            storage_->erase_row(catalog::kCatalogTablesRelationId, table.relation_id.value);
+        if (schema_ids.count(table.schema_id.value) == 0U) {
+            continue;
         }
+        relation_ids.insert(table.relation_id.value);
+
+        std::vector<std::byte> payload;
+        if (!storage_->fetch_row(catalog::kCatalogTablesRelationId, table.relation_id.value, payload)) {
+            continue;
+        }
+
+        catalog::CatalogStagedMutation mutation{};
+        mutation.kind = catalog::CatalogMutationKind::Delete;
+        mutation.relation_id = catalog::kCatalogTablesRelationId;
+        mutation.row_id = table.relation_id.value;
+
+        catalog::CatalogTupleVersion version{};
+        version.descriptor = table.tuple;
+        version.payload = std::move(payload);
+        mutation.before = version;
+
+        batch.mutations.push_back(std::move(mutation));
     }
 
     const auto columns = storage_->list_columns();
     for (const auto& column : columns) {
-        if (relation_ids.count(column.relation_id.value) != 0U) {
-            storage_->erase_row(catalog::kCatalogColumnsRelationId, column.column_id.value);
+        if (relation_ids.count(column.relation_id.value) == 0U) {
+            continue;
         }
+
+        std::vector<std::byte> payload;
+        if (!storage_->fetch_row(catalog::kCatalogColumnsRelationId, column.column_id.value, payload)) {
+            continue;
+        }
+
+        catalog::CatalogStagedMutation mutation{};
+        mutation.kind = catalog::CatalogMutationKind::Delete;
+        mutation.relation_id = catalog::kCatalogColumnsRelationId;
+        mutation.row_id = column.column_id.value;
+
+        catalog::CatalogTupleVersion version{};
+        version.descriptor = column.tuple;
+        version.payload = std::move(payload);
+        mutation.before = version;
+
+        batch.mutations.push_back(std::move(mutation));
     }
 
     for (const auto& schema : schemas) {
-        if (schema.database_id == database_id) {
-            storage_->erase_row(catalog::kCatalogSchemasRelationId, schema.schema_id.value);
+        if (schema.database_id != database_id) {
+            continue;
         }
+
+        std::vector<std::byte> payload;
+        if (!storage_->fetch_row(catalog::kCatalogSchemasRelationId, schema.schema_id.value, payload)) {
+            continue;
+        }
+
+        catalog::CatalogStagedMutation mutation{};
+        mutation.kind = catalog::CatalogMutationKind::Delete;
+        mutation.relation_id = catalog::kCatalogSchemasRelationId;
+        mutation.row_id = schema.schema_id.value;
+
+        catalog::CatalogTupleVersion version{};
+        version.descriptor = schema.tuple;
+        version.payload = std::move(payload);
+        mutation.before = version;
+
+        batch.mutations.push_back(std::move(mutation));
     }
 
-    storage_->erase_row(catalog::kCatalogDatabasesRelationId, database_id.value);
+    std::vector<std::byte> database_payload;
+    if (storage_->fetch_row(catalog::kCatalogDatabasesRelationId, database_id.value, database_payload)) {
+        catalog::CatalogStagedMutation mutation{};
+        mutation.kind = catalog::CatalogMutationKind::Delete;
+        mutation.relation_id = catalog::kCatalogDatabasesRelationId;
+        mutation.row_id = database_id.value;
 
-    refresh_table_cache();
+        catalog::CatalogTupleVersion version{};
+        version.descriptor = existing->tuple;
+        version.payload = std::move(database_payload);
+        mutation.before = version;
+
+        batch.mutations.push_back(std::move(mutation));
+    }
+
+    if (!batch.mutations.empty()) {
+        storage_->apply(batch);
+        refresh_table_cache();
+    }
 
     return ddl::make_success();
 }

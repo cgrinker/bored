@@ -9,6 +9,7 @@
 #include "bored/shell/shell_engine.hpp"
 #include "bored/ddl/ddl_command.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
+#include "bored/storage/wal_telemetry_registry.hpp"
 #include "bored/txn/transaction_manager.hpp"
 #include "bored/txn/transaction_types.hpp"
 
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <filesystem>
 #include <span>
 #include <string>
 #include <string_view>
@@ -55,6 +57,8 @@ public:
     struct Config final {
         std::string default_schema_name = "analytics";
         std::optional<catalog::SchemaId> default_schema_id{};
+        std::filesystem::path storage_directory{};
+        std::filesystem::path wal_directory{};
     };
 
     ShellBackend();
@@ -71,7 +75,7 @@ public:
     [[nodiscard]] catalog::DatabaseId default_database() const noexcept { return default_database_id_; }
 
 private:
-    struct InMemoryCatalogStorage;
+    struct CatalogStorage;
     struct ColumnInfo final {
         std::string name;
         catalog::CatalogColumnType type = catalog::CatalogColumnType::Unknown;
@@ -165,13 +169,14 @@ private:
     [[nodiscard]] static std::string uppercase(std::string_view text);
 
     Config config_{};
-    std::unique_ptr<InMemoryCatalogStorage> storage_{};
     txn::TransactionIdAllocatorStub txn_allocator_{1'000U};
     txn::SnapshotManagerStub snapshot_manager_{};
     txn::TransactionManager txn_manager_;
     std::unique_ptr<catalog::CatalogIdentifierAllocator> identifier_allocator_{};
     std::unique_ptr<ddl::DdlCommandDispatcher> dispatcher_{};
     storage::StorageTelemetryRegistry storage_registry_{};
+    storage::WalTelemetryRegistry wal_registry_{};
+    std::unique_ptr<CatalogStorage> storage_{};
     std::unique_ptr<parser::DdlScriptExecutor> ddl_executor_{};
     catalog::SchemaId default_schema_id_{};
     catalog::DatabaseId default_database_id_{catalog::kSystemDatabaseId};
