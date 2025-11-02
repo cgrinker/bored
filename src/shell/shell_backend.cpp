@@ -67,12 +67,32 @@ namespace bored::shell {
 
 using ScalarValue = std::variant<std::int64_t, std::string>;
 
+struct ShellBackendSessionAccess final {
+    static txn::TransactionContext* session_transaction_context(ShellBackend& backend) noexcept
+    {
+        return backend.session_transaction_context();
+    }
+
+    static void mark_session_transaction_dirty(ShellBackend& backend)
+    {
+        backend.mark_session_transaction_dirty();
+    }
+
+    static void mark_session_transaction_failed(ShellBackend& backend)
+    {
+        backend.mark_session_transaction_failed();
+    }
+};
+
 namespace {
 
 constexpr std::string_view kInsertKeyword = "INSERT";
 constexpr std::string_view kUpdateKeyword = "UPDATE";
 constexpr std::string_view kDeleteKeyword = "DELETE";
 constexpr std::string_view kSelectKeyword = "SELECT";
+constexpr std::string_view kBeginKeyword = "BEGIN";
+constexpr std::string_view kCommitKeyword = "COMMIT";
+constexpr std::string_view kRollbackKeyword = "ROLLBACK";
 
 std::string trim_copy(std::string_view text)
 {
@@ -193,7 +213,16 @@ class ShellTransactionGuard final {
 public:
     ShellTransactionGuard(txn::TransactionManager& manager, const txn::TransactionOptions& options)
         : manager_{manager}
-        , context_{manager.begin(options)}
+        , mode_{Mode::Owned}
+        , owned_context_{manager.begin(options)}
+        , active_{true}
+    {
+    }
+
+    ShellTransactionGuard(txn::TransactionManager& manager, txn::TransactionContext& existing)
+        : manager_{manager}
+        , mode_{Mode::Borrowed}
+        , borrowed_context_{&existing}
     {
     }
 
@@ -204,39 +233,135 @@ public:
 
     ~ShellTransactionGuard()
     {
-        if (active_) {
+        if (mode_ == Mode::Owned && active_) {
             abort();
         }
     }
 
-    [[nodiscard]] txn::TransactionContext& context() noexcept { return context_; }
-    [[nodiscard]] const txn::TransactionContext& context() const noexcept { return context_; }
+    [[nodiscard]] txn::TransactionContext& context() noexcept
+    {
+        return mode_ == Mode::Owned ? owned_context_ : *borrowed_context_;
+    }
+
+    [[nodiscard]] const txn::TransactionContext& context() const noexcept
+    {
+        return mode_ == Mode::Owned ? owned_context_ : *borrowed_context_;
+    }
+
+    [[nodiscard]] bool owns_context() const noexcept { return mode_ == Mode::Owned; }
 
     void commit()
     {
-        if (!active_) {
+        if (mode_ != Mode::Owned || !active_) {
             return;
         }
-        manager_.commit(context_);
+        manager_.commit(owned_context_);
         active_ = false;
     }
 
     void abort() noexcept
     {
-        if (!active_) {
+        if (mode_ != Mode::Owned || !active_) {
             return;
         }
         try {
-            manager_.abort(context_);
+            manager_.abort(owned_context_);
         } catch (...) {
         }
         active_ = false;
     }
 
 private:
+    enum class Mode {
+        Owned,
+        Borrowed
+    };
+
     txn::TransactionManager& manager_;
-    txn::TransactionContext context_{};
-    bool active_ = true;
+    Mode mode_ = Mode::Owned;
+    txn::TransactionContext owned_context_{};
+    txn::TransactionContext* borrowed_context_ = nullptr;
+    bool active_ = false;
+};
+
+class TransactionWorkScope final {
+public:
+    TransactionWorkScope(ShellBackend& backend,
+                         txn::TransactionManager& manager,
+                         const txn::TransactionOptions& options)
+        : backend_{backend}
+    {
+        if (auto* session = ShellBackendSessionAccess::session_transaction_context(backend); session != nullptr) {
+            context_ = session;
+            owns_context_ = false;
+        } else {
+            guard_ = std::make_unique<ShellTransactionGuard>(manager, options);
+            context_ = &guard_->context();
+            owns_context_ = true;
+        }
+    }
+
+    TransactionWorkScope(const TransactionWorkScope&) = delete;
+    TransactionWorkScope& operator=(const TransactionWorkScope&) = delete;
+
+    ~TransactionWorkScope()
+    {
+        if (!finalized_) {
+            abort();
+        }
+    }
+
+    [[nodiscard]] txn::TransactionContext& context() noexcept { return *context_; }
+    [[nodiscard]] bool owns_context() const noexcept { return owns_context_; }
+
+    void commit()
+    {
+        if (finalized_) {
+            return;
+        }
+        if (owns_context_) {
+            guard_->commit();
+        } else {
+            ShellBackendSessionAccess::mark_session_transaction_dirty(backend_);
+        }
+        finalized_ = true;
+    }
+
+    void commit_read_only()
+    {
+        if (finalized_) {
+            return;
+        }
+        if (owns_context_) {
+            guard_->commit();
+        }
+        finalized_ = true;
+    }
+
+    void abort()
+    {
+        if (finalized_) {
+            return;
+        }
+        if (owns_context_) {
+            guard_->abort();
+        } else {
+            ShellBackendSessionAccess::mark_session_transaction_failed(backend_);
+        }
+        finalized_ = true;
+    }
+
+    void release() noexcept
+    {
+        finalized_ = true;
+    }
+
+private:
+    ShellBackend& backend_;
+    std::unique_ptr<ShellTransactionGuard> guard_{};
+    txn::TransactionContext* context_ = nullptr;
+    bool owns_context_ = false;
+    bool finalized_ = false;
 };
 
 class CatalogTransactionGuard final {
@@ -2298,6 +2423,58 @@ CommandMetrics ShellBackend::make_error_metrics(const std::string& sql,
     return metrics;
 }
 
+CommandMetrics ShellBackend::make_transaction_error(std::string message,
+                                                    std::vector<std::string> hints)
+{
+    CommandMetrics metrics{};
+    metrics.success = false;
+    metrics.summary = std::move(message);
+
+    parser::ParserDiagnostic diagnostic{};
+    diagnostic.severity = parser::ParserSeverity::Error;
+    diagnostic.message = metrics.summary;
+    diagnostic.remediation_hints = std::move(hints);
+    metrics.diagnostics.push_back(std::move(diagnostic));
+    return metrics;
+}
+
+bool ShellBackend::has_active_transaction() const noexcept
+{
+    return session_transaction_.has_value() && session_transaction_->active();
+}
+
+bool ShellBackend::session_requires_rollback() const noexcept
+{
+    return session_transaction_.has_value() && session_transaction_->needs_rollback;
+}
+
+txn::TransactionContext* ShellBackend::session_transaction_context() noexcept
+{
+    if (!session_transaction_.has_value()) {
+        return nullptr;
+    }
+    return &session_transaction_->context;
+}
+
+void ShellBackend::mark_session_transaction_dirty()
+{
+    if (session_transaction_) {
+        session_transaction_->dirty = true;
+    }
+}
+
+void ShellBackend::mark_session_transaction_failed()
+{
+    if (session_transaction_) {
+        session_transaction_->needs_rollback = true;
+    }
+}
+
+void ShellBackend::clear_session_transaction()
+{
+    session_transaction_.reset();
+}
+
 ddl::DdlCommandResponse ShellBackend::handle_create_database(ddl::DdlCommandContext&,
                                                              const ddl::CreateDatabaseRequest& request)
 {
@@ -2491,6 +2668,16 @@ CommandMetrics ShellBackend::execute_dml(const std::string& sql)
         return make_error_metrics(sql, "DML command is empty.");
     }
 
+    if (starts_with_ci(normalized, kBeginKeyword)) {
+        return execute_begin();
+    }
+    if (starts_with_ci(normalized, kCommitKeyword)) {
+        return execute_commit();
+    }
+    if (starts_with_ci(normalized, kRollbackKeyword)) {
+        return execute_rollback();
+    }
+
     if (starts_with_ci(normalized, kInsertKeyword)) {
         return execute_insert(normalized);
     }
@@ -2509,8 +2696,84 @@ CommandMetrics ShellBackend::execute_dml(const std::string& sql)
                               {"Supported commands: INSERT, UPDATE, DELETE, SELECT."});
 }
 
+CommandMetrics ShellBackend::execute_begin()
+{
+    if (has_active_transaction()) {
+        return make_transaction_error("Transaction already active.",
+                                      {"Use COMMIT or ROLLBACK before issuing BEGIN."});
+    }
+
+    txn::TransactionOptions txn_options{};
+    session_transaction_.emplace();
+    session_transaction_->context = txn_manager_.begin(txn_options);
+    session_transaction_->dirty = false;
+    session_transaction_->needs_rollback = false;
+
+    CommandMetrics metrics{};
+    metrics.success = true;
+    metrics.summary = "Transaction started.";
+    return metrics;
+}
+
+CommandMetrics ShellBackend::execute_commit()
+{
+    if (!has_active_transaction()) {
+        return make_transaction_error("No active transaction to commit.");
+    }
+
+    if (session_requires_rollback()) {
+        return make_transaction_error("Transaction is aborted; run ROLLBACK before COMMIT.");
+    }
+
+    try {
+        txn_manager_.commit(session_transaction_->context);
+    } catch (const std::exception& ex) {
+        mark_session_transaction_failed();
+        return make_transaction_error(std::string{"Commit failed: "} + ex.what(),
+                                      {"Run ROLLBACK to clear the transaction before retrying."});
+    } catch (...) {
+        mark_session_transaction_failed();
+        return make_transaction_error("Commit failed due to unknown error.",
+                                      {"Run ROLLBACK to clear the transaction before retrying."});
+    }
+
+    clear_session_transaction();
+
+    CommandMetrics metrics{};
+    metrics.success = true;
+    metrics.summary = "Transaction committed.";
+    return metrics;
+}
+
+CommandMetrics ShellBackend::execute_rollback()
+{
+    if (!has_active_transaction()) {
+        return make_transaction_error("No active transaction to roll back.");
+    }
+
+    try {
+        txn_manager_.abort(session_transaction_->context);
+    } catch (const std::exception& ex) {
+        return make_transaction_error(std::string{"Rollback failed: "} + ex.what());
+    } catch (...) {
+        return make_transaction_error("Rollback failed due to unknown error.");
+    }
+
+    clear_session_transaction();
+
+    CommandMetrics metrics{};
+    metrics.success = true;
+    metrics.summary = "Transaction rolled back.";
+    return metrics;
+}
+
 CommandMetrics ShellBackend::execute_insert(const std::string& sql)
 {
+    if (session_requires_rollback()) {
+        return make_error_metrics(sql,
+                                  "Transaction is aborted; run ROLLBACK before executing statements.");
+    }
+
     auto parse_result = parser::parse_insert(sql);
     if (!parse_result.success()) {
         return make_parser_error_metrics(sql,
@@ -2519,8 +2782,8 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     }
 
     txn::TransactionOptions txn_options{};
-    ShellTransactionGuard txn_guard{txn_manager_, txn_options};
-    auto& txn_context = txn_guard.context();
+    TransactionWorkScope txn_scope{*this, txn_manager_, txn_options};
+    auto& txn_context = txn_scope.context();
 
     catalog::CatalogTransactionConfig tx_cfg{};
     tx_cfg.id_allocator = &txn_allocator_;
@@ -2544,6 +2807,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
 
     auto binding = parser::relational::bind_insert(binder_cfg, *parse_result.statement);
     if (!binding.success()) {
+        txn_scope.release();
         return make_parser_error_metrics(sql,
                                          std::move(binding.diagnostics),
                                          "Failed to bind INSERT statement.");
@@ -2551,16 +2815,19 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
 
     const auto* target_ref = parse_result.statement->target;
     if (target_ref == nullptr || !target_ref->binding.has_value()) {
+        txn_scope.release();
         return make_error_metrics(sql, "INSERT target table binding is missing.");
     }
 
     const auto* table_binding = &*target_ref->binding;
     auto* table = find_table(*table_binding);
     if (table == nullptr) {
+        txn_scope.release();
         return make_error_metrics(sql, "Target table not found.", {"Verify the table exists."});
     }
 
     if (parse_result.statement->columns.size() != table->columns.size()) {
+        txn_scope.release();
         return make_error_metrics(sql,
                                   "INSERT column count must match table definition.",
                                   {"Provide values for all columns in the table."});
@@ -2572,12 +2839,14 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     column_indexes.reserve(parse_result.statement->columns.size());
     for (const auto& column : parse_result.statement->columns) {
         if (!column.binding.has_value()) {
+            txn_scope.release();
             return make_error_metrics(sql, "INSERT column binding is missing.");
         }
         planner_columns.push_back(column.binding->column_name);
         const auto key = normalize_identifier(column.binding->column_name);
         auto it = table->column_index.find(key);
         if (it == table->column_index.end()) {
+            txn_scope.release();
             return make_error_metrics(sql,
                                       "Column '" + column.binding->column_name + "' not found in target table.");
         }
@@ -2607,6 +2876,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     planner::PlannerContext planner_context{planner_cfg};
     auto planner_result = planner::plan_query(planner_context, logical_plan);
     if (!planner_result.plan.root()) {
+        txn_scope.release();
         return make_planner_error_metrics(sql,
                                           std::move(planner_result.diagnostics),
                                           "Failed to plan INSERT statement.");
@@ -2614,12 +2884,14 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
 
     const auto plan_root = planner_result.plan.root();
     if (plan_root->type() != planner::PhysicalOperatorType::Insert) {
+        txn_scope.release();
         return make_planner_error_metrics(sql,
                                           std::move(planner_result.diagnostics),
                                           "Planner produced unexpected physical operator for INSERT.");
     }
     if (plan_root->children().empty() ||
         plan_root->children().front()->type() != planner::PhysicalOperatorType::Values) {
+        txn_scope.release();
         return make_planner_error_metrics(sql,
                                           std::move(planner_result.diagnostics),
                                           "Planner INSERT plan is missing VALUES child.");
@@ -2627,6 +2899,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
 
     const auto& planned_columns = plan_root->properties().output_columns;
     if (!planned_columns.empty() && planned_columns != planner_columns) {
+        txn_scope.release();
         return make_planner_error_metrics(sql,
                                           std::move(planner_result.diagnostics),
                                           "Planner column projection does not match INSERT column list.");
@@ -2643,6 +2916,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     pending_rows.reserve(parse_result.statement->rows.size());
     for (const auto& row_node : parse_result.statement->rows) {
         if (row_node.values.size() != column_indexes.size()) {
+            txn_scope.release();
             return make_error_metrics(sql, "VALUES list does not match column count.");
         }
 
@@ -2652,11 +2926,13 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
             const auto& column_info = table->columns[column_index];
             const auto* expression = row_node.values[index];
             if (expression == nullptr || expression->kind != parser::relational::NodeKind::LiteralExpression) {
+                txn_scope.release();
                 return make_error_metrics(sql, "INSERT values must be literals.");
             }
 
             const auto& literal = static_cast<const parser::relational::LiteralExpression&>(*expression);
             if (literal.tag == parser::relational::LiteralTag::Null) {
+                txn_scope.release();
                 return make_error_metrics(sql,
                                           "NULL literals are not supported in bored_shell INSERT statements.",
                                           {"Provide concrete values for each column."});
@@ -2669,6 +2945,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
 
             std::int64_t numeric_value = 0;
             if (!parse_int64(literal.text, numeric_value)) {
+                txn_scope.release();
                 return make_error_metrics(sql,
                                           "Column '" + column_info.name + "' expects a numeric literal.");
             }
@@ -2719,19 +2996,24 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
                                 executor_detail_lines.end());
 
     if (auto ec = catalog_guard.commit()) {
-        txn_guard.abort();
+        txn_scope.abort();
         return make_error_metrics(sql,
                                   "Catalog transaction commit failed.",
                                   {"Retry the INSERT command."});
     }
 
-    txn_guard.commit();
+    txn_scope.commit();
 
     return metrics;
 }
 
 CommandMetrics ShellBackend::execute_update(const std::string& sql)
 {
+    if (session_requires_rollback()) {
+        return make_error_metrics(sql,
+                                  "Transaction is aborted; run ROLLBACK before executing statements.");
+    }
+
     auto parse_result = parser::parse_update(sql);
     if (!parse_result.success()) {
         return make_parser_error_metrics(sql,
@@ -2740,8 +3022,8 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     }
 
     txn::TransactionOptions txn_options{};
-    ShellTransactionGuard txn_guard{txn_manager_, txn_options};
-    auto& txn_context = txn_guard.context();
+    TransactionWorkScope txn_scope{*this, txn_manager_, txn_options};
+    auto& txn_context = txn_scope.context();
 
     catalog::CatalogTransactionConfig tx_cfg{};
     tx_cfg.id_allocator = &txn_allocator_;
@@ -2765,6 +3047,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
 
     auto binding = parser::relational::bind_update(binder_cfg, *parse_result.statement);
     if (!binding.success()) {
+        txn_scope.release();
         return make_parser_error_metrics(sql,
                                          std::move(binding.diagnostics),
                                          "Failed to bind UPDATE statement.");
@@ -2772,29 +3055,34 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
 
     const auto* target_ref = parse_result.statement->target;
     if (target_ref == nullptr || !target_ref->binding.has_value()) {
+        txn_scope.release();
         return make_error_metrics(sql, "UPDATE target table binding is missing.");
     }
 
     const auto* table_binding = &*target_ref->binding;
     auto* table = find_table(*table_binding);
     if (table == nullptr) {
+        txn_scope.release();
         return make_error_metrics(sql, "Target table not found.");
     }
 
     std::vector<std::string> logical_detail_lines;
 
     if (parse_result.statement->assignments.empty()) {
+        txn_scope.release();
         return make_error_metrics(sql, "UPDATE statement is missing a SET assignment.");
     }
 
     const auto& assignment = parse_result.statement->assignments.front();
     if (!assignment.binding.has_value() || assignment.value == nullptr) {
+        txn_scope.release();
         return make_error_metrics(sql, "UPDATE assignment binding is missing.");
     }
 
     const auto key = normalize_identifier(assignment.binding->column_name);
     auto target_it = table->column_index.find(key);
     if (target_it == table->column_index.end()) {
+        txn_scope.release();
         return make_error_metrics(sql,
                                   "Column '" + assignment.binding->column_name + "' not found in target table.");
     }
@@ -2812,6 +3100,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
                                            accessor,
                                            txn_context);
     if (std::holds_alternative<CommandMetrics>(plan_result)) {
+        txn_scope.release();
         return std::get<CommandMetrics>(std::move(plan_result));
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
@@ -2838,6 +3127,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
             string_constant = literal.text;
         } else {
             if (!parse_int64(literal.text, numeric_constant)) {
+                txn_scope.release();
                 return make_error_metrics(sql,
                                           "Column '" + target_column.name + "' expects a numeric literal.");
             }
@@ -2848,6 +3138,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
         if (binary.left == nullptr || binary.right == nullptr ||
             binary.left->kind != parser::relational::NodeKind::IdentifierExpression ||
             binary.right->kind != parser::relational::NodeKind::LiteralExpression) {
+            txn_scope.release();
             return make_error_metrics(sql,
                                       "Unsupported SET expression.",
                                       {"Supported forms: column = column +/- integer, column = integer, column = 'text'."});
@@ -2855,6 +3146,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
 
         if (binary.op != parser::relational::BinaryOperator::Add &&
             binary.op != parser::relational::BinaryOperator::Subtract) {
+            txn_scope.release();
             return make_error_metrics(sql,
                                       "Unsupported SET expression.",
                                       {"Supported forms: column = column +/- integer, column = integer, column = 'text'."});
@@ -2862,16 +3154,19 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
 
         const auto& left_identifier = static_cast<const parser::relational::IdentifierExpression&>(*binary.left);
         if (!left_identifier.binding.has_value()) {
+            txn_scope.release();
             return make_error_metrics(sql, "SET expression column binding is missing.");
         }
         const auto left_key = normalize_identifier(left_identifier.binding->column_name);
         if (left_key != key) {
+            txn_scope.release();
             return make_error_metrics(sql,
                                       "SET operations currently require the same source and target column.");
         }
 
         const auto& right_literal = static_cast<const parser::relational::LiteralExpression&>(*binary.right);
         if (!parse_int64(right_literal.text, delta_value)) {
+            txn_scope.release();
             return make_error_metrics(sql,
                                       "SET arithmetic requires an integer literal operand.");
         }
@@ -2880,6 +3175,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
                               AssignmentKind::AddInteger :
                               AssignmentKind::SubtractInteger;
     } else {
+        txn_scope.release();
         return make_error_metrics(sql,
                                   "Unsupported SET expression.",
                                   {"Supported forms: column = column +/- integer, column = integer, column = 'text'."});
@@ -2888,6 +3184,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     const auto* where_expression = parse_result.statement->where;
     if (where_expression == nullptr ||
         where_expression->kind != parser::relational::NodeKind::BinaryExpression) {
+        txn_scope.release();
         return make_error_metrics(sql,
                                   "Unsupported WHERE clause.",
                                   {"Only equality against integer literals is supported."});
@@ -2898,6 +3195,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
         predicate.right == nullptr ||
         predicate.left->kind != parser::relational::NodeKind::IdentifierExpression ||
         predicate.right->kind != parser::relational::NodeKind::LiteralExpression) {
+        txn_scope.release();
         return make_error_metrics(sql,
                                   "Unsupported WHERE clause.",
                                   {"Only equality against integer literals is supported."});
@@ -2905,11 +3203,13 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
 
     const auto& where_identifier = static_cast<const parser::relational::IdentifierExpression&>(*predicate.left);
     if (!where_identifier.binding.has_value()) {
+        txn_scope.release();
         return make_error_metrics(sql, "WHERE clause column binding is missing.");
     }
     const auto where_key = normalize_identifier(where_identifier.binding->column_name);
     auto where_it = table->column_index.find(where_key);
     if (where_it == table->column_index.end()) {
+        txn_scope.release();
         return make_error_metrics(sql,
                                   "Column '" + where_identifier.binding->column_name + "' not found in target table.");
     }
@@ -2919,32 +3219,28 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     if (where_column.type != catalog::CatalogColumnType::Int64 &&
         where_column.type != catalog::CatalogColumnType::UInt32 &&
         where_column.type != catalog::CatalogColumnType::UInt16) {
+        txn_scope.release();
         return make_error_metrics(sql, "WHERE clause must reference a numeric column.");
     }
 
     const auto& where_literal = static_cast<const parser::relational::LiteralExpression&>(*predicate.right);
     std::int64_t where_value = 0;
     if (!parse_int64(where_literal.text, where_value)) {
+        txn_scope.release();
         return make_error_metrics(sql,
                                   "WHERE clause literal must be an integer value.");
     }
 
-    logical_detail_lines.push_back("logical.delete target=" + format_relation_name(*table_binding) +
-                                   " predicate=" + where_identifier.binding->column_name + " = " +
-                                   where_literal.text);
-
-    logical_detail_lines.push_back("logical.delete target=" + format_relation_name(*table_binding) +
-                                   " predicate=" + where_identifier.binding->column_name + " = " +
-                                   where_literal.text);
-
     if (assignment_kind == AssignmentKind::StringConstant &&
         target_column.type != catalog::CatalogColumnType::Utf8) {
+        txn_scope.release();
         return make_error_metrics(sql,
                                   "Cannot assign text literal to non-text column '" + target_column.name + "'.");
     }
 
     if (assignment_kind != AssignmentKind::StringConstant &&
         target_column.type == catalog::CatalogColumnType::Utf8) {
+        txn_scope.release();
         return make_error_metrics(sql,
                                   "Cannot assign numeric expression to text column '" + target_column.name + "'.");
     }
@@ -3106,19 +3402,24 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
                                 executor_detail_lines.end());
 
     if (auto ec = catalog_guard.commit()) {
-        txn_guard.abort();
+        txn_scope.abort();
         return make_error_metrics(sql,
                                   "Catalog transaction commit failed.",
                                   {"Retry the UPDATE command."});
     }
 
-    txn_guard.commit();
+    txn_scope.commit();
 
     return metrics;
 }
 
 CommandMetrics ShellBackend::execute_delete(const std::string& sql)
 {
+    if (session_requires_rollback()) {
+        return make_error_metrics(sql,
+                                  "Transaction is aborted; run ROLLBACK before executing statements.");
+    }
+
     auto parse_result = parser::parse_delete(sql);
     if (!parse_result.success()) {
         return make_parser_error_metrics(sql,
@@ -3127,8 +3428,13 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     }
 
     txn::TransactionOptions txn_options{};
-    ShellTransactionGuard txn_guard{txn_manager_, txn_options};
-    auto& txn_context = txn_guard.context();
+    TransactionWorkScope txn_scope{*this, txn_manager_, txn_options};
+    auto& txn_context = txn_scope.context();
+
+    auto release_and_return = [&](CommandMetrics metrics) {
+        txn_scope.release();
+        return metrics;
+    };
 
     catalog::CatalogTransactionConfig tx_cfg{};
     tx_cfg.id_allocator = &txn_allocator_;
@@ -3152,20 +3458,20 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
 
     auto binding = parser::relational::bind_delete(binder_cfg, *parse_result.statement);
     if (!binding.success()) {
-        return make_parser_error_metrics(sql,
-                                         std::move(binding.diagnostics),
-                                         "Failed to bind DELETE statement.");
+        return release_and_return(make_parser_error_metrics(sql,
+                                                            std::move(binding.diagnostics),
+                                                            "Failed to bind DELETE statement."));
     }
 
     const auto* target_ref = parse_result.statement->target;
     if (target_ref == nullptr || !target_ref->binding.has_value()) {
-        return make_error_metrics(sql, "DELETE target table binding is missing.");
+        return release_and_return(make_error_metrics(sql, "DELETE target table binding is missing."));
     }
 
     const auto* table_binding = &*target_ref->binding;
     auto* table = find_table(*table_binding);
     if (table == nullptr) {
-        return make_error_metrics(sql, "Target table not found.");
+        return release_and_return(make_error_metrics(sql, "Target table not found."));
     }
 
     std::vector<std::string> logical_detail_lines;
@@ -3180,7 +3486,7 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
                                            accessor,
                                            txn_context);
     if (std::holds_alternative<CommandMetrics>(plan_result)) {
-        return std::get<CommandMetrics>(std::move(plan_result));
+        return release_and_return(std::get<CommandMetrics>(std::move(plan_result)));
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
@@ -3189,9 +3495,9 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     const auto* where_expression = parse_result.statement->where;
     if (where_expression == nullptr ||
         where_expression->kind != parser::relational::NodeKind::BinaryExpression) {
-        return make_error_metrics(sql,
-                                  "Unsupported WHERE clause.",
-                                  {"Only equality against integer literals is supported."});
+        return release_and_return(make_error_metrics(sql,
+                                                     "Unsupported WHERE clause.",
+                                                     {"Only equality against integer literals is supported."}));
     }
 
     const auto& predicate = static_cast<const parser::relational::BinaryExpression&>(*where_expression);
@@ -3199,20 +3505,21 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
         predicate.right == nullptr ||
         predicate.left->kind != parser::relational::NodeKind::IdentifierExpression ||
         predicate.right->kind != parser::relational::NodeKind::LiteralExpression) {
-        return make_error_metrics(sql,
-                                  "Unsupported WHERE clause.",
-                                  {"Only equality against integer literals is supported."});
+        return release_and_return(make_error_metrics(sql,
+                                                     "Unsupported WHERE clause.",
+                                                     {"Only equality against integer literals is supported."}));
     }
 
     const auto& where_identifier = static_cast<const parser::relational::IdentifierExpression&>(*predicate.left);
     if (!where_identifier.binding.has_value()) {
-        return make_error_metrics(sql, "WHERE clause column binding is missing.");
+        return release_and_return(make_error_metrics(sql, "WHERE clause column binding is missing."));
     }
     const auto where_key = normalize_identifier(where_identifier.binding->column_name);
     auto where_it = table->column_index.find(where_key);
     if (where_it == table->column_index.end()) {
-        return make_error_metrics(sql,
-                                  "Column '" + where_identifier.binding->column_name + "' not found in target table.");
+        return release_and_return(make_error_metrics(sql,
+                                                     "Column '" + where_identifier.binding->column_name +
+                                                         "' not found in target table."));
     }
 
     const auto where_index = where_it->second;
@@ -3220,14 +3527,14 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     if (where_column.type != catalog::CatalogColumnType::Int64 &&
         where_column.type != catalog::CatalogColumnType::UInt32 &&
         where_column.type != catalog::CatalogColumnType::UInt16) {
-        return make_error_metrics(sql, "WHERE clause must reference a numeric column.");
+        return release_and_return(make_error_metrics(sql, "WHERE clause must reference a numeric column."));
     }
 
     const auto& where_literal = static_cast<const parser::relational::LiteralExpression&>(*predicate.right);
     std::int64_t where_value = 0;
     if (!parse_int64(where_literal.text, where_value)) {
-        return make_error_metrics(sql,
-                                  "WHERE clause literal must be an integer value.");
+        return release_and_return(make_error_metrics(sql,
+                                                     "WHERE clause literal must be an integer value."));
     }
 
     const std::string predicate_expression = where_identifier.binding->column_name + " = " + where_literal.text;
@@ -3337,13 +3644,13 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
                                 executor_detail_lines.end());
 
     if (auto ec = catalog_guard.commit()) {
-        txn_guard.abort();
+        txn_scope.abort();
         return make_error_metrics(sql,
                                   "Catalog transaction commit failed.",
                                   {"Retry the DELETE command."});
     }
 
-    txn_guard.commit();
+    txn_scope.commit();
 
     return metrics;
 }
@@ -3355,6 +3662,11 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         return make_error_metrics(sql, "SELECT statement is empty.");
     }
 
+    if (session_requires_rollback()) {
+        return make_error_metrics(sql,
+                                  "Transaction is aborted; run ROLLBACK before executing statements.");
+    }
+
     auto parse_result = parser::parse_select(statement);
     if (!parse_result.success()) {
         return make_parser_error_metrics(sql, std::move(parse_result.diagnostics), "Failed to parse SELECT statement.");
@@ -3362,8 +3674,13 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
 
     txn::TransactionOptions txn_options{};
     txn_options.read_only = true;
-    ShellTransactionGuard txn_guard{txn_manager_, txn_options};
-    auto& txn_context = txn_guard.context();
+    TransactionWorkScope txn_scope{*this, txn_manager_, txn_options};
+    auto& txn_context = txn_scope.context();
+
+    auto release_and_return = [&](CommandMetrics metrics) {
+        txn_scope.release();
+        return metrics;
+    };
 
     catalog::CatalogTransactionConfig tx_cfg{};
     tx_cfg.id_allocator = &txn_allocator_;
@@ -3387,16 +3704,16 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
 
     auto binding = parser::relational::bind_select(binder_cfg, *parse_result.statement);
     if (!binding.success()) {
-        return make_parser_error_metrics(sql,
-                                         std::move(binding.diagnostics),
-                                         "Failed to bind SELECT statement.");
+        return release_and_return(make_parser_error_metrics(sql,
+                                                            std::move(binding.diagnostics),
+                                                            "Failed to bind SELECT statement."));
     }
 
     auto lowering = parser::relational::lower_select(*parse_result.statement);
     if (!lowering.success()) {
-        return make_parser_error_metrics(sql,
-                                         std::move(lowering.diagnostics),
-                                         "Failed to lower SELECT statement.");
+        return release_and_return(make_parser_error_metrics(sql,
+                                                            std::move(lowering.diagnostics),
+                                                            "Failed to lower SELECT statement."));
     }
 
     std::vector<std::string> logical_detail_lines;
@@ -3408,19 +3725,19 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     std::vector<std::string> plan_hints;
     auto plan = build_simple_select_plan(*parse_result.statement, plan_error, plan_hints);
     if (!plan.has_value()) {
-        return make_error_metrics(sql, std::move(plan_error), std::move(plan_hints));
+        return release_and_return(make_error_metrics(sql, std::move(plan_error), std::move(plan_hints)));
     }
 
     const auto* query = parse_result.statement->query;
     if (query == nullptr || query->from == nullptr || !query->from->binding.has_value()) {
-        return make_error_metrics(sql, "SELECT target table binding is missing.");
+        return release_and_return(make_error_metrics(sql, "SELECT target table binding is missing."));
     }
     const auto* table_binding = &*query->from->binding;
 
     TableData* table = nullptr;
     table = find_table(*table_binding);
     if (table == nullptr) {
-        return make_error_metrics(sql, "Target table not found.");
+        return release_and_return(make_error_metrics(sql, "Target table not found."));
     }
 
     std::vector<std::size_t> column_indexes;
@@ -3439,7 +3756,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
             const auto key = normalize_identifier(column_name);
             auto it = table->column_index.find(key);
             if (it == table->column_index.end()) {
-                return make_error_metrics(sql, "Column '" + column_name + "' not found in target table.");
+                return release_and_return(make_error_metrics(sql, "Column '" + column_name + "' not found in target table."));
             }
             column_indexes.push_back(it->second);
             selected_columns.push_back(table->columns[it->second].name);
@@ -3448,7 +3765,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
 
     auto plan_result = plan_select_operation(sql, *table_binding, *table, selected_columns, accessor, txn_context);
     if (std::holds_alternative<CommandMetrics>(plan_result)) {
-        return std::get<CommandMetrics>(std::move(plan_result));
+        return release_and_return(std::get<CommandMetrics>(std::move(plan_result)));
     }
     auto plan_details = std::get<PlannerPlanDetails>(std::move(plan_result));
 
@@ -3461,7 +3778,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         const auto key = normalize_identifier(*plan->order_by_column);
         auto it = table->column_index.find(key);
         if (it == table->column_index.end()) {
-            return make_error_metrics(sql, "ORDER BY column '" + *plan->order_by_column + "' not found.");
+            return release_and_return(make_error_metrics(sql, "ORDER BY column '" + *plan->order_by_column + "' not found."));
         }
         order_index = it->second;
     }
@@ -3487,20 +3804,20 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         auto tuple_view = bored::executor::TupleView::from_buffer(executor_buffer);
         if (!tuple_view.valid() || tuple_view.column_count() < 2U) {
             scan_executor.close(executor_context);
-            return make_error_metrics(sql, "Executor returned invalid tuple payload.");
+            return release_and_return(make_error_metrics(sql, "Executor returned invalid tuple payload."));
         }
 
         const auto payload_column = tuple_view.column(1U);
         if (payload_column.is_null) {
             scan_executor.close(executor_context);
-            return make_error_metrics(sql, "Executor returned null tuple payload.");
+            return release_and_return(make_error_metrics(sql, "Executor returned null tuple payload."));
         }
 
         std::uint64_t row_id = 0U;
         std::vector<ScalarValue> decoded_values;
         if (!decode_row_payload(*table, payload_column.data, row_id, decoded_values)) {
             scan_executor.close(executor_context);
-            return make_error_metrics(sql, "Failed to decode tuple payload.");
+            return release_and_return(make_error_metrics(sql, "Failed to decode tuple payload."));
         }
 
         materialized_rows.push_back(std::move(decoded_values));
@@ -3536,7 +3853,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         for (std::size_t index = 0; index < column_indexes.size(); ++index) {
             const auto column_index = column_indexes[index];
             if (row_values.size() <= column_index) {
-                return make_error_metrics(sql, "Executor row payload is missing projected column.");
+                return release_and_return(make_error_metrics(sql, "Executor row payload is missing projected column."));
             }
             const auto value_text = value_to_string(row_values[column_index]);
             widths[index] = std::max(widths[index], value_text.size());
@@ -3599,13 +3916,13 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     }
 
     if (auto ec = catalog_guard.commit()) {
-        txn_guard.abort();
+        txn_scope.abort();
         return make_error_metrics(sql,
                                   "Catalog transaction commit failed.",
                                   {"Retry the SELECT command."});
     }
 
-    txn_guard.commit();
+    txn_scope.commit_read_only();
 
     return metrics;
 }

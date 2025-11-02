@@ -54,6 +54,7 @@ class ShellValuesExecutor;
 class ShellInsertTarget;
 class ShellUpdateTarget;
 class ShellDeleteTarget;
+struct ShellBackendSessionAccess;
 
 class ShellBackend final {
 public:
@@ -104,6 +105,17 @@ private:
         std::uint64_t next_row_id = 1U;
     };
 
+    struct SessionTransaction final {
+        txn::TransactionContext context{};
+        bool dirty = false;
+        bool needs_rollback = false;
+
+        [[nodiscard]] bool active() const noexcept
+        {
+            return static_cast<bool>(context);
+        }
+    };
+
     friend void append_values_payload(const TableData& table,
                                       const std::vector<ScalarValue>& values,
                                       std::vector<std::byte>& buffer);
@@ -123,6 +135,7 @@ private:
     friend class ShellInsertTarget;
     friend class ShellUpdateTarget;
     friend class ShellDeleteTarget;
+    friend struct ShellBackendSessionAccess;
 
     struct PlannerPlanDetails final {
         std::string root_detail{};
@@ -170,9 +183,21 @@ private:
     CommandMetrics execute_update(const std::string& sql);
     CommandMetrics execute_delete(const std::string& sql);
     CommandMetrics execute_select(const std::string& sql);
+    CommandMetrics execute_begin();
+    CommandMetrics execute_commit();
+    CommandMetrics execute_rollback();
     CommandMetrics make_error_metrics(const std::string& sql,
                                      std::string message,
                                      std::vector<std::string> hints = {});
+    CommandMetrics make_transaction_error(std::string message,
+                                          std::vector<std::string> hints = {});
+
+    [[nodiscard]] bool has_active_transaction() const noexcept;
+    [[nodiscard]] bool session_requires_rollback() const noexcept;
+    [[nodiscard]] txn::TransactionContext* session_transaction_context() noexcept;
+    void mark_session_transaction_dirty();
+    void mark_session_transaction_failed();
+    void clear_session_transaction();
 
     ddl::DdlCommandResponse handle_create_database(ddl::DdlCommandContext& context,
                                                    const ddl::CreateDatabaseRequest& request);
@@ -199,6 +224,7 @@ private:
     bool registered_catalog_sampler_ = false;
     std::unordered_map<RelationKey, TableData> table_cache_{};
     std::unordered_map<std::string, RelationKey> table_lookup_{};
+    std::optional<SessionTransaction> session_transaction_{};
 };
 
 }  // namespace bored::shell
