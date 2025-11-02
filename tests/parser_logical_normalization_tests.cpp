@@ -84,22 +84,35 @@ relational::TableMetadata make_shipments_metadata()
     return metadata;
 }
 
-relational::LogicalOperatorPtr lower_sql(std::string_view sql, StubCatalog& catalog_adapter)
+struct LoweringFixture final {
+    relational::LoweringResult lowering{};
+    relational::LogicalOperatorPtr& plan;
+    std::vector<bored::parser::ParserDiagnostic>& diagnostics;
+    bored::parser::SelectParseResult parse{};
+
+    LoweringFixture() : plan(lowering.plan), diagnostics(lowering.diagnostics) {}
+
+    [[nodiscard]] bool success() const noexcept { return lowering.success(); }
+};
+
+LoweringFixture lower_sql(std::string_view sql, StubCatalog& catalog_adapter)
 {
-    auto parse_result = bored::parser::parse_select(std::string(sql));
-    REQUIRE(parse_result.success());
-    REQUIRE(parse_result.statement != nullptr);
+    LoweringFixture fixture{};
+    fixture.parse = bored::parser::parse_select(std::string(sql));
+    REQUIRE(fixture.parse.success());
+    REQUIRE(fixture.parse.statement != nullptr);
 
     relational::BinderConfig config{};
     config.catalog = &catalog_adapter;
     config.default_schema = std::string{"sales"};
 
-    auto binding = relational::bind_select(config, *parse_result.statement);
+    auto binding = relational::bind_select(config, *fixture.parse.statement);
     REQUIRE(binding.success());
 
-    auto lowering = relational::lower_select(*parse_result.statement);
-    REQUIRE(lowering.success());
-    return std::move(lowering.plan);
+    auto lowering = relational::lower_select(*fixture.parse.statement);
+    fixture.plan = std::move(lowering.plan);
+    fixture.diagnostics = std::move(lowering.diagnostics);
+    return fixture;
 }
 
 }  // namespace
@@ -112,10 +125,11 @@ TEST_CASE("normalization extracts filter predicates", "[parser][logical_normaliz
     const std::string sql =
         "SELECT inv.quantity FROM sales.inventory AS inv WHERE inv.quantity > 10 ORDER BY inv.quantity;";
 
-    auto plan = lower_sql(sql, catalog_adapter);
-    REQUIRE(plan != nullptr);
+    auto lowering = lower_sql(sql, catalog_adapter);
+    REQUIRE(lowering.success());
+    REQUIRE(lowering.plan != nullptr);
 
-    auto result = relational::normalize_plan(*plan);
+    auto result = relational::normalize_plan(*lowering.plan);
     REQUIRE(result.filters.size() == 1U);
     auto& filter = result.filters.front();
     REQUIRE(filter.node != nullptr);
@@ -131,10 +145,11 @@ TEST_CASE("normalization preserves projection order", "[parser][logical_normaliz
     const std::string sql =
         "SELECT inv.id AS product_id, inv.name FROM sales.inventory AS inv WHERE inv.id > 10;";
 
-    auto plan = lower_sql(sql, catalog_adapter);
-    REQUIRE(plan != nullptr);
+    auto lowering = lower_sql(sql, catalog_adapter);
+    REQUIRE(lowering.success());
+    REQUIRE(lowering.plan != nullptr);
 
-    auto result = relational::normalize_plan(*plan);
+    auto result = relational::normalize_plan(*lowering.plan);
     REQUIRE(result.projections.size() == 1U);
     const auto& projection = result.projections.front();
     REQUIRE(projection.projections.size() == 2U);
@@ -151,10 +166,11 @@ TEST_CASE("normalization captures join criteria", "[parser][logical_normalizatio
     const std::string sql =
         "SELECT inv.id FROM sales.inventory AS inv INNER JOIN sales.shipments AS shp ON inv.id = shp.id;";
 
-    auto plan = lower_sql(sql, catalog_adapter);
-    REQUIRE(plan != nullptr);
+    auto lowering = lower_sql(sql, catalog_adapter);
+    REQUIRE(lowering.success());
+    REQUIRE(lowering.plan != nullptr);
 
-    auto result = relational::normalize_plan(*plan);
+    auto result = relational::normalize_plan(*lowering.plan);
     REQUIRE(result.joins.size() == 1U);
     const auto& join = result.joins.front();
     REQUIRE(join.node != nullptr);

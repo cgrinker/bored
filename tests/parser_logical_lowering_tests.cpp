@@ -83,20 +83,35 @@ relational::TableMetadata make_shipments_metadata()
     return metadata;
 }
 
-relational::LoweringResult lower_sql(std::string_view sql, StubCatalog& catalog_adapter)
+struct LoweringFixture final {
+    relational::LoweringResult lowering{};
+    relational::LogicalOperatorPtr& plan;
+    std::vector<bored::parser::ParserDiagnostic>& diagnostics;
+    bored::parser::SelectParseResult parse{};
+
+    LoweringFixture() : plan(lowering.plan), diagnostics(lowering.diagnostics) {}
+
+    [[nodiscard]] bool success() const noexcept { return lowering.success(); }
+};
+
+LoweringFixture lower_sql(std::string_view sql, StubCatalog& catalog_adapter)
 {
-    auto parse_result = bored::parser::parse_select(std::string(sql));
-    REQUIRE(parse_result.success());
-    REQUIRE(parse_result.statement != nullptr);
+    LoweringFixture fixture{};
+    fixture.parse = bored::parser::parse_select(std::string(sql));
+    REQUIRE(fixture.parse.success());
+    REQUIRE(fixture.parse.statement != nullptr);
 
     relational::BinderConfig config{};
     config.catalog = &catalog_adapter;
     config.default_schema = std::string{"sales"};
 
-    auto binding = relational::bind_select(config, *parse_result.statement);
+    auto binding = relational::bind_select(config, *fixture.parse.statement);
     REQUIRE(binding.success());
 
-    return relational::lower_select(*parse_result.statement);
+    auto lowering = relational::lower_select(*fixture.parse.statement);
+    fixture.plan = std::move(lowering.plan);
+    fixture.diagnostics = std::move(lowering.diagnostics);
+    return fixture;
 }
 
 }  // namespace
