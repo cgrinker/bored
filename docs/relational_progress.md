@@ -6,7 +6,7 @@ _Last updated: 2025-11-02_
 
 - **Storage Durability**: WAL writer/reader/replayer pipeline complete with retention, checkpoint scheduling, crash recovery, and page manager integration.
 - **Catalog & DDL**: Persistent catalog with fully wired DDL handlers (create/alter/drop) for schemas, tables, and indexes, including restart-safe catalog bootstrap.
-- **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; catalog snapshot plumbing in progress.
+- **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell INSERT/UPDATE/DELETE/SELECT flows now execute on live transaction contexts with executor snapshots; broader catalog snapshot plumbing for planner visibility remains in progress.
 - **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs; binder resolves identifiers and types; lowering and normalization stages generate logical plans for select/join queries.
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators.
 - **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up.
@@ -34,8 +34,8 @@ _Last updated: 2025-11-02_
 ## Roadmap to Full Relational Coverage
 
 1. **Finalize Concurrency Milestone 1 (In Progress)**
-   - Complete catalog snapshot plumbing and visibility checks in planner/executor.
-   - Wire transaction manager snapshots into catalog lookups and page manager access paths.
+   - bored_shell DML and SELECT paths now bind real TransactionManager contexts; next step is pushing those snapshots through catalog caches and planner operators.
+   - Complete catalog snapshot plumbing, visibility checks in planner/executor, and finish wiring snapshot-aware retention hooks.
 
 2. **Constraint & Sequence Foundations**
    - Extend catalog metadata for constraints and sequences; persist via WAL and recovery hooks.
