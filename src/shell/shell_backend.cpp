@@ -189,13 +189,90 @@ std::string strip_trailing_semicolon(std::string_view text)
     return stripped;
 }
 
-txn::Snapshot make_shell_snapshot()
-{
-    txn::Snapshot snapshot{};
-    snapshot.xmin = 1U;
-    snapshot.xmax = std::numeric_limits<txn::TransactionId>::max();
-    return snapshot;
-}
+class ShellTransactionGuard final {
+public:
+    ShellTransactionGuard(txn::TransactionManager& manager, const txn::TransactionOptions& options)
+        : manager_{manager}
+        , context_{manager.begin(options)}
+    {
+    }
+
+    ShellTransactionGuard(const ShellTransactionGuard&) = delete;
+    ShellTransactionGuard& operator=(const ShellTransactionGuard&) = delete;
+    ShellTransactionGuard(ShellTransactionGuard&&) = delete;
+    ShellTransactionGuard& operator=(ShellTransactionGuard&&) = delete;
+
+    ~ShellTransactionGuard()
+    {
+        if (active_) {
+            abort();
+        }
+    }
+
+    [[nodiscard]] txn::TransactionContext& context() noexcept { return context_; }
+    [[nodiscard]] const txn::TransactionContext& context() const noexcept { return context_; }
+
+    void commit()
+    {
+        if (!active_) {
+            return;
+        }
+        manager_.commit(context_);
+        active_ = false;
+    }
+
+    void abort() noexcept
+    {
+        if (!active_) {
+            return;
+        }
+        try {
+            manager_.abort(context_);
+        } catch (...) {
+        }
+        active_ = false;
+    }
+
+private:
+    txn::TransactionManager& manager_;
+    txn::TransactionContext context_{};
+    bool active_ = true;
+};
+
+class CatalogTransactionGuard final {
+public:
+    explicit CatalogTransactionGuard(catalog::CatalogTransaction& transaction) noexcept
+        : transaction_{transaction}
+    {
+    }
+
+    CatalogTransactionGuard(const CatalogTransactionGuard&) = delete;
+    CatalogTransactionGuard& operator=(const CatalogTransactionGuard&) = delete;
+    CatalogTransactionGuard(CatalogTransactionGuard&&) = delete;
+    CatalogTransactionGuard& operator=(CatalogTransactionGuard&&) = delete;
+
+    ~CatalogTransactionGuard()
+    {
+        if (!completed_) {
+            (void)transaction_.abort();
+        }
+    }
+
+    std::error_code commit()
+    {
+        auto ec = transaction_.commit();
+        if (!ec) {
+            completed_ = true;
+        }
+        return ec;
+    }
+
+    void release() noexcept { completed_ = true; }
+
+private:
+    catalog::CatalogTransaction& transaction_;
+    bool completed_ = false;
+};
 
 std::optional<std::string> last_identifier_part(const parser::relational::QualifiedName& name)
 {
@@ -1885,9 +1962,17 @@ ShellEngine::Config ShellBackend::make_config()
 
 catalog::CatalogIntrospectionSnapshot ShellBackend::collect_catalog_snapshot()
 {
-    catalog::CatalogTransactionConfig tx_cfg{&txn_allocator_, &snapshot_manager_};
+    txn::TransactionOptions txn_options{};
+    ShellTransactionGuard txn_guard{txn_manager_, txn_options};
+    auto& txn_context = txn_guard.context();
+
+    catalog::CatalogTransactionConfig tx_cfg{};
+    tx_cfg.id_allocator = &txn_allocator_;
+    tx_cfg.snapshot_manager = &snapshot_manager_;
+    tx_cfg.transaction_manager = &txn_manager_;
+    tx_cfg.transaction_context = &txn_context;
     catalog::CatalogTransaction transaction{tx_cfg};
-    transaction.bind_transaction_context(&txn_manager_, nullptr);
+    CatalogTransactionGuard catalog_guard{transaction};
 
     catalog::CatalogAccessor::Config accessor_cfg{};
     accessor_cfg.transaction = &transaction;
@@ -2423,9 +2508,17 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
                                          "Failed to parse INSERT statement.");
     }
 
-    catalog::CatalogTransactionConfig tx_cfg{&txn_allocator_, &snapshot_manager_};
+    txn::TransactionOptions txn_options{};
+    ShellTransactionGuard txn_guard{txn_manager_, txn_options};
+    auto& txn_context = txn_guard.context();
+
+    catalog::CatalogTransactionConfig tx_cfg{};
+    tx_cfg.id_allocator = &txn_allocator_;
+    tx_cfg.snapshot_manager = &snapshot_manager_;
+    tx_cfg.transaction_manager = &txn_manager_;
+    tx_cfg.transaction_context = &txn_context;
     catalog::CatalogTransaction transaction{tx_cfg};
-    transaction.bind_transaction_context(&txn_manager_, nullptr);
+    CatalogTransactionGuard catalog_guard{transaction};
 
     catalog::CatalogAccessor::Config accessor_cfg{};
     accessor_cfg.transaction = &transaction;
@@ -2583,7 +2676,9 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     bored::executor::InsertExecutor insert_executor{std::move(values_executor), insert_config};
 
     bored::executor::ExecutorContext executor_context{};
-    executor_context.set_snapshot(make_shell_snapshot());
+    executor_context.set_transaction_id(txn_context.id());
+    executor_context.set_snapshot(txn_context.snapshot());
+    executor_context.set_transaction_context(&txn_context);
     bored::executor::TupleBuffer executor_buffer{};
     insert_executor.open(executor_context);
     while (insert_executor.next(executor_context, executor_buffer)) {
@@ -2609,6 +2704,16 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
                                 executor_detail_lines.end());
+
+    if (auto ec = catalog_guard.commit()) {
+        txn_guard.abort();
+        return make_error_metrics(sql,
+                                  "Catalog transaction commit failed.",
+                                  {"Retry the INSERT command."});
+    }
+
+    txn_guard.commit();
+
     return metrics;
 }
 
@@ -2621,9 +2726,17 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
                                          "Failed to parse UPDATE statement.");
     }
 
-    catalog::CatalogTransactionConfig tx_cfg{&txn_allocator_, &snapshot_manager_};
+    txn::TransactionOptions txn_options{};
+    ShellTransactionGuard txn_guard{txn_manager_, txn_options};
+    auto& txn_context = txn_guard.context();
+
+    catalog::CatalogTransactionConfig tx_cfg{};
+    tx_cfg.id_allocator = &txn_allocator_;
+    tx_cfg.snapshot_manager = &snapshot_manager_;
+    tx_cfg.transaction_manager = &txn_manager_;
+    tx_cfg.transaction_context = &txn_context;
     catalog::CatalogTransaction transaction{tx_cfg};
-    transaction.bind_transaction_context(&txn_manager_, nullptr);
+    CatalogTransactionGuard catalog_guard{transaction};
 
     catalog::CatalogAccessor::Config accessor_cfg{};
     accessor_cfg.transaction = &transaction;
@@ -2948,7 +3061,9 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     bored::executor::UpdateExecutor update_executor{std::move(projection_node), update_config};
 
     bored::executor::ExecutorContext executor_context{};
-    executor_context.set_snapshot(make_shell_snapshot());
+    executor_context.set_transaction_id(txn_context.id());
+    executor_context.set_snapshot(txn_context.snapshot());
+    executor_context.set_transaction_context(&txn_context);
     bored::executor::TupleBuffer executor_buffer{};
     update_executor.open(executor_context);
     while (update_executor.next(executor_context, executor_buffer)) {
@@ -2974,6 +3089,16 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
                                 executor_detail_lines.end());
+
+    if (auto ec = catalog_guard.commit()) {
+        txn_guard.abort();
+        return make_error_metrics(sql,
+                                  "Catalog transaction commit failed.",
+                                  {"Retry the UPDATE command."});
+    }
+
+    txn_guard.commit();
+
     return metrics;
 }
 
@@ -3159,7 +3284,9 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     bored::executor::DeleteExecutor delete_executor{std::move(projection_node), delete_config};
 
     bored::executor::ExecutorContext executor_context{};
-    executor_context.set_snapshot(make_shell_snapshot());
+    executor_context.set_transaction_id(txn_context.id());
+    executor_context.set_snapshot(txn_context.snapshot());
+    executor_context.set_transaction_context(&txn_context);
     bored::executor::TupleBuffer executor_buffer{};
     delete_executor.open(executor_context);
     delete_executor.next(executor_context, executor_buffer);
@@ -3183,6 +3310,16 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
                                 executor_detail_lines.end());
+
+    if (auto ec = catalog_guard.commit()) {
+        txn_guard.abort();
+        return make_error_metrics(sql,
+                                  "Catalog transaction commit failed.",
+                                  {"Retry the DELETE command."});
+    }
+
+    txn_guard.commit();
+
     return metrics;
 }
 
