@@ -18,3 +18,10 @@
 - **Integration harness for catalog + storage** — author a Catch2 suite that spins up the catalog, WAL, and storage subsystems together, executes the smoke script programmatically, and asserts catalog/WAL side effects (segment counts, retention stats) alongside query results.
 - **Scenario coverage and diagnostics documentation** — document the end-to-end workflows, required configuration, and troubleshooting steps in `docs/storage_shell_recipes.md`, including how to surface parser/telemetry diagnostics when a step fails.
 
+## Relational Feature Gap Closure
+- **Transaction snapshots everywhere** — ensure planner/executor, catalog adapters, and background workers accept `TransactionManager` snapshots so statement execution and retention share a consistent visibility model. Track implementation progress against Milestone 1 items in `docs/transaction_concurrency_milestones.md`.
+- **Constraint metadata & enforcement** — extend catalog schemas and DDL handlers to record PRIMARY KEY, UNIQUE, and FOREIGN KEY definitions; teach planner/executor paths to enforce uniqueness using existing index infrastructure and stage referential checks.
+- **Sequence and identity support** — introduce WAL-backed sequence allocator state, catalog entries, and DDL verbs (`CREATE SEQUENCE`, `ALTER TABLE ... AUTO_INCREMENT`) so auto-increment columns can consume transactional sequence values.
+- **Common table expression pipeline** — expand parser/AST to recognise `WITH` clauses, add planner memo entries for CTE producers/consumers, and implement executor worktables starting with non-recursive cases.
+- **Optimizer/index integration** — surface unique/covering/partial index options through DDL and enhance cost-based planning to pick index scans and better join orders once statistics are available.
+
