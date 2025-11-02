@@ -21,6 +21,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <regex>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -249,39 +250,30 @@ Summary summarise(const std::vector<double>& samples)
 
     std::string raw((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
     auto content = normalise_baseline_content(std::move(raw));
+
+    static const std::regex entry_regex(R"(\{\"name\":\"([^\"]+)\"[^}]*\"mean_ms\":([-+0-9eE\.]+)[^}]*\"p95_ms\":([-+0-9eE\.]+))");
+
     BaselineMap baselines;
-
-    std::size_t cursor = 0U;
-    while ((cursor = content.find("\"name\":\"", cursor)) != std::string::npos) {
-    cursor += 9U;  // advance past "name":"
-        const auto name_end = content.find('"', cursor);
-        if (name_end == std::string::npos) {
-            break;
+    for (auto it = std::sregex_iterator(content.begin(), content.end(), entry_regex);
+         it != std::sregex_iterator();
+         ++it) {
+        const auto& match = *it;
+        if (match.size() != 4) {
+            continue;
         }
-        std::string name = content.substr(cursor, name_end - cursor);
 
-        auto locate_numeric = [&](std::string_view label, std::size_t start) -> std::pair<double, std::size_t> {
-            auto value_pos = content.find(label, start);
-            if (value_pos == std::string::npos) {
-                throw std::runtime_error("Baseline file missing field " + std::string(label));
-            }
-            value_pos += label.size();
-            while (value_pos < content.size() && std::isspace(static_cast<unsigned char>(content[value_pos]))) {
-                ++value_pos;
-            }
-            const auto value_end = content.find_first_of(",}", value_pos);
-            if (value_end == std::string::npos) {
-                throw std::runtime_error("Malformed baseline number for " + std::string(label));
-            }
-            double value = std::stod(content.substr(value_pos, value_end - value_pos));
-            return {value, value_end};
-        };
+        std::string name = match[1].str();
+        double mean_ms = 0.0;
+        double p95_ms = 0.0;
 
-        auto [mean_ms, mean_end] = locate_numeric("\"mean_ms\":", name_end);
-        auto [p95_ms, p95_end] = locate_numeric("\"p95_ms\":", mean_end);
+        try {
+            mean_ms = std::stod(match[2].str());
+            p95_ms = std::stod(match[3].str());
+        } catch (const std::exception& ex) {
+            throw std::runtime_error(std::string{"Failed to parse baseline entry for "} + name + ": " + ex.what());
+        }
 
         baselines[name] = BaselineEntry{mean_ms, p95_ms};
-        cursor = p95_end;
     }
 
     if (baselines.empty()) {

@@ -14,3 +14,6 @@ Makefile
 CMakeUserPresets.json
 CMakePresets.json.user
 
+# Benchmark artifacts
+benchmarks/results/
+
