@@ -351,16 +351,22 @@ OverflowFixture build_overflow_fixture(const BenchmarkOptions& options)
 
     bs::WalWriterConfig writer_config{};
     writer_config.directory = wal_dir;
-    writer_config.segment_size = 4U * bs::kWalBlockSize;
-    writer_config.buffer_size = 2U * bs::kWalBlockSize;
     writer_config.start_lsn = bs::kWalBlockSize;
+
+    const std::size_t payload_bytes = std::max<std::size_t>(options.overflow_payload_bytes, 8192U);
+    const auto tuned_buffer_bytes = bs::align_up_to_block(std::max<std::size_t>(8U * bs::kWalBlockSize,
+                                                                                payload_bytes * 2U));
+    const auto tuned_segment_bytes = bs::align_up_to_block(std::max<std::size_t>(16U * bs::kWalBlockSize,
+                                                                                 tuned_buffer_bytes * 2U));
+
+    writer_config.buffer_size = tuned_buffer_bytes;
+    writer_config.segment_size = tuned_segment_bytes;
 
     auto wal_writer = std::make_shared<bs::WalWriter>(io, writer_config);
     bs::FreeSpaceMap fsm;
     bs::PageManager manager{&fsm, wal_writer};
 
     const std::size_t tuple_count = std::max<std::size_t>(options.overflow_page_count, 1U);
-    const std::size_t payload_bytes = std::max<std::size_t>(options.overflow_payload_bytes, 8192U);
 
     for (std::size_t index = 0; index < tuple_count; ++index) {
         const std::uint32_t page_id = static_cast<std::uint32_t>(50000U + index);
