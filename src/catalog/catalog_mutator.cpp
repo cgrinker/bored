@@ -391,8 +391,26 @@ void CatalogMutator::set_commit_lsn_provider(std::function<std::uint64_t()> prov
     commit_lsn_provider_ = std::move(provider);
 }
 
+void CatalogMutator::register_pre_publish_hook(PrePublishHook hook)
+{
+    if (!hook) {
+        throw std::invalid_argument{"CatalogMutator::register_pre_publish_hook requires valid hook"};
+    }
+    pre_publish_hooks_.push_back(std::move(hook));
+}
+
 std::error_code CatalogMutator::publish_staged_batch()
 {
+    for (auto& hook : pre_publish_hooks_) {
+        if (!hook) {
+            continue;
+        }
+        if (auto ec = hook()) {
+            g_publish_failures.fetch_add(1U, std::memory_order_relaxed);
+            return ec;
+        }
+    }
+
     if (staged_.empty()) {
         published_batch_.reset();
         wal_records_.clear();

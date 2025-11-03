@@ -108,6 +108,7 @@ private:
         RelationId owning_relation_id{};
         ColumnId owning_column_id{};
         std::uint64_t start_value = 1U;
+    std::uint64_t next_value = 1U;
         std::int64_t increment = 1;
         std::uint64_t min_value = 1U;
         std::uint64_t max_value = 0U;

@@ -114,6 +114,8 @@ public:
     using PublishListener = std::function<std::error_code(const CatalogMutationBatch&)>;
     void set_publish_listener(PublishListener listener);
     void set_commit_lsn_provider(std::function<std::uint64_t()> provider) noexcept;
+    using PrePublishHook = std::function<std::error_code()>;
+    void register_pre_publish_hook(PrePublishHook hook);
 
     static CatalogMutationTelemetrySnapshot telemetry() noexcept;
     static void reset_telemetry() noexcept;
@@ -129,6 +131,7 @@ private:
     std::vector<std::optional<CatalogWalRecordStaging>> wal_records_{};
     std::optional<CatalogMutationBatch> published_batch_{};
     PublishListener publish_listener_{};
+    std::vector<PrePublishHook> pre_publish_hooks_{};
 };
 
 struct CatalogTupleBuilder final {

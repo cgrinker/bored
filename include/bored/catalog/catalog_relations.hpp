@@ -195,6 +195,7 @@ struct CatalogSequenceDescriptor final {
     RelationId owning_relation_id{};
     ColumnId owning_column_id{};
     std::uint64_t start_value = 1U;
+    std::uint64_t next_value = 1U;
     std::int64_t increment = 1;
     std::uint64_t min_value = 1U;
     std::uint64_t max_value = std::numeric_limits<std::uint64_t>::max();
@@ -209,6 +210,7 @@ struct CatalogSequenceDescriptor final {
                                        RelationId owning_relation,
                                        ColumnId owning_column,
                                        std::uint64_t start,
+                                       std::uint64_t next,
                                        std::int64_t increment_value,
                                        std::uint64_t min,
                                        std::uint64_t max,
@@ -221,6 +223,7 @@ struct CatalogSequenceDescriptor final {
         , owning_relation_id{owning_relation}
         , owning_column_id{owning_column}
         , start_value{start}
+    , next_value{next}
         , increment{increment_value}
         , min_value{min}
         , max_value{max}

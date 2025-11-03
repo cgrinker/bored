@@ -227,6 +227,7 @@ std::optional<CatalogSequenceDescriptor> CatalogAccessor::sequence(SequenceId id
                                      entry.owning_relation_id,
                                      entry.owning_column_id,
                                      entry.start_value,
+                                     entry.next_value,
                                      entry.increment,
                                      entry.min_value,
                                      entry.max_value,
@@ -247,6 +248,7 @@ std::vector<CatalogSequenceDescriptor> CatalogAccessor::sequences() const
                             entry.owning_relation_id,
                             entry.owning_column_id,
                             entry.start_value,
+                            entry.next_value,
                             entry.increment,
                             entry.min_value,
                             entry.max_value,
@@ -274,6 +276,7 @@ std::vector<CatalogSequenceDescriptor> CatalogAccessor::sequences(SchemaId schem
                             entry.owning_relation_id,
                             entry.owning_column_id,
                             entry.start_value,
+                            entry.next_value,
                             entry.increment,
                             entry.min_value,
                             entry.max_value,
@@ -301,6 +304,7 @@ std::vector<CatalogSequenceDescriptor> CatalogAccessor::sequences_for_relation(R
                             entry.owning_relation_id,
                             entry.owning_column_id,
                             entry.start_value,
+                            entry.next_value,
                             entry.increment,
                             entry.min_value,
                             entry.max_value,
@@ -618,6 +622,7 @@ void CatalogAccessor::ensure_sequences_loaded() const
             entry.owning_relation_id = view->owning_relation_id;
             entry.owning_column_id = view->owning_column_id;
             entry.start_value = view->start_value;
+            entry.next_value = view->next_value;
             entry.increment = view->increment;
             entry.min_value = view->min_value;
             entry.max_value = view->max_value;

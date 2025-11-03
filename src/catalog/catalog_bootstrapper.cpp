@@ -165,7 +165,7 @@ std::error_code CatalogBootstrapper::bootstrap_tables(std::span<std::byte> page)
 std::error_code CatalogBootstrapper::bootstrap_columns(std::span<std::byte> page) const
 {
     const CatalogTupleDescriptor tuple = bootstrap_tuple();
-    const std::array<CatalogColumnDescriptor, 41> columns{
+    const std::array<CatalogColumnDescriptor, 42> columns{
         CatalogColumnDescriptor{tuple, kCatalogDatabasesIdColumnId, kCatalogDatabasesRelationId, CatalogColumnType::Int64, 1U, "database_id"},
         CatalogColumnDescriptor{tuple, kCatalogDatabasesNameColumnId, kCatalogDatabasesRelationId, CatalogColumnType::Utf8, 2U, "name"},
         CatalogColumnDescriptor{tuple, kCatalogSchemasIdColumnId, kCatalogSchemasRelationId, CatalogColumnType::Int64, 1U, "schema_id"},
@@ -201,12 +201,13 @@ std::error_code CatalogBootstrapper::bootstrap_columns(std::span<std::byte> page
         CatalogColumnDescriptor{tuple, kCatalogSequencesOwningTableColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 3U, "owning_table_id"},
         CatalogColumnDescriptor{tuple, kCatalogSequencesOwningColumnColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 4U, "owning_column_id"},
         CatalogColumnDescriptor{tuple, kCatalogSequencesStartValueColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 5U, "start_value"},
-        CatalogColumnDescriptor{tuple, kCatalogSequencesIncrementColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 6U, "increment"},
-        CatalogColumnDescriptor{tuple, kCatalogSequencesMinValueColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 7U, "min_value"},
-        CatalogColumnDescriptor{tuple, kCatalogSequencesMaxValueColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 8U, "max_value"},
-        CatalogColumnDescriptor{tuple, kCatalogSequencesCacheSizeColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 9U, "cache_size"},
-        CatalogColumnDescriptor{tuple, kCatalogSequencesCycleFlagColumnId, kCatalogSequencesRelationId, CatalogColumnType::UInt16, 10U, "cycle_flag"},
-        CatalogColumnDescriptor{tuple, kCatalogSequencesNameColumnId, kCatalogSequencesRelationId, CatalogColumnType::Utf8, 11U, "name"}
+        CatalogColumnDescriptor{tuple, kCatalogSequencesNextValueColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 6U, "next_value"},
+        CatalogColumnDescriptor{tuple, kCatalogSequencesIncrementColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 7U, "increment"},
+        CatalogColumnDescriptor{tuple, kCatalogSequencesMinValueColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 8U, "min_value"},
+        CatalogColumnDescriptor{tuple, kCatalogSequencesMaxValueColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 9U, "max_value"},
+        CatalogColumnDescriptor{tuple, kCatalogSequencesCacheSizeColumnId, kCatalogSequencesRelationId, CatalogColumnType::Int64, 10U, "cache_size"},
+        CatalogColumnDescriptor{tuple, kCatalogSequencesCycleFlagColumnId, kCatalogSequencesRelationId, CatalogColumnType::UInt16, 11U, "cycle_flag"},
+        CatalogColumnDescriptor{tuple, kCatalogSequencesNameColumnId, kCatalogSequencesRelationId, CatalogColumnType::Utf8, 12U, "name"}
     };
 
     for (const auto& column : columns) {

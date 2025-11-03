@@ -84,6 +84,7 @@ struct CatalogSequencePrefix final {
     std::uint64_t owning_column_id = 0U;
     std::int64_t increment = 1;
     std::uint64_t start_value = 1U;
+    std::uint64_t next_value = 1U;
     std::uint64_t min_value = 1U;
     std::uint64_t max_value = 0U;
     std::uint64_t cache_size = 1U;
@@ -100,7 +101,7 @@ static_assert(sizeof(CatalogTablePrefix) == 56U, "CatalogTablePrefix expected to
 static_assert(sizeof(CatalogColumnPrefix) == 56U, "CatalogColumnPrefix expected to be 56 bytes");
 static_assert(sizeof(CatalogIndexPrefix) == 56U, "CatalogIndexPrefix expected to be 56 bytes");
 static_assert(sizeof(CatalogConstraintPrefix) == 72U, "CatalogConstraintPrefix expected to be 72 bytes");
-static_assert(sizeof(CatalogSequencePrefix) == 104U, "CatalogSequencePrefix expected to be 104 bytes");
+static_assert(sizeof(CatalogSequencePrefix) == 112U, "CatalogSequencePrefix expected to be 112 bytes");
 
 std::vector<std::byte> serialize_prefixed_tuple(std::size_t prefix_size, std::string_view name)
 {
@@ -266,6 +267,7 @@ std::vector<std::byte> serialize_catalog_sequence(const CatalogSequenceDescripto
     prefix->owning_column_id = descriptor.owning_column_id.value;
     prefix->increment = descriptor.increment;
     prefix->start_value = descriptor.start_value;
+    prefix->next_value = descriptor.next_value;
     prefix->min_value = descriptor.min_value;
     prefix->max_value = descriptor.max_value;
     prefix->cache_size = descriptor.cache_size;
@@ -430,6 +432,7 @@ std::optional<CatalogSequenceView> decode_catalog_sequence(std::span<const std::
     view.owning_column_id = ColumnId{prefix->owning_column_id};
     view.increment = prefix->increment;
     view.start_value = prefix->start_value;
+    view.next_value = prefix->next_value;
     view.min_value = prefix->min_value;
     view.max_value = prefix->max_value;
     view.cache_size = prefix->cache_size;

@@ -25,6 +25,12 @@ inline std::optional<std::uint32_t> catalog_relation_page(RelationId relation_id
     if (relation_id == kCatalogIndexesRelationId) {
         return kCatalogIndexesPageId;
     }
+    if (relation_id == kCatalogConstraintsRelationId) {
+        return kCatalogConstraintsPageId;
+    }
+    if (relation_id == kCatalogSequencesRelationId) {
+        return kCatalogSequencesPageId;
+    }
     return std::nullopt;
 }
 

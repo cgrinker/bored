@@ -62,6 +62,7 @@ inline constexpr ColumnId kCatalogSequencesMaxValueColumnId{4133U};
 inline constexpr ColumnId kCatalogSequencesCacheSizeColumnId{4134U};
 inline constexpr ColumnId kCatalogSequencesCycleFlagColumnId{4135U};
 inline constexpr ColumnId kCatalogSequencesNameColumnId{4136U};
+inline constexpr ColumnId kCatalogSequencesNextValueColumnId{4137U};
 
 inline constexpr IndexId kCatalogDatabasesNameIndexId{8192U};
 inline constexpr IndexId kCatalogSchemasNameIndexId{8193U};

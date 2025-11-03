@@ -45,6 +45,7 @@ TEST_CASE("Catalog sequence encoding round trips metadata")
     descriptor.owning_relation_id = RelationId{901U};
     descriptor.owning_column_id = ColumnId{17U};
     descriptor.start_value = 100U;
+    descriptor.next_value = 115U;
     descriptor.increment = -5;
     descriptor.min_value = 1U;
     descriptor.max_value = 10'000U;
@@ -66,6 +67,7 @@ TEST_CASE("Catalog sequence encoding round trips metadata")
     CHECK(view->owning_relation_id == descriptor.owning_relation_id);
     CHECK(view->owning_column_id == descriptor.owning_column_id);
     CHECK(view->start_value == descriptor.start_value);
+    CHECK(view->next_value == descriptor.next_value);
     CHECK(view->increment == descriptor.increment);
     CHECK(view->min_value == descriptor.min_value);
     CHECK(view->max_value == descriptor.max_value);

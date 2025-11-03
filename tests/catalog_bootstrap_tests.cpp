@@ -223,7 +223,7 @@ TEST_CASE("Catalog reserved identifiers do not collide")
 {
     using namespace bored::catalog;
 
-    const std::array<std::uint64_t, 50> id_values{
+    const std::array<std::uint64_t, 51> id_values{
         kSystemDatabaseId.value,
         kSystemSchemaId.value,
         kCatalogDatabasesRelationId.value,
@@ -268,6 +268,7 @@ TEST_CASE("Catalog reserved identifiers do not collide")
         kCatalogSequencesOwningTableColumnId.value,
         kCatalogSequencesOwningColumnColumnId.value,
         kCatalogSequencesStartValueColumnId.value,
+    kCatalogSequencesNextValueColumnId.value,
         kCatalogSequencesIncrementColumnId.value,
         kCatalogSequencesMinValueColumnId.value,
         kCatalogSequencesMaxValueColumnId.value,

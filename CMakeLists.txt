@@ -23,6 +23,7 @@ add_library(${PROJECT_NAME}_lib
     src/catalog/catalog_telemetry.cpp
     src/catalog/catalog_checkpoint_registry.cpp
     src/catalog/catalog_mutator.cpp
+    src/catalog/sequence_allocator.cpp
     src/catalog/catalog_accessor.cpp
     src/catalog/catalog_transaction.cpp
     src/catalog/catalog_introspection.cpp
@@ -215,6 +216,7 @@ if(BORED_ENABLE_TESTS)
     tests/catalog_checkpoint_registry_tests.cpp
     tests/index_checkpoint_registry_tests.cpp
         tests/catalog_mvcc_tests.cpp
+        tests/catalog_sequence_allocator_tests.cpp
         tests/catalog_integration_tests.cpp
     tests/transaction_abort_integration_tests.cpp
         tests/transaction_crash_recovery_integration_tests.cpp
