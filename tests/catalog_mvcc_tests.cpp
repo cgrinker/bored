@@ -206,6 +206,34 @@ TEST_CASE("Catalog accessor caches relation scans and filters visibility")
     CatalogColumnDescriptor column_hidden{tuple_descriptor(12U, 15U), ColumnId{4000U}, table_visible.relation_id, CatalogColumnType::Utf8, 1U, "name"};
     storage.add(kCatalogColumnsRelationId, serialize_catalog_column(column_hidden));
 
+    CatalogSequenceDescriptor sequence_visible{tuple_descriptor(4U, 0U),
+                                               SequenceId{6000U},
+                                               kSystemSchemaId,
+                                               table_visible.relation_id,
+                                               ColumnId{4100U},
+                                               1U,
+                                               1,
+                                               1U,
+                                               1000U,
+                                               32U,
+                                               false,
+                                               "catalog_tables_id_seq"};
+    storage.add(kCatalogSequencesRelationId, serialize_catalog_sequence(sequence_visible));
+
+    CatalogSequenceDescriptor sequence_hidden{tuple_descriptor(9U, 0U),
+                                              SequenceId{6001U},
+                                              kSystemSchemaId,
+                                              table_visible.relation_id,
+                                              ColumnId{4101U},
+                                              1U,
+                                              1,
+                                              1U,
+                                              1000U,
+                                              32U,
+                                              false,
+                                              "catalog_tables_id_seq_shadow"};
+    storage.add(kCatalogSequencesRelationId, serialize_catalog_sequence(sequence_hidden));
+
     CatalogAccessor accessor({&transaction, scanner});
 
     auto db = accessor.database(kSystemDatabaseId);
@@ -230,9 +258,30 @@ TEST_CASE("Catalog accessor caches relation scans and filters visibility")
     auto columns = accessor.columns(table_visible.relation_id);
     CHECK(columns.empty());
 
+    auto sequences_for_schema = accessor.sequences(kSystemSchemaId);
+    REQUIRE(sequences_for_schema.size() == 1U);
+    CHECK(sequences_for_schema.front().name == "catalog_tables_id_seq");
+
+    auto sequences_for_table = accessor.sequences_for_relation(table_visible.relation_id);
+    REQUIRE(sequences_for_table.size() == 1U);
+    CHECK(sequences_for_table.front().sequence_id == sequence_visible.sequence_id);
+
+    auto visible_sequence = accessor.sequence(sequence_visible.sequence_id);
+    REQUIRE(visible_sequence);
+    CHECK(visible_sequence->owning_relation_id == table_visible.relation_id);
+    CHECK(visible_sequence->cache_size == 32U);
+
+    auto hidden_sequence = accessor.sequence(sequence_hidden.sequence_id);
+    CHECK_FALSE(hidden_sequence);
+
+    auto all_sequences = accessor.sequences();
+    REQUIRE(all_sequences.size() == 1U);
+    CHECK(all_sequences.front().sequence_id == sequence_visible.sequence_id);
+
     CHECK(scan_counts[kCatalogSchemasRelationId.value] == 1U);
     CHECK(scan_counts[kCatalogTablesRelationId.value] == 1U);
     CHECK(scan_counts[kCatalogColumnsRelationId.value] == 1U);
+    CHECK(scan_counts[kCatalogSequencesRelationId.value] == 1U);
 }
 
 TEST_CASE("Catalog accessor cache invalidation reloads relation data")

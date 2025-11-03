@@ -44,6 +44,10 @@ public:
     [[nodiscard]] std::optional<CatalogIndexDescriptor> index(IndexId id) const;
     [[nodiscard]] std::vector<CatalogIndexDescriptor> indexes(RelationId relation_id) const;
     [[nodiscard]] std::vector<CatalogIndexDescriptor> indexes_for_schema(SchemaId schema_id) const;
+    [[nodiscard]] std::optional<CatalogSequenceDescriptor> sequence(SequenceId id) const;
+    [[nodiscard]] std::vector<CatalogSequenceDescriptor> sequences() const;
+    [[nodiscard]] std::vector<CatalogSequenceDescriptor> sequences(SchemaId schema_id) const;
+    [[nodiscard]] std::vector<CatalogSequenceDescriptor> sequences_for_relation(RelationId relation_id) const;
 
     static void invalidate_all() noexcept;
     static void invalidate_relation(RelationId relation_id) noexcept;
@@ -97,6 +101,21 @@ private:
         std::string name{};
     };
 
+    struct SequenceEntry final {
+        CatalogTupleDescriptor tuple{};
+        SequenceId sequence_id{};
+        SchemaId schema_id{};
+        RelationId owning_relation_id{};
+        ColumnId owning_column_id{};
+        std::uint64_t start_value = 1U;
+        std::int64_t increment = 1;
+        std::uint64_t min_value = 1U;
+        std::uint64_t max_value = 0U;
+        std::uint64_t cache_size = 1U;
+        bool cycle = false;
+        std::string name{};
+    };
+
     const CatalogTransaction* transaction_ = nullptr;
     RelationScanner scanner_;
 
@@ -124,11 +143,18 @@ private:
     mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> indexes_by_relation_{};
     mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> indexes_by_schema_{};
 
+    mutable bool sequences_loaded_ = false;
+    mutable std::vector<SequenceEntry> sequences_{};
+    mutable std::unordered_map<std::uint64_t, std::size_t> sequence_index_{};
+    mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> sequences_by_schema_{};
+    mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> sequences_by_relation_{};
+
     mutable std::uint64_t databases_epoch_ = 0U;
     mutable std::uint64_t schemas_epoch_ = 0U;
     mutable std::uint64_t tables_epoch_ = 0U;
     mutable std::uint64_t columns_epoch_ = 0U;
     mutable std::uint64_t indexes_epoch_ = 0U;
+    mutable std::uint64_t sequences_epoch_ = 0U;
 
     mutable CatalogSnapshot cached_snapshot_{};
     mutable bool snapshot_initialized_ = false;
@@ -138,6 +164,7 @@ private:
     void ensure_tables_loaded() const;
     void ensure_columns_loaded() const;
     void ensure_indexes_loaded() const;
+    void ensure_sequences_loaded() const;
 };
 
 }  // namespace bored::catalog

@@ -20,14 +20,14 @@ Latest validation: Debug `ctest` (407/407) on 2025-11-02.
 |------------|--------|-------|
 | Secondary indexes | **Available (foundation)** | B+Tree manager, index retention, recovery, and executor probes implemented; integration tests cover index operations. |
 | Key/foreign constraints | **Missing** | No enforcement or catalog metadata for PRIMARY KEY/UNIQUE/FOREIGN KEY constraints yet. |
-| Auto-incrementing primary keys | **Missing** | Sequence/identity generators and catalog metadata not implemented. |
+| Auto-incrementing primary keys | **Missing** | Sequence metadata and catalog accessors wired in; transactional allocator and planner/executor integration remain. |
 | Join execution | **Available** | Logical lowering, planner, and executor support nested-loop and hash joins with tests covering join predicates and pipelines. |
 | Common table expressions (CTEs) | **Missing** | Parser and planner lack WITH clause support; no recursive/non-recursive CTE execution pipeline. |
 
 ## Gaps to Close
 
 1. **Constraint Enforcement**: Extend catalog schemas and DDL to record key and foreign key definitions; add planner/executor hooks to enforce uniqueness and referential integrity.
-2. **Sequence/Identity Support**: Introduce sequence objects with transactional allocation, WAL logging, and planner/executor integration to back auto-increment columns.
+2. **Sequence/Identity Support**: Introduce sequence objects with transactional allocation, WAL logging, and planner/executor integration to back auto-increment columns (metadata + catalog accessors ready).
 3. **CTE Parsing & Execution**: Expand grammar, AST, and planner memo to represent WITH clauses; add execution support (materialized or pipelined) with snapshot-aware iterators.
 4. **Transaction Visibility**: Finish Transaction & Concurrency Milestone 1 to provide consistent snapshots across planner/executor and integrate with retention manager for snapshot retirement.
 5. **Optimizer Enhancements**: Broaden rule set, add cost-based join order selection, and integrate catalog statistics for selectivity estimates.
@@ -45,6 +45,7 @@ Latest validation: Debug `ctest` (407/407) on 2025-11-02.
 
 2. **Constraint & Sequence Foundations**
    - [x] Extend catalog metadata for constraints and sequences; persist via WAL and recovery hooks.
+   - [x] Expose catalog accessor support for sequence descriptors across schema and relation scopes.
    - [ ] Implement sequence allocator with transactional semantics for auto-increment columns.
    - [ ] Update DDL verbs (`CREATE TABLE`, `ALTER TABLE`, `CREATE SEQUENCE`) and planner to honor new metadata.
 

@@ -213,6 +213,104 @@ std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes_for_schema(SchemaId
     return result;
 }
 
+std::optional<CatalogSequenceDescriptor> CatalogAccessor::sequence(SequenceId id) const
+{
+    ensure_sequences_loaded();
+    auto it = sequence_index_.find(id.value);
+    if (it == sequence_index_.end()) {
+        return std::nullopt;
+    }
+    const auto& entry = sequences_[it->second];
+    return CatalogSequenceDescriptor{entry.tuple,
+                                     entry.sequence_id,
+                                     entry.schema_id,
+                                     entry.owning_relation_id,
+                                     entry.owning_column_id,
+                                     entry.start_value,
+                                     entry.increment,
+                                     entry.min_value,
+                                     entry.max_value,
+                                     entry.cache_size,
+                                     entry.cycle,
+                                     entry.name};
+}
+
+std::vector<CatalogSequenceDescriptor> CatalogAccessor::sequences() const
+{
+    ensure_sequences_loaded();
+    std::vector<CatalogSequenceDescriptor> result;
+    result.reserve(sequences_.size());
+    for (const auto& entry : sequences_) {
+        result.emplace_back(entry.tuple,
+                            entry.sequence_id,
+                            entry.schema_id,
+                            entry.owning_relation_id,
+                            entry.owning_column_id,
+                            entry.start_value,
+                            entry.increment,
+                            entry.min_value,
+                            entry.max_value,
+                            entry.cache_size,
+                            entry.cycle,
+                            entry.name);
+    }
+    return result;
+}
+
+std::vector<CatalogSequenceDescriptor> CatalogAccessor::sequences(SchemaId schema_id) const
+{
+    ensure_sequences_loaded();
+    std::vector<CatalogSequenceDescriptor> result;
+    auto it = sequences_by_schema_.find(schema_id.value);
+    if (it == sequences_by_schema_.end()) {
+        return result;
+    }
+    result.reserve(it->second.size());
+    for (auto index : it->second) {
+        const auto& entry = sequences_[index];
+        result.emplace_back(entry.tuple,
+                            entry.sequence_id,
+                            entry.schema_id,
+                            entry.owning_relation_id,
+                            entry.owning_column_id,
+                            entry.start_value,
+                            entry.increment,
+                            entry.min_value,
+                            entry.max_value,
+                            entry.cache_size,
+                            entry.cycle,
+                            entry.name);
+    }
+    return result;
+}
+
+std::vector<CatalogSequenceDescriptor> CatalogAccessor::sequences_for_relation(RelationId relation_id) const
+{
+    ensure_sequences_loaded();
+    std::vector<CatalogSequenceDescriptor> result;
+    auto it = sequences_by_relation_.find(relation_id.value);
+    if (it == sequences_by_relation_.end()) {
+        return result;
+    }
+    result.reserve(it->second.size());
+    for (auto index : it->second) {
+        const auto& entry = sequences_[index];
+        result.emplace_back(entry.tuple,
+                            entry.sequence_id,
+                            entry.schema_id,
+                            entry.owning_relation_id,
+                            entry.owning_column_id,
+                            entry.start_value,
+                            entry.increment,
+                            entry.min_value,
+                            entry.max_value,
+                            entry.cache_size,
+                            entry.cycle,
+                            entry.name);
+    }
+    return result;
+}
+
 void CatalogAccessor::invalidate_all() noexcept
 {
     CatalogCache::instance().invalidate_all();
@@ -245,6 +343,7 @@ void CatalogAccessor::reset_cached_state() const
     tables_loaded_ = false;
     columns_loaded_ = false;
     indexes_loaded_ = false;
+    sequences_loaded_ = false;
 }
 
 void CatalogAccessor::ensure_databases_loaded() const
@@ -483,6 +582,61 @@ void CatalogAccessor::ensure_indexes_loaded() const
 
     indexes_loaded_ = true;
     indexes_epoch_ = current_epoch;
+}
+
+void CatalogAccessor::ensure_sequences_loaded() const
+{
+    ensure_snapshot_current();
+
+    auto& cache = CatalogCache::instance();
+    const auto current_epoch = cache.epoch(kCatalogSequencesRelationId);
+    if (sequences_loaded_ && sequences_epoch_ == current_epoch) {
+        return;
+    }
+
+    sequences_.clear();
+    sequence_index_.clear();
+    sequences_by_schema_.clear();
+    sequences_by_relation_.clear();
+
+    auto relation = cache.materialize(kCatalogSequencesRelationId, scanner_);
+    if (relation) {
+        for (const auto& tuple : relation->tuples) {
+            auto tuple_span = std::span<const std::byte>(tuple.payload.data(), tuple.payload.size());
+            auto view = decode_catalog_sequence(tuple_span);
+            if (!view) {
+                continue;
+            }
+            if (!transaction_->is_visible(view->tuple)) {
+                continue;
+            }
+
+            SequenceEntry entry{};
+            entry.tuple = view->tuple;
+            entry.sequence_id = view->sequence_id;
+            entry.schema_id = view->schema_id;
+            entry.owning_relation_id = view->owning_relation_id;
+            entry.owning_column_id = view->owning_column_id;
+            entry.start_value = view->start_value;
+            entry.increment = view->increment;
+            entry.min_value = view->min_value;
+            entry.max_value = view->max_value;
+            entry.cache_size = view->cache_size;
+            entry.cycle = view->cycle;
+            entry.name = make_string(view->name);
+
+            const auto index = sequences_.size();
+            sequences_.push_back(entry);
+            sequence_index_[entry.sequence_id.value] = index;
+            sequences_by_schema_[entry.schema_id.value].push_back(index);
+            if (entry.owning_relation_id.is_valid()) {
+                sequences_by_relation_[entry.owning_relation_id.value].push_back(index);
+            }
+        }
+    }
+
+    sequences_loaded_ = true;
+    sequences_epoch_ = current_epoch;
 }
 
 }  // namespace bored::catalog
