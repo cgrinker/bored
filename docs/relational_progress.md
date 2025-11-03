@@ -12,6 +12,7 @@ Latest validation: Debug `ctest` (409/409) on 2025-11-02.
 - **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell now supports BEGIN/COMMIT/ROLLBACK so INSERT/UPDATE/DELETE/SELECT flows can share session-scoped transactions with executor snapshots; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard now propagates oldest reader LSNs while cross-session isolation and deadlock handling remain on the roadmap.
 - **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs; binder resolves identifiers and types; lowering and normalization stages generate logical plans for select/join queries.
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators.
+- **Constraint Enforcement**: Planner lowers unique/foreign key operators and executor now performs index-backed uniqueness checks plus referential integrity probes with MVCC-aware visibility.
 - **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up.
 - **Observability & Tooling**: Storage diagnostics, WAL/retention telemetry, checkpoint metrics, and shell integration for disk-backed catalogs and WAL configuration.
 
@@ -20,7 +21,7 @@ Latest validation: Debug `ctest` (409/409) on 2025-11-02.
 | Capability | Status | Notes |
 |------------|--------|-------|
 | Secondary indexes | **Available (foundation)** | B+Tree manager, index retention, recovery, and executor probes implemented; integration tests cover index operations. |
-| Key/foreign constraints | **Missing** | No enforcement or catalog metadata for PRIMARY KEY/UNIQUE/FOREIGN KEY constraints yet. |
+| Key/foreign constraints | **In progress** | Catalog metadata plus planner & executor enforcement for PRIMARY KEY/UNIQUE/FOREIGN KEY; DDL/shell wiring ongoing. |
 | Auto-incrementing primary keys | **In progress** | Sequence allocator now stages transactional `next_value` updates with tests; planner/executor integration remains. |
 | Join execution | **Available** | Logical lowering, planner, and executor support nested-loop and hash joins with tests covering join predicates and pipelines. |
 | Common table expressions (CTEs) | **Missing** | Parser and planner lack WITH clause support; no recursive/non-recursive CTE execution pipeline. |
@@ -53,7 +54,7 @@ Latest validation: Debug `ctest` (409/409) on 2025-11-02.
 3. **Constraint Enforcement Pipeline**
    - [x] Catalog accessor now exposes constraint descriptors for planner/executor consumption.
    - [x] Planner: Recognize unique/primary keys and foreign keys; generate enforcement operators.
-   - Executor: Implement uniqueness checks (indexes + deferred validation) and referential integrity probes with transactional awareness.
+   - [x] Executor: Implement uniqueness checks (indexes + deferred validation) and referential integrity probes with transactional awareness.
 
 4. **CTE Enablement**
    - Parser/AST: Add WITH clause grammar and nodes (non-recursive first, recursive second).

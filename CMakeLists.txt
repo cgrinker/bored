@@ -94,6 +94,8 @@ add_library(${PROJECT_NAME}_lib
     src/executor/insert_executor.cpp
     src/executor/update_executor.cpp
     src/executor/delete_executor.cpp
+    src/executor/unique_enforce_executor.cpp
+    src/executor/foreign_key_check_executor.cpp
     src/planner/rule.cpp
     src/planner/rules/join_rules.cpp
     src/planner/rules/predicate_pushdown_rule.cpp
@@ -266,6 +268,7 @@ if(BORED_ENABLE_TESTS)
         tests/executor_nested_loop_join_tests.cpp
     tests/executor_hash_join_tests.cpp
     tests/executor_aggregation_tests.cpp
+    tests/executor_constraint_enforcement_tests.cpp
     tests/executor_insert_tests.cpp
     tests/executor_delete_tests.cpp
     tests/executor_update_tests.cpp
