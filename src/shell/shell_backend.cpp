@@ -8,6 +8,7 @@
 #include "bored/catalog/catalog_mutator.hpp"
 #include "bored/catalog/catalog_transaction.hpp"
 #include "bored/catalog/catalog_mvcc.hpp"
+#include "bored/catalog/sequence_allocator.hpp"
 #include "bored/ddl/ddl_dispatcher.hpp"
 #include "bored/ddl/ddl_handlers.hpp"
 #include "bored/ddl/ddl_validation.hpp"
@@ -2015,6 +2016,15 @@ ShellBackend::ShellBackend(Config config)
         accessor_cfg.transaction = &transaction;
         accessor_cfg.scanner = storage_->make_scanner();
         return std::make_unique<catalog::CatalogAccessor>(accessor_cfg);
+    };
+    dispatcher_cfg.sequence_allocator_factory = [](catalog::CatalogTransaction& transaction,
+                                                   catalog::CatalogAccessor& accessor,
+                                                   catalog::CatalogMutator& mutator) {
+        catalog::SequenceAllocator::Config seq_cfg{};
+        seq_cfg.transaction = &transaction;
+        seq_cfg.accessor = &accessor;
+        seq_cfg.mutator = &mutator;
+        return std::make_unique<catalog::SequenceAllocator>(seq_cfg);
     };
     dispatcher_cfg.identifier_allocator = identifier_allocator_.get();
     dispatcher_cfg.transaction_manager = &txn_manager_;

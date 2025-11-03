@@ -19,6 +19,7 @@
 namespace bored::catalog {
 class CatalogAccessor;
 class CatalogMutator;
+class SequenceAllocator;
 }
 
 namespace bored::ddl {
@@ -181,6 +182,7 @@ struct DdlCommandContext final {
     catalog::CatalogIdentifierAllocator& allocator;
     catalog::CatalogMutator* mutator = nullptr;
     catalog::CatalogAccessor* accessor = nullptr;
+    catalog::SequenceAllocator* sequence_allocator = nullptr;
     DropTableCleanupHook drop_table_cleanup{};
     CatalogDirtyRelationHook dirty_relation_notifier{};
     CreateIndexStorageHook create_index_storage{};

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bored/catalog/sequence_allocator.hpp"
 #include "bored/ddl/ddl_command.hpp"
 #include "bored/ddl/ddl_telemetry.hpp"
 
@@ -8,6 +9,10 @@
 #include <memory>
 #include <optional>
 #include <string>
+
+namespace bored::catalog {
+class SequenceAllocator;
+}
 
 namespace bored::txn {
 class TransactionManager;
@@ -22,6 +27,9 @@ public:
         std::function<std::unique_ptr<catalog::CatalogTransaction>(txn::TransactionContext*)> transaction_factory;
         std::function<std::unique_ptr<catalog::CatalogMutator>(catalog::CatalogTransaction&)> mutator_factory;
         std::function<std::unique_ptr<catalog::CatalogAccessor>(catalog::CatalogTransaction&)> accessor_factory;
+        std::function<std::unique_ptr<catalog::SequenceAllocator>(catalog::CatalogTransaction&,
+                                                                  catalog::CatalogAccessor&,
+                                                                  catalog::CatalogMutator&)> sequence_allocator_factory;
         catalog::CatalogIdentifierAllocator* identifier_allocator = nullptr;
         std::function<std::uint64_t()> commit_lsn_provider;
         txn::TransactionManager* transaction_manager = nullptr;

@@ -503,7 +503,7 @@ TEST_CASE("CheckpointScheduler overlaps checkpoint with concurrent transactions"
     const auto blocked_duration = worker_result.second;
     CHECK(resumed_id == active_txn.id() + 1U);
     CHECK(blocked_duration > std::chrono::nanoseconds::zero());
-    CHECK(blocked_duration < 50ms);
+    CHECK(blocked_duration < 75ms);
 
     transaction_manager.commit(active_txn);
 

@@ -3,6 +3,7 @@
 #include "bored/catalog/catalog_accessor.hpp"
 #include "bored/catalog/catalog_mutator.hpp"
 #include "bored/catalog/catalog_transaction.hpp"
+#include "bored/catalog/sequence_allocator.hpp"
 #include "bored/txn/transaction_manager.hpp"
 
 #include <algorithm>
@@ -247,9 +248,35 @@ DdlCommandResponse DdlCommandDispatcher::dispatch(const DdlCommand& command)
         accessor = config_.accessor_factory(*transaction);
     }
 
+    std::unique_ptr<catalog::SequenceAllocator> sequence_allocator;
+    if (config_.sequence_allocator_factory) {
+        if (!mutator || !accessor) {
+            telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
+            abort_context_if_needed();
+            record_duration();
+            return make_internal_failure("DDL dispatcher missing catalog services for sequence allocator",
+                                         {"Ensure mutator and accessor factories are configured when sequence allocation is required."});
+        }
+
+        try {
+            sequence_allocator = config_.sequence_allocator_factory(*transaction, *accessor, *mutator);
+        } catch (const std::exception& ex) {
+            telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
+            abort_context_if_needed();
+            record_duration();
+            return make_failure(make_error_code(DdlErrc::ExecutionFailed), ex.what());
+        } catch (...) {
+            telemetry_.record_failure(verb, make_error_code(DdlErrc::ExecutionFailed));
+            abort_context_if_needed();
+            record_duration();
+            return make_failure(make_error_code(DdlErrc::ExecutionFailed), "sequence allocator initialization failed");
+        }
+    }
+
     DdlCommandContext context{*transaction, *config_.identifier_allocator};
     context.mutator = mutator.get();
     context.accessor = accessor.get();
+    context.sequence_allocator = sequence_allocator.get();
     context.drop_table_cleanup = config_.drop_table_cleanup_hook;
     context.dirty_relation_notifier = config_.catalog_dirty_hook;
     context.create_index_storage = config_.create_index_storage_hook;
