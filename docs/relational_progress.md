@@ -36,11 +36,12 @@ Latest validation: Debug `ctest` (406/406) on 2025-11-02.
 ## Roadmap to Full Relational Coverage
 
 1. **Finalize Concurrency Milestone 1 (In Progress)**
-   - Shell DML and SELECT pipelines now share live TransactionManager contexts with catalog cache refreshes and planner/executor visibility checks.
-   - Added regression coverage verifying catalog accessor tuples are re-evaluated when snapshots advance without extra scans.
-   - Wired snapshot-aware retention guard through the commit pipeline so WAL retention honors active reader horizons.
-   - Landed multi-page crash drill verifying committed pages replay while in-flight pages roll back with fragment-aware undo.
-   - Next: broaden undo walker crash drills across overflow chains and add regression cases for session rollback edge conditions.
+   - [x] Shell DML and SELECT pipelines now share live TransactionManager contexts with catalog cache refreshes and planner/executor visibility checks.
+   - [x] Added regression coverage verifying catalog accessor tuples are re-evaluated when snapshots advance without extra scans.
+   - [x] Wired snapshot-aware retention guard through the commit pipeline so WAL retention honors active reader horizons.
+   - [x] Landed multi-page crash drill verifying committed pages replay while in-flight pages roll back with fragment-aware undo.
+   - [x] Extend undo walker crash drills to cover overflow chains with fragment-aware assertions.
+   - [ ] Add regression coverage for session rollback edge conditions, including catalog and overflow interactions.
 
 2. **Constraint & Sequence Foundations**
    - Extend catalog metadata for constraints and sequences; persist via WAL and recovery hooks.

@@ -1551,6 +1551,10 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
     const auto baseline_page_b = page_b_buffer;
     const auto baseline_free_bytes_a = fsm.current_free_bytes(page_id_a);
     const auto baseline_free_bytes_b = fsm.current_free_bytes(page_id_b);
+    const auto baseline_fragment_count_a = fsm.current_fragment_count(page_id_a);
+    const auto baseline_fragment_count_b = fsm.current_fragment_count(page_id_b);
+    auto baseline_header_a = bored::storage::page_header(std::span<const std::byte>(baseline_page_a.data(), baseline_page_a.size()));
+    auto baseline_header_b = bored::storage::page_header(std::span<const std::byte>(baseline_page_b.data(), baseline_page_b.size()));
 
     std::array<std::byte, 192> shrink_payload{};
     shrink_payload.fill(std::byte{0x42});
@@ -1562,6 +1566,12 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
 
     const auto crash_page_a = page_a_buffer;
     const auto crash_page_b = page_b_buffer;
+    const auto crash_free_bytes_a = fsm.current_free_bytes(page_id_a);
+    const auto crash_free_bytes_b = fsm.current_free_bytes(page_id_b);
+    const auto crash_fragment_count_a = fsm.current_fragment_count(page_id_a);
+    const auto crash_fragment_count_b = fsm.current_fragment_count(page_id_b);
+    auto crash_header_a = bored::storage::page_header(std::span<const std::byte>(crash_page_a.data(), crash_page_a.size()));
+    auto crash_header_b = bored::storage::page_header(std::span<const std::byte>(crash_page_b.data(), crash_page_b.size()));
 
     REQUIRE_FALSE(manager.flush_wal());
     REQUIRE_FALSE(manager.close_wal());
@@ -1629,6 +1639,10 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
         CHECK(span.walker_pages == expected_pages);
     }
 
+    CHECK(crash_header_a.fragment_count == crash_fragment_count_a);
+    CHECK(crash_header_b.fragment_count == crash_fragment_count_b);
+    REQUIRE(crash_fragment_count_b > baseline_fragment_count_b);
+
     FreeSpaceMap replay_fsm;
     WalReplayContext context{PageType::Table, &replay_fsm};
     context.set_page(page_id_a, std::span<const std::byte>(crash_page_a.data(), crash_page_a.size()));
@@ -1652,19 +1666,26 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
     REQUIRE(tuple_a.size() == span_a.tuple_payload.size());
     REQUIRE(std::equal(tuple_a.begin(), tuple_a.end(), span_a.tuple_payload.begin(), span_a.tuple_payload.end()));
     CHECK(replay_fsm.current_free_bytes(page_id_a) == baseline_free_bytes_a);
+    CHECK(replay_fsm.current_fragment_count(page_id_a) == baseline_fragment_count_a);
     for (std::size_t index = 0; index < span_a.chunk_metas.size(); ++index) {
         const auto& expected_meta = span_a.chunk_metas[index];
         const auto& expected_payload = span_a.chunk_payloads[index];
         auto page = context.get_page(expected_meta.overflow_page_id);
-        auto restored_meta = bored::storage::read_overflow_chunk_meta(std::span<const std::byte>(page.data(), page.size()));
+        auto page_view = std::span<const std::byte>(page.data(), page.size());
+        auto restored_meta = bored::storage::read_overflow_chunk_meta(page_view);
         REQUIRE(restored_meta);
         CHECK(restored_meta->overflow_page_id == expected_meta.overflow_page_id);
         CHECK(restored_meta->next_overflow_page_id == expected_meta.next_overflow_page_id);
         CHECK(restored_meta->chunk_index == expected_meta.chunk_index);
         CHECK(restored_meta->chunk_length == expected_meta.chunk_length);
-        auto restored_payload = bored::storage::overflow_chunk_payload(std::span<const std::byte>(page.data(), page.size()), *restored_meta);
+        auto restored_payload = bored::storage::overflow_chunk_payload(page_view, *restored_meta);
         REQUIRE(restored_payload.size() == expected_payload.size());
         REQUIRE(std::equal(restored_payload.begin(), restored_payload.end(), expected_payload.begin(), expected_payload.end()));
+        auto overflow_header = bored::storage::page_header(page_view);
+        CHECK(overflow_header.fragment_count == 0U);
+        CHECK(replay_fsm.current_fragment_count(expected_meta.overflow_page_id) == 0U);
+        CHECK(replay_fsm.current_free_bytes(expected_meta.overflow_page_id)
+              == static_cast<std::uint16_t>(bored::storage::compute_free_bytes(overflow_header)));
     }
 
     const auto& span_b = find_span(page_id_b);
@@ -1673,28 +1694,35 @@ TEST_CASE("Wal crash drill restores multi-page overflow spans")
     REQUIRE(tuple_b.size() == span_b.tuple_payload.size());
     REQUIRE(std::equal(tuple_b.begin(), tuple_b.end(), span_b.tuple_payload.begin(), span_b.tuple_payload.end()));
     CHECK(replay_fsm.current_free_bytes(page_id_b) == baseline_free_bytes_b);
+    CHECK(replay_fsm.current_fragment_count(page_id_b) == baseline_fragment_count_b);
     for (std::size_t index = 0; index < span_b.chunk_metas.size(); ++index) {
         const auto& expected_meta = span_b.chunk_metas[index];
         const auto& expected_payload = span_b.chunk_payloads[index];
         auto page = context.get_page(expected_meta.overflow_page_id);
-        auto restored_meta = bored::storage::read_overflow_chunk_meta(std::span<const std::byte>(page.data(), page.size()));
+        auto page_view = std::span<const std::byte>(page.data(), page.size());
+        auto restored_meta = bored::storage::read_overflow_chunk_meta(page_view);
         REQUIRE(restored_meta);
         CHECK(restored_meta->overflow_page_id == expected_meta.overflow_page_id);
         CHECK(restored_meta->next_overflow_page_id == expected_meta.next_overflow_page_id);
         CHECK(restored_meta->chunk_index == expected_meta.chunk_index);
         CHECK(restored_meta->chunk_length == expected_meta.chunk_length);
-        auto restored_payload = bored::storage::overflow_chunk_payload(std::span<const std::byte>(page.data(), page.size()), *restored_meta);
+        auto restored_payload = bored::storage::overflow_chunk_payload(page_view, *restored_meta);
         REQUIRE(restored_payload.size() == expected_payload.size());
         REQUIRE(std::equal(restored_payload.begin(), restored_payload.end(), expected_payload.begin(), expected_payload.end()));
+        auto overflow_header = bored::storage::page_header(page_view);
+        CHECK(overflow_header.fragment_count == 0U);
+        CHECK(replay_fsm.current_fragment_count(expected_meta.overflow_page_id) == 0U);
+        CHECK(replay_fsm.current_free_bytes(expected_meta.overflow_page_id)
+              == static_cast<std::uint16_t>(bored::storage::compute_free_bytes(overflow_header)));
     }
 
-    auto baseline_header_a = bored::storage::page_header(std::span<const std::byte>(baseline_page_a.data(), baseline_page_a.size()));
     auto replay_header_a = bored::storage::page_header(std::span<const std::byte>(replay_page_a.data(), replay_page_a.size()));
     CHECK(replay_header_a.tuple_count == baseline_header_a.tuple_count);
+    CHECK(replay_header_a.fragment_count == baseline_header_a.fragment_count);
 
-    auto baseline_header_b = bored::storage::page_header(std::span<const std::byte>(baseline_page_b.data(), baseline_page_b.size()));
     auto replay_header_b = bored::storage::page_header(std::span<const std::byte>(replay_page_b.data(), replay_page_b.size()));
     CHECK(replay_header_b.tuple_count == baseline_header_b.tuple_count);
+    CHECK(replay_header_b.fragment_count == baseline_header_b.fragment_count);
 
     (void)std::filesystem::remove_all(wal_dir);
 }
