@@ -38,6 +38,8 @@ private:
     [[nodiscard]] std::error_code bootstrap_tables(std::span<std::byte> page) const;
     [[nodiscard]] std::error_code bootstrap_columns(std::span<std::byte> page) const;
     [[nodiscard]] std::error_code bootstrap_indexes(std::span<std::byte> page) const;
+    [[nodiscard]] std::error_code bootstrap_constraints(std::span<std::byte> page) const;
+    [[nodiscard]] std::error_code bootstrap_sequences(std::span<std::byte> page) const;
 };
 
 }  // namespace bored::catalog

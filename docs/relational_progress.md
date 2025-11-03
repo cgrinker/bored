@@ -44,9 +44,9 @@ Latest validation: Debug `ctest` (407/407) on 2025-11-02.
    - [x] Add regression coverage for session rollback edge conditions, including catalog and overflow interactions.
 
 2. **Constraint & Sequence Foundations**
-   - Extend catalog metadata for constraints and sequences; persist via WAL and recovery hooks.
-   - Implement sequence allocator with transactional semantics for auto-increment columns.
-   - Update DDL verbs (`CREATE TABLE`, `ALTER TABLE`, `CREATE SEQUENCE`) and planner to honor new metadata.
+   - [x] Extend catalog metadata for constraints and sequences; persist via WAL and recovery hooks.
+   - [ ] Implement sequence allocator with transactional semantics for auto-increment columns.
+   - [ ] Update DDL verbs (`CREATE TABLE`, `ALTER TABLE`, `CREATE SEQUENCE`) and planner to honor new metadata.
 
 3. **Constraint Enforcement Pipeline**
    - Planner: Recognize unique/primary keys and foreign keys; generate enforcement operators.

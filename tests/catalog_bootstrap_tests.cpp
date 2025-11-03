@@ -84,12 +84,14 @@ TEST_CASE("Catalog bootstrap seeds system relations")
     auto ec = bootstrapper.run(artifacts);
     REQUIRE_FALSE(ec);
 
-    const std::array<std::uint32_t, 5> expected_pages{
+    const std::array<std::uint32_t, 7> expected_pages{
         catalog::kCatalogDatabasesPageId,
         catalog::kCatalogSchemasPageId,
         catalog::kCatalogTablesPageId,
         catalog::kCatalogColumnsPageId,
-        catalog::kCatalogIndexesPageId
+        catalog::kCatalogIndexesPageId,
+        catalog::kCatalogConstraintsPageId,
+        catalog::kCatalogSequencesPageId
     };
 
     for (auto page_id : expected_pages) {
@@ -99,6 +101,11 @@ TEST_CASE("Catalog bootstrap seeds system relations")
         const auto& header = storage::page_header(span);
         REQUIRE(header.page_id == page_id);
         REQUIRE(static_cast<storage::PageType>(header.type) == storage::PageType::Meta);
+        if (page_id == catalog::kCatalogConstraintsPageId || page_id == catalog::kCatalogSequencesPageId) {
+            CHECK(header.tuple_count == 0U);
+            continue;
+        }
+
         REQUIRE(header.tuple_count > 0U);
         if (page_id == catalog::kCatalogDatabasesPageId) {
             auto tuple = storage::read_tuple(span, 0U);
@@ -176,12 +183,14 @@ TEST_CASE("Catalog bootstrap WAL replay rehydrates pages")
     storage::WalReplayer replayer{context};
     REQUIRE_FALSE(replayer.apply_redo(plan));
 
-    const std::array<std::uint32_t, 5> expected_pages{
+    const std::array<std::uint32_t, 7> expected_pages{
         catalog::kCatalogDatabasesPageId,
         catalog::kCatalogSchemasPageId,
         catalog::kCatalogTablesPageId,
         catalog::kCatalogColumnsPageId,
-        catalog::kCatalogIndexesPageId
+        catalog::kCatalogIndexesPageId,
+        catalog::kCatalogConstraintsPageId,
+        catalog::kCatalogSequencesPageId
     };
 
     for (auto page_id : expected_pages) {
@@ -214,7 +223,7 @@ TEST_CASE("Catalog reserved identifiers do not collide")
 {
     using namespace bored::catalog;
 
-    const std::array<std::uint64_t, 29> id_values{
+    const std::array<std::uint64_t, 50> id_values{
         kSystemDatabaseId.value,
         kSystemSchemaId.value,
         kCatalogDatabasesRelationId.value,
@@ -222,6 +231,8 @@ TEST_CASE("Catalog reserved identifiers do not collide")
         kCatalogTablesRelationId.value,
         kCatalogColumnsRelationId.value,
         kCatalogIndexesRelationId.value,
+        kCatalogConstraintsRelationId.value,
+        kCatalogSequencesRelationId.value,
         kCatalogDatabasesIdColumnId.value,
         kCatalogDatabasesNameColumnId.value,
         kCatalogSchemasIdColumnId.value,
@@ -243,18 +254,39 @@ TEST_CASE("Catalog reserved identifiers do not collide")
         kCatalogIndexesRootPageColumnId.value,
         kCatalogIndexesComparatorColumnId.value,
         kCatalogIndexesFanoutColumnId.value,
-        kCatalogIndexesNameColumnId.value
+        kCatalogIndexesNameColumnId.value,
+        kCatalogConstraintsIdColumnId.value,
+        kCatalogConstraintsTableColumnId.value,
+        kCatalogConstraintsTypeColumnId.value,
+        kCatalogConstraintsBackingIndexColumnId.value,
+        kCatalogConstraintsReferencedTableColumnId.value,
+        kCatalogConstraintsKeyColumnsColumnId.value,
+        kCatalogConstraintsReferencedColumnsColumnId.value,
+        kCatalogConstraintsNameColumnId.value,
+        kCatalogSequencesIdColumnId.value,
+        kCatalogSequencesSchemaColumnId.value,
+        kCatalogSequencesOwningTableColumnId.value,
+        kCatalogSequencesOwningColumnColumnId.value,
+        kCatalogSequencesStartValueColumnId.value,
+        kCatalogSequencesIncrementColumnId.value,
+        kCatalogSequencesMinValueColumnId.value,
+        kCatalogSequencesMaxValueColumnId.value,
+        kCatalogSequencesCacheSizeColumnId.value,
+        kCatalogSequencesCycleFlagColumnId.value,
+        kCatalogSequencesNameColumnId.value
     };
 
     std::set<std::uint64_t> unique_ids(id_values.begin(), id_values.end());
     REQUIRE(unique_ids.size() == id_values.size());
 
-    const std::array<std::uint64_t, 5> index_values{
+    const std::array<std::uint64_t, 7> index_values{
         kCatalogDatabasesNameIndexId.value,
         kCatalogSchemasNameIndexId.value,
         kCatalogTablesNameIndexId.value,
         kCatalogColumnsNameIndexId.value,
-        kCatalogIndexesNameIndexId.value
+        kCatalogIndexesNameIndexId.value,
+        kCatalogConstraintsNameIndexId.value,
+        kCatalogSequencesNameIndexId.value
     };
 
     std::set<std::uint64_t> unique_index_ids(index_values.begin(), index_values.end());
