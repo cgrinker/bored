@@ -37,7 +37,7 @@ Latest validation: Release `ctest` (420/420) on 2025-11-03.
 
 ## Roadmap to Full Relational Coverage
 
-1. **Finalize Concurrency Milestone 1 (In Progress)**
+1. **Finalize Concurrency Milestone 1 (Completed)**
    - [x] Shell DML and SELECT pipelines now share live TransactionManager contexts with catalog cache refreshes and planner/executor visibility checks.
    - [x] Added regression coverage verifying catalog accessor tuples are re-evaluated when snapshots advance without extra scans.
    - [x] Wired snapshot-aware retention guard through the commit pipeline so WAL retention honors active reader horizons.
@@ -45,39 +45,44 @@ Latest validation: Release `ctest` (420/420) on 2025-11-03.
    - [x] Extend undo walker crash drills to cover overflow chains with fragment-aware assertions and sanitized cached overflow payloads to remove stub headers.
    - [x] Add regression coverage for session rollback edge conditions, including catalog and overflow interactions.
 
-2. **Constraint & Sequence Foundations**
+2. **Constraint & Sequence Foundations (Completed)**
    - [x] Extend catalog metadata for constraints and sequences; persist via WAL and recovery hooks.
    - [x] Expose catalog accessor support for sequence descriptors across schema and relation scopes.
    - [x] Implement sequence allocator with transactional semantics for auto-increment columns (validated by `catalog_sequence_allocator_tests`).
    - [x] Update DDL verbs (`CREATE TABLE`, `ALTER TABLE`, `CREATE SEQUENCE`) to request transactional sequence allocators; planner/executor consumption tracked under Constraint Enforcement Pipeline.
 
-3. **Constraint Enforcement Pipeline**
+3. **Constraint Enforcement Pipeline (Completed)**
    - [x] Catalog accessor now exposes constraint descriptors for planner/executor consumption.
    - [x] Planner: Recognize unique/primary keys and foreign keys; generate enforcement operators.
    - [x] Executor: Implement uniqueness checks (indexes + deferred validation) and referential integrity probes with transactional awareness.
    - [x] Shell: Apply constraint enforcement to INSERT/UPDATE pipelines using planner metadata and simulated index probes.
 
-4. **CTE Enablement**
+4. **CTE Enablement (Planned)**
    - Parser/AST: Add WITH clause grammar and nodes (non-recursive first, recursive second).
    - Planner: Introduce memo entries for CTE producers/consumers and support inlining or materialization strategies.
    - Executor: Provide worktable infrastructure for recursive CTEs and integrate with snapshot visibility.
+   - Source files to update: src/parser/grammar.cpp, src/parser/relational_ast.cpp, src/parser/relational_logical_lowering.cpp, src/planner/memo.cpp, src/planner/planner.cpp, src/executor/executor_node.cpp, tests/parser_logical_lowering_tests.cpp, tests/planner_integration_tests.cpp
 
-5. **Advanced Indexing & Optimization**
+5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.
-  - Enhance optimizer to choose index scans based on statistics and predicates; add cost model refinements.
+   - Enhance optimizer to choose index scans based on statistics and predicates; add cost model refinements.
    - Expand join optimization (multi-join reordering, bushy plans) once statistics available.
+   - Source files to update: src/storage/index_btree_manager.cpp, src/storage/index_retention.cpp, src/planner/cost_model.cpp, src/planner/statistics_catalog.cpp, src/planner/rules/, src/planner/rule.cpp, tests/index_btree_manager_tests.cpp, tests/planner_cost_model_tests.cpp, tests/planner_rule_tests.cpp
 
-6. **Comprehensive Transactions & Isolation Levels**
+6. **Comprehensive Transactions & Isolation Levels (Planned)**
    - Implement lock manager integration for key-range locking where needed for uniqueness.
    - Add multi-version concurrency control (MVCC) visibility rules across executor operators.
    - Provide configurable isolation levels and conflict resolution.
+   - Source files to update: src/storage/lock_manager.cpp, src/storage/lock_introspection.cpp, src/executor/mvcc_visibility.cpp, src/txn/transaction_manager.cpp, src/txn/wal_commit_pipeline.cpp, tests/lock_manager_tests.cpp, tests/transaction_manager_tests.cpp, tests/transaction_crash_recovery_integration_tests.cpp
 
-7. **Extended SQL Surface & Tooling**
+7. **Extended SQL Surface & Tooling (Planned)**
    - Broaden parser/executor to cover CTEs, window functions, analytic aggregates, and advanced DDL (constraints, sequences, views).
    - Enhance shell tooling and diagnostics to expose new capabilities, sequence states, constraint violations, and query plans.
+   - Source files to update: src/parser/grammar.cpp, src/parser/relational_binder.cpp, src/parser/relational_logical_normalization.cpp, src/executor/aggregation_executor.cpp, src/executor/projection_executor.cpp, src/shell/shell_engine.cpp, src/shell/shell_backend.cpp, tests/parser_select_tests.cpp, tests/executor_aggregation_tests.cpp, tests/shell_integration_tests.cpp
 
-8. **Readiness Validation**
+8. **Readiness Validation (Planned)**
    - Develop regression suites covering constraint enforcement, sequence allocation, CTE behavior, transaction isolation, and index-aware query plans.
    - Run performance and crash/recovery drills to validate durability and consistency with new features.
+   - Source files to update: tests/executor_milestone1_tests.cpp, tests/planner_integration_tests.cpp, tests/transaction_crash_recovery_integration_tests.cpp, tests/end_to_end/e2e_smoke.sql, docs/checkpoint_recovery_milestones.md, docs/storage_benchmark_telemetry_backlog.md, benchmarks/storage_benchmarks.cpp
 
 Delivering these milestones will transition the project from a WAL-driven storage core with baseline relational operators to a full-featured relational database supporting constraints, rich SQL constructs, and mature concurrency control.
