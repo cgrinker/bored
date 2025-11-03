@@ -2,7 +2,7 @@
 
 _Last updated: 2025-11-02_
 
-Latest validation: Debug `ctest` (406/406) on 2025-11-02.
+Latest validation: Debug `ctest` (407/407) on 2025-11-02.
 
 ## Current Capabilities
 
@@ -41,7 +41,7 @@ Latest validation: Debug `ctest` (406/406) on 2025-11-02.
    - [x] Wired snapshot-aware retention guard through the commit pipeline so WAL retention honors active reader horizons.
    - [x] Landed multi-page crash drill verifying committed pages replay while in-flight pages roll back with fragment-aware undo.
    - [x] Extend undo walker crash drills to cover overflow chains with fragment-aware assertions.
-   - [ ] Add regression coverage for session rollback edge conditions, including catalog and overflow interactions.
+   - [x] Add regression coverage for session rollback edge conditions, including catalog and overflow interactions.
 
 2. **Constraint & Sequence Foundations**
    - Extend catalog metadata for constraints and sequences; persist via WAL and recovery hooks.
