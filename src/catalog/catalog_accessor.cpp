@@ -213,6 +213,68 @@ std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes_for_schema(SchemaId
     return result;
 }
 
+std::optional<CatalogConstraintDescriptor> CatalogAccessor::constraint(ConstraintId id) const
+{
+    ensure_constraints_loaded();
+    auto it = constraint_index_.find(id.value);
+    if (it == constraint_index_.end()) {
+        return std::nullopt;
+    }
+    const auto& entry = constraints_[it->second];
+    return CatalogConstraintDescriptor{entry.tuple,
+                                       entry.constraint_id,
+                                       entry.relation_id,
+                                       entry.constraint_type,
+                                       entry.backing_index_id,
+                                       entry.referenced_relation_id,
+                                       entry.key_columns,
+                                       entry.referenced_columns,
+                                       entry.name};
+}
+
+std::vector<CatalogConstraintDescriptor> CatalogAccessor::constraints() const
+{
+    ensure_constraints_loaded();
+    std::vector<CatalogConstraintDescriptor> result;
+    result.reserve(constraints_.size());
+    for (const auto& entry : constraints_) {
+        result.emplace_back(entry.tuple,
+                            entry.constraint_id,
+                            entry.relation_id,
+                            entry.constraint_type,
+                            entry.backing_index_id,
+                            entry.referenced_relation_id,
+                            entry.key_columns,
+                            entry.referenced_columns,
+                            entry.name);
+    }
+    return result;
+}
+
+std::vector<CatalogConstraintDescriptor> CatalogAccessor::constraints(RelationId relation_id) const
+{
+    ensure_constraints_loaded();
+    std::vector<CatalogConstraintDescriptor> result;
+    auto it = constraints_by_relation_.find(relation_id.value);
+    if (it == constraints_by_relation_.end()) {
+        return result;
+    }
+    result.reserve(it->second.size());
+    for (auto index : it->second) {
+        const auto& entry = constraints_[index];
+        result.emplace_back(entry.tuple,
+                            entry.constraint_id,
+                            entry.relation_id,
+                            entry.constraint_type,
+                            entry.backing_index_id,
+                            entry.referenced_relation_id,
+                            entry.key_columns,
+                            entry.referenced_columns,
+                            entry.name);
+    }
+    return result;
+}
+
 std::optional<CatalogSequenceDescriptor> CatalogAccessor::sequence(SequenceId id) const
 {
     ensure_sequences_loaded();
@@ -347,6 +409,7 @@ void CatalogAccessor::reset_cached_state() const
     tables_loaded_ = false;
     columns_loaded_ = false;
     indexes_loaded_ = false;
+    constraints_loaded_ = false;
     sequences_loaded_ = false;
 }
 
@@ -586,6 +649,56 @@ void CatalogAccessor::ensure_indexes_loaded() const
 
     indexes_loaded_ = true;
     indexes_epoch_ = current_epoch;
+}
+
+void CatalogAccessor::ensure_constraints_loaded() const
+{
+    ensure_snapshot_current();
+
+    auto& cache = CatalogCache::instance();
+    const auto current_epoch = cache.epoch(kCatalogConstraintsRelationId);
+    if (constraints_loaded_ && constraints_epoch_ == current_epoch) {
+        return;
+    }
+
+    constraints_.clear();
+    constraint_index_.clear();
+    constraints_by_relation_.clear();
+
+    auto relation = cache.materialize(kCatalogConstraintsRelationId, scanner_);
+    if (relation) {
+        constraints_.reserve(relation->tuples.size());
+        for (const auto& tuple : relation->tuples) {
+            auto tuple_span = std::span<const std::byte>(tuple.payload.data(), tuple.payload.size());
+            auto view = decode_catalog_constraint(tuple_span);
+            if (!view) {
+                continue;
+            }
+            if (!transaction_->is_visible(view->tuple)) {
+                continue;
+            }
+
+            ConstraintEntry entry{};
+            entry.tuple = view->tuple;
+            entry.constraint_id = view->constraint_id;
+            entry.relation_id = view->relation_id;
+            entry.constraint_type = view->constraint_type;
+            entry.backing_index_id = view->backing_index_id;
+            entry.referenced_relation_id = view->referenced_relation_id;
+            entry.key_columns = make_string(view->key_columns);
+            entry.referenced_columns = make_string(view->referenced_columns);
+            entry.name = make_string(view->name);
+
+            const auto index = constraints_.size();
+            constraints_.push_back(std::move(entry));
+            auto& inserted = constraints_.back();
+            constraint_index_[inserted.constraint_id.value] = index;
+            constraints_by_relation_[inserted.relation_id.value].push_back(index);
+        }
+    }
+
+    constraints_loaded_ = true;
+    constraints_epoch_ = current_epoch;
 }
 
 void CatalogAccessor::ensure_sequences_loaded() const

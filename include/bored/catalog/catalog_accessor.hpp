@@ -44,6 +44,9 @@ public:
     [[nodiscard]] std::optional<CatalogIndexDescriptor> index(IndexId id) const;
     [[nodiscard]] std::vector<CatalogIndexDescriptor> indexes(RelationId relation_id) const;
     [[nodiscard]] std::vector<CatalogIndexDescriptor> indexes_for_schema(SchemaId schema_id) const;
+    [[nodiscard]] std::optional<CatalogConstraintDescriptor> constraint(ConstraintId id) const;
+    [[nodiscard]] std::vector<CatalogConstraintDescriptor> constraints() const;
+    [[nodiscard]] std::vector<CatalogConstraintDescriptor> constraints(RelationId relation_id) const;
     [[nodiscard]] std::optional<CatalogSequenceDescriptor> sequence(SequenceId id) const;
     [[nodiscard]] std::vector<CatalogSequenceDescriptor> sequences() const;
     [[nodiscard]] std::vector<CatalogSequenceDescriptor> sequences(SchemaId schema_id) const;
@@ -101,6 +104,18 @@ private:
         std::string name{};
     };
 
+    struct ConstraintEntry final {
+        CatalogTupleDescriptor tuple{};
+        ConstraintId constraint_id{};
+        RelationId relation_id{};
+        CatalogConstraintType constraint_type = CatalogConstraintType::Unknown;
+        IndexId backing_index_id{};
+        RelationId referenced_relation_id{};
+        std::string key_columns{};
+        std::string referenced_columns{};
+        std::string name{};
+    };
+
     struct SequenceEntry final {
         CatalogTupleDescriptor tuple{};
         SequenceId sequence_id{};
@@ -143,6 +158,10 @@ private:
     mutable std::unordered_map<std::uint64_t, std::size_t> index_index_{};
     mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> indexes_by_relation_{};
     mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> indexes_by_schema_{};
+    mutable bool constraints_loaded_ = false;
+    mutable std::vector<ConstraintEntry> constraints_{};
+    mutable std::unordered_map<std::uint64_t, std::size_t> constraint_index_{};
+    mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> constraints_by_relation_{};
 
     mutable bool sequences_loaded_ = false;
     mutable std::vector<SequenceEntry> sequences_{};
@@ -155,6 +174,7 @@ private:
     mutable std::uint64_t tables_epoch_ = 0U;
     mutable std::uint64_t columns_epoch_ = 0U;
     mutable std::uint64_t indexes_epoch_ = 0U;
+    mutable std::uint64_t constraints_epoch_ = 0U;
     mutable std::uint64_t sequences_epoch_ = 0U;
 
     mutable CatalogSnapshot cached_snapshot_{};
@@ -165,6 +185,7 @@ private:
     void ensure_tables_loaded() const;
     void ensure_columns_loaded() const;
     void ensure_indexes_loaded() const;
+    void ensure_constraints_loaded() const;
     void ensure_sequences_loaded() const;
 };
 
