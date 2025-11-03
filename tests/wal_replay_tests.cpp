@@ -1319,6 +1319,253 @@ TEST_CASE("Wal crash drill restores overflow before image")
     (void)std::filesystem::remove_all(wal_dir);
 }
 
+TEST_CASE("Wal crash drill undo walker enumerates overflow chains")
+{
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_undo_walker_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 128U * bored::storage::kWalBlockSize;
+    config.buffer_size = 2U * bored::storage::kWalBlockSize;
+    config.start_lsn = bored::storage::kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    struct ScenarioData final {
+        std::uint32_t page_id = 0U;
+        std::array<std::byte, bored::storage::kPageSize> crash_page{};
+        std::vector<std::uint32_t> overflow_pages{};
+        std::vector<std::byte> initial_payload{};
+        std::uint16_t slot_index = 0U;
+        std::uint64_t baseline_free_bytes = 0U;
+        std::vector<std::byte> expected_inline_payload{};
+        std::vector<bored::storage::WalOverflowChunkMeta> expected_chunk_metas{};
+        std::vector<std::vector<std::byte>> expected_chunk_payloads{};
+    };
+
+    const std::array<std::uint32_t, 2U> page_ids{81818U, 82828U};
+    std::vector<ScenarioData> scenarios;
+    scenarios.reserve(page_ids.size());
+
+    for (std::size_t index = 0; index < page_ids.size(); ++index) {
+        const auto page_id = page_ids[index];
+
+        alignas(8) std::array<std::byte, bored::storage::kPageSize> page_buffer{};
+        auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+        REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+        ScenarioData scenario{};
+        scenario.page_id = page_id;
+
+        const std::size_t payload_length = 12032U + index * 256U;
+        scenario.initial_payload.resize(payload_length);
+        for (std::size_t byte_index = 0; byte_index < scenario.initial_payload.size(); ++byte_index) {
+            const auto pattern = static_cast<unsigned int>((byte_index * (index + 3U)) & 0xFFU);
+            scenario.initial_payload[byte_index] = static_cast<std::byte>(pattern);
+        }
+
+        PageManager::TupleInsertResult insert_result{};
+        REQUIRE_FALSE(manager.insert_tuple(page_span,
+                                           scenario.initial_payload,
+                                           0xD00FULL + static_cast<std::uint64_t>(index),
+                                           insert_result));
+        REQUIRE(insert_result.used_overflow);
+        REQUIRE(insert_result.overflow_page_ids.size() >= 2U);
+
+        auto commit_header = make_commit_header(wal_writer, page_id, page_id + 1U, page_id);
+        bored::storage::WalAppendResult commit_result{};
+        REQUIRE_FALSE(wal_writer->append_commit_record(commit_header, commit_result));
+
+        scenario.slot_index = insert_result.slot.index;
+        scenario.overflow_pages = insert_result.overflow_page_ids;
+        scenario.baseline_free_bytes = fsm.current_free_bytes(page_id);
+
+        std::array<std::byte, 320U> final_payload{};
+        const auto fill_value = static_cast<unsigned char>(0x30 + static_cast<unsigned int>(index));
+        final_payload.fill(std::byte{fill_value});
+
+        PageManager::TupleUpdateResult update_result{};
+        REQUIRE_FALSE(manager.update_tuple(page_span,
+                                           insert_result.slot.index,
+                                           std::span<const std::byte>(final_payload.data(), final_payload.size()),
+                                           0xBADF00DULL + static_cast<std::uint64_t>(index),
+                                           update_result));
+        CHECK_FALSE(update_result.used_overflow);
+
+        scenario.crash_page = page_buffer;
+
+        scenarios.emplace_back(std::move(scenario));
+    }
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    REQUIRE(plan.undo_spans.size() >= scenarios.size());
+    WalUndoWalker walker{plan};
+
+    std::size_t matched_spans = 0U;
+
+    while (auto work_item = walker.next()) {
+        auto scenario_it = std::find_if(scenarios.begin(), scenarios.end(), [&](const ScenarioData& data) {
+            return data.page_id == work_item->owner_page_id;
+        });
+
+        if (scenario_it == scenarios.end()) {
+            CHECK(work_item->overflow_page_ids.empty());
+            continue;
+        }
+
+        ++matched_spans;
+
+        auto& scenario = *scenario_it;
+
+        auto actual_pages = work_item->overflow_page_ids;
+        std::sort(actual_pages.begin(), actual_pages.end());
+        actual_pages.erase(std::unique(actual_pages.begin(), actual_pages.end()), actual_pages.end());
+
+        auto expected_pages = scenario.overflow_pages;
+        std::sort(expected_pages.begin(), expected_pages.end());
+        expected_pages.erase(std::unique(expected_pages.begin(), expected_pages.end()), expected_pages.end());
+
+        CHECK(actual_pages == expected_pages);
+
+        auto before_it = std::find_if(work_item->records.begin(),
+                                      work_item->records.end(),
+                                      [](const WalRecoveryRecord& record) {
+                                          return static_cast<WalRecordType>(record.header.type) ==
+                                                 WalRecordType::TupleBeforeImage;
+                                      });
+        REQUIRE(before_it != work_item->records.end());
+
+        auto before_view = bored::storage::decode_wal_tuple_before_image(
+            std::span<const std::byte>(before_it->payload.data(), before_it->payload.size()));
+        REQUIRE(before_view);
+
+        auto tuple_storage_span = std::span<const std::byte>(before_view->tuple_payload.data(),
+                                                             before_view->tuple_payload.size());
+        REQUIRE(tuple_storage_span.size() == before_view->meta.tuple_length);
+
+        auto stub_span = tuple_storage_span.subspan(bored::storage::tuple_header_size());
+        scenario.expected_inline_payload.assign(stub_span.begin(), stub_span.end());
+
+        auto overflow_header = bored::storage::parse_overflow_tuple(stub_span);
+        REQUIRE(overflow_header);
+        REQUIRE(overflow_header->logical_length == scenario.initial_payload.size());
+
+        auto inline_span = bored::storage::overflow_tuple_inline_payload(stub_span, *overflow_header);
+
+        std::vector<std::byte> reconstructed_payload(overflow_header->logical_length);
+        if (!inline_span.empty()) {
+            std::copy(inline_span.begin(), inline_span.end(), reconstructed_payload.begin());
+        }
+
+        scenario.expected_chunk_metas.clear();
+        scenario.expected_chunk_payloads.clear();
+        scenario.expected_chunk_metas.reserve(before_view->overflow_chunks.size());
+        scenario.expected_chunk_payloads.reserve(before_view->overflow_chunks.size());
+
+        for (const auto& chunk_view : before_view->overflow_chunks) {
+            scenario.expected_chunk_metas.push_back(chunk_view.meta);
+            scenario.expected_chunk_payloads.emplace_back(chunk_view.payload.begin(), chunk_view.payload.end());
+
+            REQUIRE(chunk_view.meta.chunk_offset + chunk_view.meta.chunk_length <= reconstructed_payload.size());
+            std::copy(chunk_view.payload.begin(),
+                      chunk_view.payload.end(),
+                      reconstructed_payload.begin() + chunk_view.meta.chunk_offset);
+        }
+
+        if (reconstructed_payload != scenario.initial_payload) {
+            CAPTURE(overflow_header->inline_length);
+            CAPTURE(before_view->overflow_chunks.size());
+            if (!before_view->overflow_chunks.empty()) {
+                CAPTURE(before_view->overflow_chunks.front().meta.chunk_offset);
+                CAPTURE(before_view->overflow_chunks.front().meta.chunk_length);
+            }
+            std::vector<std::uint16_t> prefix;
+            const auto sample = std::min<std::size_t>(reconstructed_payload.size(), 32U);
+            prefix.reserve(sample);
+            for (std::size_t i = 0; i < sample; ++i) {
+                prefix.push_back(static_cast<std::uint16_t>(reconstructed_payload[i]));
+            }
+            CAPTURE(prefix);
+            CAPTURE(reconstructed_payload.size());
+            CAPTURE(scenario.initial_payload.size());
+            const auto mismatch = std::mismatch(reconstructed_payload.begin(),
+                                                reconstructed_payload.end(),
+                                                scenario.initial_payload.begin(),
+                                                scenario.initial_payload.end());
+            if (mismatch.first != reconstructed_payload.end() &&
+                mismatch.second != scenario.initial_payload.end()) {
+                CAPTURE(static_cast<std::uint16_t>(*mismatch.first));
+                CAPTURE(static_cast<std::uint16_t>(*mismatch.second));
+                CAPTURE(static_cast<std::uint32_t>(std::distance(reconstructed_payload.begin(), mismatch.first)));
+            }
+        }
+        const bool size_matches = reconstructed_payload.size() == scenario.initial_payload.size();
+        CHECK(size_matches);
+        if (size_matches) {
+            const auto mismatch = std::mismatch(reconstructed_payload.begin(),
+                                                reconstructed_payload.end(),
+                                                scenario.initial_payload.begin());
+            CHECK(mismatch.first == reconstructed_payload.end());
+        }
+    }
+
+    CHECK(matched_spans == scenarios.size());
+    CHECK_FALSE(walker.next());
+
+    FreeSpaceMap replay_fsm;
+    WalReplayContext context{PageType::Table, &replay_fsm};
+    for (const auto& scenario : scenarios) {
+        context.set_page(scenario.page_id,
+                         std::span<const std::byte>(scenario.crash_page.data(), scenario.crash_page.size()));
+    }
+
+    WalReplayer replayer{context};
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    auto undo_error = replayer.apply_undo(plan);
+    REQUIRE_FALSE(undo_error);
+
+    for (const auto& scenario : scenarios) {
+        auto page_span = context.get_page(scenario.page_id);
+        auto tuple_span = bored::storage::read_tuple(
+            std::span<const std::byte>(page_span.data(), page_span.size()),
+            scenario.slot_index);
+        std::vector<std::byte> restored(tuple_span.begin(), tuple_span.end());
+        CHECK(restored == scenario.expected_inline_payload);
+        CHECK(replay_fsm.current_free_bytes(scenario.page_id) == scenario.baseline_free_bytes);
+
+        for (std::size_t index = 0; index < scenario.expected_chunk_metas.size(); ++index) {
+            const auto& expected_meta = scenario.expected_chunk_metas[index];
+            const auto& expected_payload = scenario.expected_chunk_payloads[index];
+            auto overflow_page = context.get_page(expected_meta.overflow_page_id);
+            auto restored_meta = bored::storage::read_overflow_chunk_meta(
+                std::span<const std::byte>(overflow_page.data(), overflow_page.size()));
+            REQUIRE(restored_meta);
+            CHECK(restored_meta->overflow_page_id == expected_meta.overflow_page_id);
+            CHECK(restored_meta->next_overflow_page_id == expected_meta.next_overflow_page_id);
+            CHECK(restored_meta->chunk_index == expected_meta.chunk_index);
+            CHECK(restored_meta->chunk_length == expected_meta.chunk_length);
+
+            auto restored_payload = bored::storage::overflow_chunk_payload(
+                std::span<const std::byte>(overflow_page.data(), overflow_page.size()),
+                *restored_meta);
+            REQUIRE(restored_payload.size() == expected_payload.size());
+            CHECK(std::equal(restored_payload.begin(), restored_payload.end(), expected_payload.begin(), expected_payload.end()));
+        }
+    }
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
 TEST_CASE("Wal crash drill unwinds layered overflow updates")
 {
     auto io = make_async_io();

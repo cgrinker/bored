@@ -6,7 +6,7 @@ Latest validation: Release `ctest` (420/420) on 2025-11-03.
 
 ## Current Capabilities
 
-- **Storage Durability**: WAL writer/reader/replayer pipeline complete with retention, checkpoint scheduling, crash recovery, and page manager integration.
+- **Storage Durability**: WAL writer/reader/replayer pipeline complete with retention, checkpoint scheduling, crash recovery, and page manager integration; crash drills now validate overflow chain undo paths with cached payloads stripped of stub headers.
 - **Catalog & DDL**: Persistent catalog with fully wired DDL handlers (create/alter/drop) for schemas, tables, and indexes, including restart-safe catalog bootstrap.
 - **Sequence Allocation (foundation)**: Transactional sequence allocator stages `next_value` updates via catalog mutator hooks, dispatcher now wires allocators into DDL handlers, and Catch2 regression coverage remains; planner/executor wiring is still pending.
 - **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell now supports BEGIN/COMMIT/ROLLBACK so INSERT/UPDATE/DELETE/SELECT flows can share session-scoped transactions with executor snapshots; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard now propagates oldest reader LSNs while cross-session isolation and deadlock handling remain on the roadmap.
@@ -42,7 +42,7 @@ Latest validation: Release `ctest` (420/420) on 2025-11-03.
    - [x] Added regression coverage verifying catalog accessor tuples are re-evaluated when snapshots advance without extra scans.
    - [x] Wired snapshot-aware retention guard through the commit pipeline so WAL retention honors active reader horizons.
    - [x] Landed multi-page crash drill verifying committed pages replay while in-flight pages roll back with fragment-aware undo.
-   - [x] Extend undo walker crash drills to cover overflow chains with fragment-aware assertions.
+   - [x] Extend undo walker crash drills to cover overflow chains with fragment-aware assertions and sanitized cached overflow payloads to remove stub headers.
    - [x] Add regression coverage for session rollback edge conditions, including catalog and overflow interactions.
 
 2. **Constraint & Sequence Foundations**

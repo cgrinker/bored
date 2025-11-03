@@ -67,6 +67,17 @@ constexpr WalRecordType update_record_type(const PageHeader& header) noexcept
     return is_catalog_page(header) ? WalRecordType::CatalogUpdate : WalRecordType::TupleUpdate;
 }
 
+bool payload_starts_with_overflow_stub(std::span<const std::byte> payload) noexcept
+{
+    if (payload.size() < overflow_tuple_header_size()) {
+        return false;
+    }
+
+    std::uint32_t magic = 0U;
+    std::memcpy(&magic, payload.data(), sizeof(magic));
+    return magic == kOverflowTupleMagic;
+}
+
 }  // namespace
 
 PageManager::OperationScope::OperationScope(const PageManager* manager, OperationKind kind) noexcept
@@ -174,6 +185,7 @@ std::error_code PageManager::build_overflow_truncate_payload(const WalTupleMeta&
     chunk_payloads.reserve(header.chunk_count);
 
     std::uint32_t current_page = header.first_overflow_page_id;
+    [[maybe_unused]] bool observed_stub_prefix = false;
 
     for (std::uint16_t index = 0; index < header.chunk_count; ++index) {
         auto cache_it = overflow_cache_.find(current_page);
@@ -186,10 +198,45 @@ std::error_code PageManager::build_overflow_truncate_payload(const WalTupleMeta&
             return std::make_error_code(std::errc::io_error);
         }
 
+        auto payload_span = std::span<const std::byte>(entry.payload.data(), entry.payload.size());
+        const auto expected_length = static_cast<std::size_t>(entry.meta.chunk_length);
+        const bool has_stub_prefix = payload_starts_with_overflow_stub(payload_span);
+        if (has_stub_prefix) {
+            observed_stub_prefix = true;
+        }
+
+        std::vector<std::byte> sanitized_payload;
+        sanitized_payload.reserve(expected_length);
+
+        if (has_stub_prefix) {
+            const auto header_size = overflow_tuple_header_size();
+            if (payload_span.size() < header_size) {
+                return std::make_error_code(std::errc::io_error);
+            }
+
+            const auto available = payload_span.size() - header_size;
+            if (available < expected_length) {
+                return std::make_error_code(std::errc::io_error);
+            }
+
+            const auto begin = payload_span.begin() + static_cast<std::ptrdiff_t>(header_size);
+            const auto end = begin + static_cast<std::ptrdiff_t>(expected_length);
+            sanitized_payload.assign(begin, end);
+        } else {
+            if (payload_span.size() < expected_length) {
+                return std::make_error_code(std::errc::io_error);
+            }
+
+            const auto end = payload_span.begin() + static_cast<std::ptrdiff_t>(expected_length);
+            sanitized_payload.assign(payload_span.begin(), end);
+        }
+
         chunk_metas.push_back(entry.meta);
-        chunk_payloads.push_back(entry.payload);
+        chunk_payloads.push_back(std::move(sanitized_payload));
         current_page = entry.meta.next_overflow_page_id;
     }
+
+    (void)observed_stub_prefix;
 
     return {};
 }
