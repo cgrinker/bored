@@ -8,7 +8,7 @@ Latest validation: Debug `ctest` (409/409) on 2025-11-02.
 
 - **Storage Durability**: WAL writer/reader/replayer pipeline complete with retention, checkpoint scheduling, crash recovery, and page manager integration.
 - **Catalog & DDL**: Persistent catalog with fully wired DDL handlers (create/alter/drop) for schemas, tables, and indexes, including restart-safe catalog bootstrap.
-- **Sequence Allocation (foundation)**: Transactional sequence allocator stages `next_value` updates via catalog mutator hooks with Catch2 regression coverage; planner/executor wiring remains.
+- **Sequence Allocation (foundation)**: Transactional sequence allocator stages `next_value` updates via catalog mutator hooks, dispatcher now wires allocators into DDL handlers, and Catch2 regression coverage remains; planner/executor wiring is still pending.
 - **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell now supports BEGIN/COMMIT/ROLLBACK so INSERT/UPDATE/DELETE/SELECT flows can share session-scoped transactions with executor snapshots; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard now propagates oldest reader LSNs while cross-session isolation and deadlock handling remain on the roadmap.
 - **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs; binder resolves identifiers and types; lowering and normalization stages generate logical plans for select/join queries.
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators.
@@ -48,7 +48,7 @@ Latest validation: Debug `ctest` (409/409) on 2025-11-02.
    - [x] Extend catalog metadata for constraints and sequences; persist via WAL and recovery hooks.
    - [x] Expose catalog accessor support for sequence descriptors across schema and relation scopes.
    - [x] Implement sequence allocator with transactional semantics for auto-increment columns (validated by `catalog_sequence_allocator_tests`).
-   - [ ] Update DDL verbs (`CREATE TABLE`, `ALTER TABLE`, `CREATE SEQUENCE`) and planner to honor new metadata.
+   - [x] Update DDL verbs (`CREATE TABLE`, `ALTER TABLE`, `CREATE SEQUENCE`) to request transactional sequence allocators; planner/executor consumption tracked under Constraint Enforcement Pipeline.
 
 3. **Constraint Enforcement Pipeline**
    - Planner: Recognize unique/primary keys and foreign keys; generate enforcement operators.
