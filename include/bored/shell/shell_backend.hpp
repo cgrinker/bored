@@ -7,6 +7,8 @@
 #include "bored/parser/ddl_script_executor.hpp"
 #include "bored/planner/physical_plan.hpp"
 #include "bored/shell/shell_engine.hpp"
+#include "bored/executor/executor_node.hpp"
+#include "bored/executor/unique_enforce_executor.hpp"
 #include "bored/ddl/ddl_command.hpp"
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
@@ -85,15 +87,13 @@ public:
     [[nodiscard]] catalog::SchemaId default_schema() const noexcept { return default_schema_id_; }
     [[nodiscard]] catalog::DatabaseId default_database() const noexcept { return default_database_id_; }
 
-private:
-    struct CatalogStorage;
+    using ScalarValue = std::variant<std::int64_t, std::string>;
+
     struct ColumnInfo final {
         std::string name;
         catalog::CatalogColumnType type = catalog::CatalogColumnType::Unknown;
         std::size_t ordinal = 0U;
     };
-
-    using ScalarValue = std::variant<std::int64_t, std::string>;
 
     struct TableData final {
         catalog::RelationId relation_id{};
@@ -104,6 +104,9 @@ private:
         std::unordered_map<std::string, std::size_t> column_index{};
         std::uint64_t next_row_id = 1U;
     };
+
+private:
+    struct CatalogStorage;
 
     struct SessionTransaction final {
         txn::TransactionContext context{};
@@ -143,6 +146,43 @@ private:
         planner::PhysicalPlan plan{};
     };
 
+    struct UniqueConstraintPlan final {
+        catalog::ConstraintId constraint_id{};
+        catalog::IndexId index_id{};
+        std::string name{};
+        bool is_primary_key = false;
+        bool allow_null_keys = true;
+        std::vector<std::size_t> column_indexes{};
+        std::string telemetry_identifier{};
+    };
+
+    struct ForeignKeyConstraintPlan final {
+        catalog::ConstraintId constraint_id{};
+        catalog::IndexId index_id{};
+        std::string name{};
+        std::vector<std::size_t> referencing_column_indexes{};
+        const TableData* referenced_table = nullptr;
+        std::vector<std::size_t> referenced_column_indexes{};
+        std::string telemetry_identifier{};
+        bool skip_when_null = true;
+    };
+
+    struct ConstraintIndexDefinition final {
+        const TableData* table = nullptr;
+        std::vector<std::size_t> column_indexes{};
+    };
+
+    struct ConstraintEnforcementPlan final {
+        std::vector<ForeignKeyConstraintPlan> foreign_key_constraints{};
+        std::vector<UniqueConstraintPlan> unique_constraints{};
+        std::unordered_map<std::uint64_t, ConstraintIndexDefinition> index_definitions{};
+    };
+
+    struct ConstraintPlanError final {
+        std::string message{};
+        std::vector<std::string> hints{};
+    };
+
     using RelationKey = std::uint64_t;
     [[nodiscard]] static RelationKey relation_key(catalog::RelationId id) noexcept { return id.value; }
     [[nodiscard]] static std::string normalize_identifier(std::string_view text);
@@ -155,6 +195,7 @@ private:
     [[nodiscard]] TableData* find_table(std::string_view qualified_name);
     [[nodiscard]] TableData* find_table_or_default_schema(std::string_view name);
     [[nodiscard]] TableData* find_table(const parser::relational::TableBinding& binding);
+    [[nodiscard]] TableData* find_table(catalog::RelationId relation_id);
 
     [[nodiscard]] static std::vector<std::string> collect_table_columns(const TableData& table);
     [[nodiscard]] std::variant<PlannerPlanDetails, CommandMetrics> plan_scan_operation(
@@ -177,6 +218,18 @@ private:
     [[nodiscard]] std::vector<std::string> render_executor_plan(
         std::string_view statement_label,
         const planner::PhysicalPlan& plan);
+
+    [[nodiscard]] std::variant<ConstraintEnforcementPlan, ConstraintPlanError> build_constraint_enforcement_plan(
+        TableData& table,
+        catalog::CatalogAccessor& accessor);
+    [[nodiscard]] static bored::executor::ExecutorNodePtr apply_constraint_enforcers(
+        bored::executor::ExecutorNodePtr child,
+        const ConstraintEnforcementPlan& plan,
+        ShellStorageReader* reader,
+        TableData* table,
+        bored::executor::ExecutorTelemetry& telemetry,
+        std::size_t payload_column,
+        std::optional<std::size_t> row_id_column);
 
     CommandMetrics execute_dml(const std::string& sql);
     CommandMetrics execute_insert(const std::string& sql);

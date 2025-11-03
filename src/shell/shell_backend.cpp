@@ -26,6 +26,8 @@
 #include "bored/executor/filter_executor.hpp"
 #include "bored/executor/insert_executor.hpp"
 #include "bored/executor/projection_executor.hpp"
+#include "bored/executor/foreign_key_check_executor.hpp"
+#include "bored/executor/unique_enforce_executor.hpp"
 #include "bored/executor/seq_scan_executor.hpp"
 #include "bored/executor/tuple_buffer.hpp"
 #include "bored/executor/tuple_format.hpp"
@@ -59,6 +61,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1509,6 +1512,88 @@ int compare_values(const ScalarValue& lhs, const ScalarValue& rhs)
     return 0;
 }
 
+std::vector<std::string> split_column_list(std::string_view text)
+{
+    std::vector<std::string> columns;
+    std::size_t offset = 0U;
+    while (offset < text.size()) {
+        const auto next = text.find(',', offset);
+        const auto piece = text.substr(offset, next == std::string_view::npos ? text.size() - offset : next - offset);
+        auto trimmed = trim_copy(piece);
+        if (!trimmed.empty()) {
+            columns.push_back(std::move(trimmed));
+        }
+        if (next == std::string_view::npos) {
+            break;
+        }
+        offset = next + 1U;
+    }
+    return columns;
+}
+
+template <typename KeyExtractor>
+KeyExtractor make_payload_key_extractor(const ShellBackend::TableData* table,
+                                        std::vector<std::size_t> column_indexes,
+                                        std::size_t payload_column)
+{
+    auto lambda = [table,
+                   payload_column,
+                   column_indexes = std::move(column_indexes),
+                   decoded = std::vector<ScalarValue>{},
+                   encoded = std::vector<std::byte>{}](const bored::executor::TupleView& view,
+                                                       bored::executor::ExecutorContext&,
+                                                       std::vector<std::byte>& out_key,
+                                                       bool& has_null) mutable -> bool {
+        if (payload_column >= view.column_count()) {
+            return false;
+        }
+
+        const auto payload_column_view = view.column(payload_column);
+        has_null = payload_column_view.is_null;
+        if (payload_column_view.is_null) {
+            out_key.clear();
+            return true;
+        }
+
+        if (!decode_values_payload(*table, payload_column_view.data, decoded)) {
+            return false;
+        }
+
+        encode_key_from_values(*table, column_indexes, decoded, encoded);
+        out_key.assign(encoded.begin(), encoded.end());
+        return true;
+    };
+
+    return KeyExtractor{lambda};
+}
+
+bored::executor::UniqueEnforceExecutor::IgnoreMatchPredicate make_row_id_ignore_predicate(std::size_t row_id_column_index)
+{
+    return [row_id_column_index](const bored::executor::TupleView& view,
+                                 const bored::storage::TableTuple& tuple,
+                                 bored::executor::ExecutorContext&) {
+        if (row_id_column_index >= view.column_count()) {
+            return false;
+        }
+
+        const auto row_id_column = view.column(row_id_column_index);
+        if (row_id_column.is_null || row_id_column.data.size() != sizeof(std::uint64_t)) {
+            return false;
+        }
+
+        std::uint64_t current_row_id = 0U;
+        std::memcpy(&current_row_id, row_id_column.data.data(), sizeof(current_row_id));
+
+        if (tuple.payload.size() < sizeof(std::uint64_t)) {
+            return false;
+        }
+
+        std::uint64_t matched_row_id = 0U;
+        std::memcpy(&matched_row_id, tuple.payload.data(), sizeof(matched_row_id));
+        return current_row_id == matched_row_id;
+    };
+}
+
 }  // namespace
 
 constexpr std::size_t kNumericWidth = sizeof(std::int64_t);
@@ -1561,6 +1646,47 @@ void append_values_payload(const ShellBackend::TableData& table,
         default: {
             if (!std::holds_alternative<std::int64_t>(value)) {
                 throw std::runtime_error{"Expected numeric value for integer column"};
+            }
+            const auto numeric = std::get<std::int64_t>(value);
+            append_bytes(buffer, &numeric, sizeof(numeric));
+            break;
+        }
+        }
+    }
+}
+
+void encode_key_from_values(const ShellBackend::TableData& table,
+                            const std::vector<std::size_t>& column_indexes,
+                            const std::vector<ScalarValue>& values,
+                            std::vector<std::byte>& buffer)
+{
+    buffer.clear();
+    for (auto index : column_indexes) {
+        if (index >= table.columns.size() || index >= values.size()) {
+            throw std::runtime_error{"Constraint key column index out of bounds"};
+        }
+        const auto& column = table.columns[index];
+        const auto& value = values[index];
+        switch (column.type) {
+        case catalog::CatalogColumnType::Utf8: {
+            if (!std::holds_alternative<std::string>(value)) {
+                throw std::runtime_error{"Expected string value for constraint key column"};
+            }
+            const auto& text = std::get<std::string>(value);
+            if (text.size() > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::runtime_error{"String value exceeds maximum supported length"};
+            }
+            append_uint32(buffer, static_cast<std::uint32_t>(text.size()));
+            append_bytes(buffer, text.data(), text.size());
+            break;
+        }
+        case catalog::CatalogColumnType::Int64:
+        case catalog::CatalogColumnType::UInt16:
+        case catalog::CatalogColumnType::UInt32:
+        case catalog::CatalogColumnType::Unknown:
+        default: {
+            if (!std::holds_alternative<std::int64_t>(value)) {
+                throw std::runtime_error{"Expected numeric value for constraint key column"};
             }
             const auto numeric = std::get<std::int64_t>(value);
             append_bytes(buffer, &numeric, sizeof(numeric));
@@ -1717,22 +1843,308 @@ private:
 
 class ShellStorageReader final : public bored::storage::StorageReader {
 public:
+    struct IndexDefinition final {
+        const ShellBackend::TableData* table = nullptr;
+        std::vector<std::size_t> column_indexes{};
+    };
+
     ShellStorageReader(const ShellBackend::TableData* table,
-                       const ShellBackend::CatalogStorage* storage)
+                       const ShellBackend::CatalogStorage* storage,
+                       std::unordered_map<std::uint64_t, IndexDefinition> index_definitions = {})
         : table_{table}
         , storage_{storage}
+        , index_definitions_{std::move(index_definitions)}
     {}
 
     [[nodiscard]] std::unique_ptr<bored::storage::TableScanCursor> create_table_scan(
         const bored::storage::TableScanConfig&) override
     {
+        if (table_ == nullptr) {
+            return std::make_unique<EmptyTableScanCursor>();
+        }
         return std::make_unique<ShellTableScanCursor>(table_, storage_);
     }
 
+    std::vector<bored::storage::IndexProbeResult> probe_index(
+        const bored::storage::IndexProbeConfig& config) override
+    {
+        auto it = index_definitions_.find(config.index_id.value);
+        if (it == index_definitions_.end()) {
+            return {};
+        }
+
+        const auto& definition = it->second;
+        if (definition.table == nullptr || storage_ == nullptr) {
+            return {};
+        }
+
+        const auto* relation = storage_->relation(definition.table->relation_id);
+        if (relation == nullptr) {
+            return {};
+        }
+
+        result_payloads_.clear();
+        std::vector<bored::storage::IndexProbeResult> results;
+
+        for (const auto& [row_id, payload] : *relation) {
+            decode_buffer_.clear();
+            if (!decode_values_payload(*definition.table,
+                                       std::span<const std::byte>(payload.data(), payload.size()),
+                                       decode_buffer_)) {
+                continue;
+            }
+
+            key_buffer_.clear();
+            encode_key_from_values(*definition.table, definition.column_indexes, decode_buffer_, key_buffer_);
+            if (key_buffer_.size() != config.key.size()) {
+                continue;
+            }
+            if (!std::equal(key_buffer_.begin(), key_buffer_.end(), config.key.begin())) {
+                continue;
+            }
+
+            result_payloads_.emplace_back();
+            auto& stored = result_payloads_.back();
+            stored.resize(sizeof(std::uint64_t) + payload.size());
+            std::memcpy(stored.data(), &row_id, sizeof(row_id));
+            if (!payload.empty()) {
+                std::memcpy(stored.data() + sizeof(std::uint64_t), payload.data(), payload.size());
+            }
+
+            bored::storage::IndexProbeResult result{};
+            result.tuple.header.created_transaction_id = 1U;
+            result.tuple.header.deleted_transaction_id = 0U;
+            result.tuple.payload = std::span<const std::byte>(stored.data(), stored.size());
+            result.tuple.page_id = 0U;
+            result.tuple.slot_id = 0U;
+            results.push_back(result);
+        }
+
+        return results;
+    }
+
 private:
+    class EmptyTableScanCursor final : public bored::storage::TableScanCursor {
+    public:
+        bool next(bored::storage::TableTuple&) override { return false; }
+        void reset() override {}
+    };
+
     const ShellBackend::TableData* table_ = nullptr;
     const ShellBackend::CatalogStorage* storage_ = nullptr;
+    std::unordered_map<std::uint64_t, IndexDefinition> index_definitions_{};
+    std::vector<ScalarValue> decode_buffer_{};
+    std::vector<std::byte> key_buffer_{};
+    std::vector<std::vector<std::byte>> result_payloads_{};
 };
+
+std::variant<ShellBackend::ConstraintEnforcementPlan, ShellBackend::ConstraintPlanError>
+ShellBackend::build_constraint_enforcement_plan(ShellBackend::TableData& table,
+                                                catalog::CatalogAccessor& accessor)
+{
+    ConstraintEnforcementPlan plan{};
+
+    const auto descriptors = accessor.constraints(table.relation_id);
+    if (descriptors.empty()) {
+        return plan;
+    }
+
+    const auto resolve_index_id = [](const catalog::CatalogConstraintDescriptor& descriptor) {
+        if (descriptor.backing_index_id.is_valid()) {
+            return descriptor.backing_index_id;
+        }
+        return catalog::IndexId{descriptor.constraint_id.value};
+    };
+
+    const auto map_columns = [](const ShellBackend::TableData& target,
+                                const std::vector<std::string>& columns,
+                                std::string& missing) -> std::optional<std::vector<std::size_t>> {
+        std::vector<std::size_t> indexes;
+        indexes.reserve(columns.size());
+        for (const auto& name : columns) {
+            const auto key = lowercase_copy(trim_copy(name));
+            auto it = target.column_index.find(key);
+            if (it == target.column_index.end()) {
+                missing = name;
+                return std::nullopt;
+            }
+            indexes.push_back(it->second);
+        }
+        return indexes;
+    };
+
+    for (const auto& descriptor : descriptors) {
+        switch (descriptor.constraint_type) {
+        case catalog::CatalogConstraintType::PrimaryKey:
+        case catalog::CatalogConstraintType::Unique: {
+            const auto column_names = split_column_list(descriptor.key_columns);
+            std::string missing_column;
+            auto indexes = map_columns(table, column_names, missing_column);
+            if (!indexes) {
+                return ConstraintPlanError{
+                    "Constraint '" + std::string(descriptor.name) + "' references unknown column '" + missing_column + "'.",
+                    {"Ensure the constraint definition matches the table schema."}
+                };
+            }
+
+            UniqueConstraintPlan unique{};
+            unique.constraint_id = descriptor.constraint_id;
+            unique.index_id = resolve_index_id(descriptor);
+            unique.name = std::string(descriptor.name);
+            unique.is_primary_key = descriptor.constraint_type == catalog::CatalogConstraintType::PrimaryKey;
+            unique.allow_null_keys = !unique.is_primary_key;
+            unique.column_indexes = std::move(*indexes);
+            unique.telemetry_identifier = unique.name;
+
+            ConstraintIndexDefinition definition{};
+            definition.table = &table;
+            definition.column_indexes = unique.column_indexes;
+            auto [it, inserted] = plan.index_definitions.emplace(unique.index_id.value, definition);
+            if (!inserted) {
+                if (it->second.table != definition.table || it->second.column_indexes != definition.column_indexes) {
+                    return ConstraintPlanError{
+                        "Conflicting index definition for constraint '" + unique.name + "'.",
+                        {}
+                    };
+                }
+            }
+
+            plan.unique_constraints.push_back(std::move(unique));
+            break;
+        }
+        case catalog::CatalogConstraintType::ForeignKey: {
+            const auto referencing_columns = split_column_list(descriptor.key_columns);
+            const auto referenced_columns = split_column_list(descriptor.referenced_columns);
+            if (referencing_columns.size() != referenced_columns.size()) {
+                return ConstraintPlanError{
+                    "Constraint '" + std::string(descriptor.name) + "' has mismatched referencing and referenced column counts.",
+                    {"Update the foreign key definition to align column counts."}
+                };
+            }
+
+            std::string missing_column;
+            auto referencing_indexes = map_columns(table, referencing_columns, missing_column);
+            if (!referencing_indexes) {
+                return ConstraintPlanError{
+                    "Constraint '" + std::string(descriptor.name) + "' references unknown column '" + missing_column + "'.",
+                    {"Ensure the foreign key references existing columns on the table."}
+                };
+            }
+
+            auto* referenced_table = find_table(descriptor.referenced_relation_id);
+            if (referenced_table == nullptr) {
+                return ConstraintPlanError{
+                    "Constraint '" + std::string(descriptor.name) + "' targets an unknown referenced table.",
+                    {"Refresh catalog metadata and retry the command."}
+                };
+            }
+
+            auto referenced_indexes = map_columns(*referenced_table, referenced_columns, missing_column);
+            if (!referenced_indexes) {
+                return ConstraintPlanError{
+                    "Constraint '" + std::string(descriptor.name) + "' references unknown column '" + missing_column + "' on the referenced table.",
+                    {"Ensure the referenced table exposes the expected columns."}
+                };
+            }
+
+            ForeignKeyConstraintPlan fk{};
+            fk.constraint_id = descriptor.constraint_id;
+            fk.index_id = resolve_index_id(descriptor);
+            fk.name = std::string(descriptor.name);
+            fk.referencing_column_indexes = std::move(*referencing_indexes);
+            fk.referenced_table = referenced_table;
+            fk.referenced_column_indexes = std::move(*referenced_indexes);
+            fk.telemetry_identifier = fk.name;
+            fk.skip_when_null = true;
+
+            ConstraintIndexDefinition definition{};
+            definition.table = referenced_table;
+            definition.column_indexes = fk.referenced_column_indexes;
+            auto [it, inserted] = plan.index_definitions.emplace(fk.index_id.value, definition);
+            if (!inserted) {
+                if (it->second.table != definition.table || it->second.column_indexes != definition.column_indexes) {
+                    return ConstraintPlanError{
+                        "Conflicting index definition for constraint '" + fk.name + "'.",
+                        {}
+                    };
+                }
+            }
+
+            plan.foreign_key_constraints.push_back(std::move(fk));
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    const auto constraint_order = [](const auto& lhs, const auto& rhs) {
+        return lhs.constraint_id.value < rhs.constraint_id.value;
+    };
+    std::sort(plan.foreign_key_constraints.begin(), plan.foreign_key_constraints.end(), constraint_order);
+    std::sort(plan.unique_constraints.begin(), plan.unique_constraints.end(), constraint_order);
+
+    return plan;
+}
+
+bored::executor::ExecutorNodePtr ShellBackend::apply_constraint_enforcers(
+    bored::executor::ExecutorNodePtr child,
+    const ConstraintEnforcementPlan& plan,
+    ShellStorageReader* reader,
+    TableData* table,
+    bored::executor::ExecutorTelemetry& telemetry,
+    std::size_t payload_column,
+    std::optional<std::size_t> row_id_column)
+{
+    if (!child) {
+        return child;
+    }
+
+    if ((!plan.foreign_key_constraints.empty() || !plan.unique_constraints.empty()) && reader == nullptr) {
+        throw std::logic_error{"Constraint enforcement requires a storage reader"};
+    }
+
+    for (const auto& fk : plan.foreign_key_constraints) {
+        bored::executor::ForeignKeyCheckExecutor::Config config{};
+        config.reader = reader;
+        config.referencing_relation_id = table->relation_id;
+        config.referenced_relation_id = fk.referenced_table->relation_id;
+        config.referenced_index_id = fk.index_id;
+        config.constraint_id = fk.constraint_id;
+        config.constraint_name = fk.name;
+        config.skip_when_null = fk.skip_when_null;
+        config.telemetry = &telemetry;
+        config.telemetry_identifier = fk.telemetry_identifier;
+        config.key_extractor = make_payload_key_extractor<bored::executor::ForeignKeyCheckExecutor::KeyExtractor>(
+            table,
+            fk.referencing_column_indexes,
+            payload_column);
+        child = std::make_unique<bored::executor::ForeignKeyCheckExecutor>(std::move(child), std::move(config));
+    }
+
+    for (const auto& unique : plan.unique_constraints) {
+        bored::executor::UniqueEnforceExecutor::Config config{};
+        config.reader = reader;
+        config.relation_id = table->relation_id;
+        config.index_id = unique.index_id;
+        config.constraint_id = unique.constraint_id;
+        config.constraint_name = unique.name;
+        config.is_primary_key = unique.is_primary_key;
+        config.allow_null_keys = unique.allow_null_keys;
+        config.telemetry = &telemetry;
+        config.telemetry_identifier = unique.telemetry_identifier;
+        config.key_extractor = make_payload_key_extractor<bored::executor::UniqueEnforceExecutor::KeyExtractor>(
+            table,
+            unique.column_indexes,
+            payload_column);
+        if (row_id_column.has_value()) {
+            config.ignore_match = make_row_id_ignore_predicate(*row_id_column);
+        }
+        child = std::make_unique<bored::executor::UniqueEnforceExecutor>(std::move(child), std::move(config));
+    }
+
+    return child;
+}
 
 class ShellValuesExecutor final : public bored::executor::ExecutorNode {
 public:
@@ -2240,6 +2652,15 @@ ShellBackend::TableData* ShellBackend::find_table(const parser::relational::Tabl
         return find_table(binding.schema_name + "." + binding.table_name);
     }
     return find_table_or_default_schema(binding.table_name);
+}
+
+ShellBackend::TableData* ShellBackend::find_table(catalog::RelationId relation_id)
+{
+    auto it = table_cache_.find(relation_key(relation_id));
+    if (it == table_cache_.end()) {
+        return nullptr;
+    }
+    return &it->second;
 }
 
 std::vector<std::string> ShellBackend::collect_table_columns(const TableData& table)
@@ -2992,15 +3413,47 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
         pending_rows.push_back(std::move(row_values));
     }
 
+    auto constraint_plan_result = build_constraint_enforcement_plan(*table, accessor);
+    if (std::holds_alternative<ConstraintPlanError>(constraint_plan_result)) {
+        txn_scope.release();
+        auto error = std::get<ConstraintPlanError>(std::move(constraint_plan_result));
+        return make_error_metrics(sql, std::move(error.message), std::move(error.hints));
+    }
+
+    auto constraint_plan = std::get<ConstraintEnforcementPlan>(std::move(constraint_plan_result));
+    std::unique_ptr<ShellStorageReader> constraint_reader;
+    if (!constraint_plan.index_definitions.empty()) {
+        std::unordered_map<std::uint64_t, ShellStorageReader::IndexDefinition> reader_definitions;
+        reader_definitions.reserve(constraint_plan.index_definitions.size());
+        for (auto& [index_value, definition] : constraint_plan.index_definitions) {
+            ShellStorageReader::IndexDefinition reader_definition{};
+            reader_definition.table = definition.table;
+            reader_definition.column_indexes = std::move(definition.column_indexes);
+            reader_definitions.emplace(index_value, std::move(reader_definition));
+        }
+        constraint_reader = std::make_unique<ShellStorageReader>(nullptr, storage_.get(), std::move(reader_definitions));
+    }
+
     bored::executor::ExecutorTelemetry insert_telemetry;
     ShellInsertTarget insert_target{table, storage_.get()};
-    auto values_executor = std::make_unique<ShellValuesExecutor>(table, std::move(pending_rows));
+    bored::executor::ExecutorNodePtr pipeline = std::make_unique<ShellValuesExecutor>(table, std::move(pending_rows));
+
+    if (constraint_reader &&
+        (!constraint_plan.foreign_key_constraints.empty() || !constraint_plan.unique_constraints.empty())) {
+    pipeline = apply_constraint_enforcers(std::move(pipeline),
+                          constraint_plan,
+                          constraint_reader.get(),
+                          table,
+                          insert_telemetry,
+                          0U,
+                          std::nullopt);
+    }
 
     bored::executor::InsertExecutor::Config insert_config{};
     insert_config.target = &insert_target;
     insert_config.telemetry = &insert_telemetry;
 
-    bored::executor::InsertExecutor insert_executor{std::move(values_executor), insert_config};
+    bored::executor::InsertExecutor insert_executor{std::move(pipeline), insert_config};
 
     bored::executor::ExecutorContext executor_context{};
     executor_context.set_transaction_id(txn_context.id());
@@ -3303,6 +3756,27 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     logical_detail_lines.push_back("logical.update target=" + format_relation_name(*table_binding) +
                                    " set=" + set_expression + " predicate=" + predicate_expression);
 
+    auto constraint_plan_result = build_constraint_enforcement_plan(*table, accessor);
+    if (std::holds_alternative<ConstraintPlanError>(constraint_plan_result)) {
+        txn_scope.release();
+        auto error = std::get<ConstraintPlanError>(std::move(constraint_plan_result));
+        return make_error_metrics(sql, std::move(error.message), std::move(error.hints));
+    }
+
+    auto constraint_plan = std::get<ConstraintEnforcementPlan>(std::move(constraint_plan_result));
+    std::unique_ptr<ShellStorageReader> constraint_reader;
+    if (!constraint_plan.index_definitions.empty()) {
+        std::unordered_map<std::uint64_t, ShellStorageReader::IndexDefinition> reader_definitions;
+        reader_definitions.reserve(constraint_plan.index_definitions.size());
+        for (auto& [index_value, definition] : constraint_plan.index_definitions) {
+            ShellStorageReader::IndexDefinition reader_definition{};
+            reader_definition.table = definition.table;
+            reader_definition.column_indexes = std::move(definition.column_indexes);
+            reader_definitions.emplace(index_value, std::move(reader_definition));
+        }
+        constraint_reader = std::make_unique<ShellStorageReader>(nullptr, storage_.get(), std::move(reader_definitions));
+    }
+
     bored::executor::ExecutorTelemetry update_telemetry;
 
     ShellStorageReader storage_reader{table, storage_.get()};
@@ -3401,12 +3875,24 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
 
     auto projection_node = std::make_unique<bored::executor::ProjectionExecutor>(std::move(filter_node), std::move(projection_config));
 
+    bored::executor::ExecutorNodePtr update_input = std::move(projection_node);
+    if (constraint_reader &&
+        (!constraint_plan.foreign_key_constraints.empty() || !constraint_plan.unique_constraints.empty())) {
+        update_input = apply_constraint_enforcers(std::move(update_input),
+                                                  constraint_plan,
+                                                  constraint_reader.get(),
+                                                  table,
+                                                  update_telemetry,
+                                                  1U,
+                                                  std::optional<std::size_t>{0U});
+    }
+
     ShellUpdateTarget update_target{table, storage_.get()};
     bored::executor::UpdateExecutor::Config update_config{};
     update_config.target = &update_target;
     update_config.telemetry = &update_telemetry;
 
-    bored::executor::UpdateExecutor update_executor{std::move(projection_node), update_config};
+    bored::executor::UpdateExecutor update_executor{std::move(update_input), update_config};
 
     bored::executor::ExecutorContext executor_context{};
     executor_context.set_transaction_id(txn_context.id());

@@ -1,8 +1,8 @@
 # Relational Feature Progress Report
 
-_Last updated: 2025-11-02_
+_Last updated: 2025-11-03_
 
-Latest validation: Debug `ctest` (409/409) on 2025-11-02.
+Latest validation: Release `ctest` (420/420) on 2025-11-03.
 
 ## Current Capabilities
 
@@ -21,14 +21,14 @@ Latest validation: Debug `ctest` (409/409) on 2025-11-02.
 | Capability | Status | Notes |
 |------------|--------|-------|
 | Secondary indexes | **Available (foundation)** | B+Tree manager, index retention, recovery, and executor probes implemented; integration tests cover index operations. |
-| Key/foreign constraints | **In progress** | Catalog metadata plus planner & executor enforcement for PRIMARY KEY/UNIQUE/FOREIGN KEY; DDL/shell wiring ongoing. |
+| Key/foreign constraints | **Available (shell integration)** | Catalog metadata, planner & executor enforcement, and bored_shell INSERT/UPDATE pipelines enforcing PRIMARY KEY/UNIQUE/FOREIGN KEY checks. |
 | Auto-incrementing primary keys | **In progress** | Sequence allocator now stages transactional `next_value` updates with tests; planner/executor integration remains. |
 | Join execution | **Available** | Logical lowering, planner, and executor support nested-loop and hash joins with tests covering join predicates and pipelines. |
 | Common table expressions (CTEs) | **Missing** | Parser and planner lack WITH clause support; no recursive/non-recursive CTE execution pipeline. |
 
 ## Gaps to Close
 
-1. **Constraint Enforcement**: Extend catalog schemas and DDL to record key and foreign key definitions; add planner/executor hooks to enforce uniqueness and referential integrity.
+1. **Constraint Enforcement**: Finish catalog DDL plumbing for constraint creation/drop and surface richer shell diagnostics for violations now that enforcement is active.
 2. **Sequence/Identity Support**: Wire planner/executor and DDL verbs to consume the transactional sequence allocator so auto-increment columns surface to users.
 3. **CTE Parsing & Execution**: Expand grammar, AST, and planner memo to represent WITH clauses; add execution support (materialized or pipelined) with snapshot-aware iterators.
 4. **Transaction Visibility**: Finish Transaction & Concurrency Milestone 1 to provide consistent snapshots across planner/executor and integrate with retention manager for snapshot retirement.
@@ -55,6 +55,7 @@ Latest validation: Debug `ctest` (409/409) on 2025-11-02.
    - [x] Catalog accessor now exposes constraint descriptors for planner/executor consumption.
    - [x] Planner: Recognize unique/primary keys and foreign keys; generate enforcement operators.
    - [x] Executor: Implement uniqueness checks (indexes + deferred validation) and referential integrity probes with transactional awareness.
+   - [x] Shell: Apply constraint enforcement to INSERT/UPDATE pipelines using planner metadata and simulated index probes.
 
 4. **CTE Enablement**
    - Parser/AST: Add WITH clause grammar and nodes (non-recursive first, recursive second).
