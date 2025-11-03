@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bored/catalog/catalog_ids.hpp"
 #include "bored/txn/transaction_types.hpp"
 
 #include <cstddef>
@@ -7,6 +8,12 @@
 #include <optional>
 #include <string>
 #include <vector>
+
+namespace bored::catalog {
+struct RelationId;
+struct ConstraintId;
+struct IndexId;
+}
 
 namespace bored::planner {
 
@@ -20,7 +27,28 @@ enum class PhysicalOperatorType {
     Values,
     Insert,
     Update,
-    Delete
+    Delete,
+    UniqueEnforce,
+    ForeignKeyCheck
+};
+
+struct UniqueEnforcementProperties final {
+    catalog::ConstraintId constraint_id{};
+    catalog::RelationId relation_id{};
+    catalog::IndexId backing_index_id{};
+    std::string constraint_name{};
+    std::vector<std::string> key_columns{};
+    bool is_primary_key = false;
+};
+
+struct ForeignKeyEnforcementProperties final {
+    catalog::ConstraintId constraint_id{};
+    catalog::RelationId relation_id{};
+    catalog::RelationId referenced_relation_id{};
+    catalog::IndexId backing_index_id{};
+    std::string constraint_name{};
+    std::vector<std::string> referencing_columns{};
+    std::vector<std::string> referenced_columns{};
 };
 
 struct PhysicalProperties final {
@@ -29,12 +57,15 @@ struct PhysicalProperties final {
     bool requires_visibility_check = false;
     std::optional<txn::Snapshot> snapshot{};
     std::string relation_name{};
+    catalog::RelationId relation_id{};
     std::vector<std::string> ordering_columns{};
     std::vector<std::string> partitioning_columns{};
     std::vector<std::string> output_columns{};
     std::uint64_t executor_operator_id = 0U;
     std::size_t expected_batch_size = 0U;
     std::string executor_strategy{};
+    std::optional<UniqueEnforcementProperties> unique_enforcement{};
+    std::optional<ForeignKeyEnforcementProperties> foreign_key_enforcement{};
 };
 
 class PhysicalOperator;

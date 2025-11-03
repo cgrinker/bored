@@ -35,6 +35,10 @@ std::string to_string(PhysicalOperatorType type)
         return "Update";
     case PhysicalOperatorType::Delete:
         return "Delete";
+    case PhysicalOperatorType::UniqueEnforce:
+        return "UniqueEnforce";
+    case PhysicalOperatorType::ForeignKeyCheck:
+        return "ForeignKeyCheck";
     }
     return "Unknown";
 }
@@ -147,6 +151,29 @@ std::string describe(const PhysicalOperatorPtr& node, const ExplainOptions& opti
     }
     if (!props.executor_strategy.empty()) {
         details.push_back("strategy=" + props.executor_strategy);
+    }
+    if (props.unique_enforcement.has_value()) {
+        const auto& unique = *props.unique_enforcement;
+        if (!unique.constraint_name.empty()) {
+            details.push_back("constraint=" + unique.constraint_name);
+        }
+        details.push_back(std::string{"type="} + (unique.is_primary_key ? "primary-key" : "unique"));
+        if (!unique.key_columns.empty()) {
+            details.push_back("columns=" + join(unique.key_columns));
+        }
+    }
+    if (props.foreign_key_enforcement.has_value()) {
+        const auto& fk = *props.foreign_key_enforcement;
+        if (!fk.constraint_name.empty()) {
+            details.push_back("constraint=" + fk.constraint_name);
+        }
+        details.push_back("type=foreign-key");
+        if (!fk.referencing_columns.empty()) {
+            details.push_back("referencing=" + join(fk.referencing_columns));
+        }
+        if (!fk.referenced_columns.empty()) {
+            details.push_back("referenced=" + join(fk.referenced_columns));
+        }
     }
 
     const auto runtime_detail = format_runtime(props, options);

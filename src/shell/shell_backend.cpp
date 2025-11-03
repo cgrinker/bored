@@ -654,6 +654,10 @@ std::string_view physical_operator_name(planner::PhysicalOperatorType type) noex
         return "Update";
     case PhysicalOperatorType::Delete:
         return "Delete";
+    case PhysicalOperatorType::UniqueEnforce:
+        return "UniqueEnforce";
+    case PhysicalOperatorType::ForeignKeyCheck:
+        return "ForeignKeyCheck";
     default:
         return "Unknown";
     }
@@ -2263,6 +2267,7 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
 
     planner::LogicalProperties scan_props{};
     scan_props.relation_name = format_relation_name(table_binding);
+    scan_props.relation_id = table.relation_id;
     scan_props.output_columns = planner_columns;
 
     auto scan_logical = planner::LogicalOperator::make(
@@ -2272,6 +2277,7 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
 
     planner::LogicalProperties root_props{};
     root_props.relation_name = scan_props.relation_name;
+    root_props.relation_id = table.relation_id;
     root_props.output_columns = planner_columns;
 
     auto root_logical = planner::LogicalOperator::make(
@@ -2297,8 +2303,17 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
                                           std::move(planner_result.diagnostics),
                                           "Planner produced unexpected physical operator for " + statement + ".");
     }
-    if (plan_root->children().empty() ||
-        plan_root->children().front()->type() != planner::PhysicalOperatorType::SeqScan) {
+    planner::PhysicalOperatorPtr leaf = plan_root->children().empty() ? planner::PhysicalOperatorPtr{}
+                                                                      : plan_root->children().front();
+    while (leaf &&
+           (leaf->type() == planner::PhysicalOperatorType::UniqueEnforce ||
+            leaf->type() == planner::PhysicalOperatorType::ForeignKeyCheck)) {
+        if (leaf->children().empty()) {
+            break;
+        }
+        leaf = leaf->children().front();
+    }
+    if (!leaf || leaf->type() != planner::PhysicalOperatorType::SeqScan) {
         return make_planner_error_metrics(sql,
                                           std::move(planner_result.diagnostics),
                                           "Planner " + statement + " plan is missing SeqScan child.");
@@ -2326,6 +2341,7 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
 
     planner::LogicalProperties scan_props{};
     scan_props.relation_name = format_relation_name(table_binding);
+    scan_props.relation_id = table.relation_id;
     scan_props.output_columns = planner_columns;
 
     auto scan_logical = planner::LogicalOperator::make(
@@ -2335,6 +2351,7 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
 
     planner::LogicalProperties projection_props{};
     projection_props.relation_name = scan_props.relation_name;
+    projection_props.relation_id = table.relation_id;
     projection_props.output_columns = projection_columns;
 
     auto projection_logical = planner::LogicalOperator::make(
@@ -2871,6 +2888,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     // Build a logical plan so planner integration can be validated prior to executor wiring.
     planner::LogicalProperties insert_props{};
     insert_props.relation_name = format_relation_name(*table_binding);
+    insert_props.relation_id = table->relation_id;
     insert_props.output_columns = planner_columns;
 
     auto values_node = planner::LogicalOperator::make(planner::LogicalOperatorType::Values);
@@ -2899,8 +2917,17 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
                                           std::move(planner_result.diagnostics),
                                           "Planner produced unexpected physical operator for INSERT.");
     }
-    if (plan_root->children().empty() ||
-        plan_root->children().front()->type() != planner::PhysicalOperatorType::Values) {
+    planner::PhysicalOperatorPtr values_leaf = plan_root->children().empty() ? planner::PhysicalOperatorPtr{}
+                                                                            : plan_root->children().front();
+    while (values_leaf &&
+           (values_leaf->type() == planner::PhysicalOperatorType::UniqueEnforce ||
+            values_leaf->type() == planner::PhysicalOperatorType::ForeignKeyCheck)) {
+        if (values_leaf->children().empty()) {
+            break;
+        }
+        values_leaf = values_leaf->children().front();
+    }
+    if (!values_leaf || values_leaf->type() != planner::PhysicalOperatorType::Values) {
         txn_scope.release();
         return make_planner_error_metrics(sql,
                                           std::move(planner_result.diagnostics),

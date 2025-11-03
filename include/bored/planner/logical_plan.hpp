@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bored/catalog/catalog_ids.hpp"
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -7,6 +8,7 @@
 
 namespace bored::catalog {
 class CatalogAccessor;
+struct RelationId;
 }
 
 namespace bored::planner {
@@ -27,6 +29,7 @@ struct LogicalProperties final {
     std::size_t estimated_cardinality = 0U;
     bool preserves_order = false;
     std::string relation_name{};
+    catalog::RelationId relation_id{};
     std::vector<std::string> output_columns{};
 };
 

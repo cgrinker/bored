@@ -1,4 +1,6 @@
 #include "bored/planner/planner.hpp"
+#include "bored/catalog/catalog_accessor.hpp"
+#include "bored/catalog/catalog_relations.hpp"
 #include "bored/planner/cost_model.hpp"
 #include "bored/planner/memo.hpp"
 #include "bored/planner/rule.hpp"
@@ -7,6 +9,7 @@
 #include "bored/planner/planner_telemetry.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -39,6 +42,137 @@ void append_unique(std::vector<std::string>& target, const std::vector<std::stri
             target.push_back(value);
         }
     }
+}
+
+std::string_view trim_view(std::string_view text) noexcept
+{
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
+        text.remove_prefix(1U);
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+        text.remove_suffix(1U);
+    }
+    return text;
+}
+
+std::vector<std::string> split_columns(std::string_view text)
+{
+    std::vector<std::string> columns;
+    text = trim_view(text);
+    if (text.empty()) {
+        return columns;
+    }
+
+    std::size_t offset = 0U;
+    while (offset <= text.size()) {
+        const auto next = text.find(',', offset);
+        const auto length = (next == std::string_view::npos) ? (text.size() - offset) : (next - offset);
+        auto piece = trim_view(text.substr(offset, length));
+        if (!piece.empty()) {
+            columns.emplace_back(piece);
+        }
+        if (next == std::string_view::npos) {
+            break;
+        }
+        offset = next + 1U;
+    }
+    return columns;
+}
+
+void inherit_child_shape(const PhysicalOperatorPtr& child,
+                         const LogicalProperties& logical_props,
+                         PhysicalProperties& properties)
+{
+    if (child) {
+        const auto& child_props = child->properties();
+        if (properties.output_columns.empty()) {
+            properties.output_columns = child_props.output_columns;
+        }
+        if (properties.ordering_columns.empty()) {
+            properties.ordering_columns = child_props.ordering_columns;
+        }
+        if (properties.partitioning_columns.empty()) {
+            properties.partitioning_columns = child_props.partitioning_columns;
+        }
+        if (properties.expected_cardinality == 0U) {
+            properties.expected_cardinality = child_props.expected_cardinality;
+        }
+        if (properties.expected_batch_size == 0U) {
+            properties.expected_batch_size = child_props.expected_batch_size;
+        }
+        properties.preserves_order = child_props.preserves_order;
+    } else {
+        if (properties.output_columns.empty()) {
+            properties.output_columns = logical_props.output_columns;
+        }
+        if (properties.expected_cardinality == 0U) {
+            properties.expected_cardinality = logical_props.estimated_cardinality;
+        }
+        if (properties.expected_batch_size == 0U) {
+            properties.expected_batch_size = default_batch_size(properties.expected_cardinality);
+        }
+    }
+}
+
+PhysicalOperatorPtr make_unique_enforcement(const PlannerContext& context,
+                                            const LogicalProperties& logical_props,
+                                            const catalog::CatalogConstraintDescriptor& descriptor,
+                                            PhysicalOperatorPtr child)
+{
+    PhysicalProperties properties{};
+    properties.relation_name = logical_props.relation_name;
+    properties.relation_id = logical_props.relation_id;
+    inherit_child_shape(child, logical_props, properties);
+    if (properties.expected_batch_size == 0U) {
+        properties.expected_batch_size = default_batch_size(properties.expected_cardinality);
+    }
+
+    UniqueEnforcementProperties unique_props{};
+    unique_props.constraint_id = descriptor.constraint_id;
+    unique_props.relation_id = descriptor.relation_id;
+    unique_props.backing_index_id = descriptor.backing_index_id;
+    unique_props.constraint_name = std::string(descriptor.name);
+    unique_props.key_columns = split_columns(descriptor.key_columns);
+    unique_props.is_primary_key = descriptor.constraint_type == catalog::CatalogConstraintType::PrimaryKey;
+    properties.unique_enforcement = std::move(unique_props);
+    properties.executor_operator_id = context.allocate_executor_operator_id();
+
+    std::vector<PhysicalOperatorPtr> children;
+    if (child) {
+        children.push_back(std::move(child));
+    }
+    return PhysicalOperator::make(PhysicalOperatorType::UniqueEnforce, std::move(children), std::move(properties));
+}
+
+PhysicalOperatorPtr make_foreign_key_enforcement(const PlannerContext& context,
+                                                 const LogicalProperties& logical_props,
+                                                 const catalog::CatalogConstraintDescriptor& descriptor,
+                                                 PhysicalOperatorPtr child)
+{
+    PhysicalProperties properties{};
+    properties.relation_name = logical_props.relation_name;
+    properties.relation_id = logical_props.relation_id;
+    inherit_child_shape(child, logical_props, properties);
+    if (properties.expected_batch_size == 0U) {
+        properties.expected_batch_size = default_batch_size(properties.expected_cardinality);
+    }
+
+    ForeignKeyEnforcementProperties fk_props{};
+    fk_props.constraint_id = descriptor.constraint_id;
+    fk_props.relation_id = descriptor.relation_id;
+    fk_props.referenced_relation_id = descriptor.referenced_relation_id;
+    fk_props.backing_index_id = descriptor.backing_index_id;
+    fk_props.constraint_name = std::string(descriptor.name);
+    fk_props.referencing_columns = split_columns(descriptor.key_columns);
+    fk_props.referenced_columns = split_columns(descriptor.referenced_columns);
+    properties.foreign_key_enforcement = std::move(fk_props);
+    properties.executor_operator_id = context.allocate_executor_operator_id();
+
+    std::vector<PhysicalOperatorPtr> children;
+    if (child) {
+        children.push_back(std::move(child));
+    }
+    return PhysicalOperator::make(PhysicalOperatorType::ForeignKeyCheck, std::move(children), std::move(properties));
 }
 
 PhysicalOperatorType to_physical(LogicalOperatorType type) noexcept
@@ -92,6 +226,7 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
     properties.expected_cardinality = logical->properties().estimated_cardinality;
     properties.preserves_order = logical->properties().preserves_order;
     properties.relation_name = logical->properties().relation_name;
+    properties.relation_id = logical->properties().relation_id;
     properties.output_columns = logical->properties().output_columns;
     if (cost_model != nullptr) {
         const auto estimate = cost_model->estimate_plan(logical);
@@ -171,9 +306,71 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
         operator_type = PhysicalOperatorType::Delete;
     }
 
+    const auto apply_constraint_enforcement = [&](std::vector<PhysicalOperatorPtr>& children) {
+        if (children.empty()) {
+            return;
+        }
+        const auto relation_id = logical->properties().relation_id;
+        if (!relation_id.is_valid()) {
+            return;
+        }
+        const auto* accessor = context.catalog();
+        if (accessor == nullptr) {
+            return;
+        }
+
+        auto constraints = accessor->constraints(relation_id);
+        if (constraints.empty()) {
+            return;
+        }
+
+        std::vector<catalog::CatalogConstraintDescriptor> unique_constraints;
+        std::vector<catalog::CatalogConstraintDescriptor> foreign_key_constraints;
+        unique_constraints.reserve(constraints.size());
+        foreign_key_constraints.reserve(constraints.size());
+
+        for (const auto& constraint : constraints) {
+            switch (constraint.constraint_type) {
+            case catalog::CatalogConstraintType::PrimaryKey:
+            case catalog::CatalogConstraintType::Unique:
+                unique_constraints.push_back(constraint);
+                break;
+            case catalog::CatalogConstraintType::ForeignKey:
+                foreign_key_constraints.push_back(constraint);
+                break;
+            default:
+                break;
+            }
+        }
+
+        if (unique_constraints.empty() && foreign_key_constraints.empty()) {
+            return;
+        }
+
+        const auto constraint_sort = [](const catalog::CatalogConstraintDescriptor& lhs,
+                                        const catalog::CatalogConstraintDescriptor& rhs) {
+            return lhs.constraint_id.value < rhs.constraint_id.value;
+        };
+        std::sort(unique_constraints.begin(), unique_constraints.end(), constraint_sort);
+        std::sort(foreign_key_constraints.begin(), foreign_key_constraints.end(), constraint_sort);
+
+        auto chain = children.front();
+        for (const auto& fk : foreign_key_constraints) {
+            chain = make_foreign_key_enforcement(context, logical->properties(), fk, std::move(chain));
+        }
+        for (const auto& unique : unique_constraints) {
+            chain = make_unique_enforcement(context, logical->properties(), unique, std::move(chain));
+        }
+        children.front() = std::move(chain);
+    };
+
     properties.executor_operator_id = context.allocate_executor_operator_id();
     if (properties.expected_batch_size == 0U) {
         properties.expected_batch_size = default_batch_size(properties.expected_cardinality);
+    }
+
+    if (logical->type() == LogicalOperatorType::Insert || logical->type() == LogicalOperatorType::Update) {
+        apply_constraint_enforcement(lowered_children);
     }
 
     return PhysicalOperator::make(operator_type, std::move(lowered_children), std::move(properties));

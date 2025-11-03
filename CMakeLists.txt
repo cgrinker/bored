@@ -250,6 +250,7 @@ if(BORED_ENABLE_TESTS)
     tests/vacuum_background_loop_tests.cpp
         tests/vacuum_worker_tests.cpp
         tests/planner_scaffolding_tests.cpp
+    tests/planner_constraint_enforcement_tests.cpp
         tests/planner_statistics_catalog_tests.cpp
         tests/planner_cost_model_tests.cpp
     tests/planner_rule_tests.cpp

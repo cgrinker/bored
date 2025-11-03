@@ -52,7 +52,7 @@ Latest validation: Debug `ctest` (409/409) on 2025-11-02.
 
 3. **Constraint Enforcement Pipeline**
    - [x] Catalog accessor now exposes constraint descriptors for planner/executor consumption.
-   - Planner: Recognize unique/primary keys and foreign keys; generate enforcement operators.
+   - [x] Planner: Recognize unique/primary keys and foreign keys; generate enforcement operators.
    - Executor: Implement uniqueness checks (indexes + deferred validation) and referential integrity probes with transactional awareness.
 
 4. **CTE Enablement**
