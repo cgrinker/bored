@@ -1,5 +1,7 @@
 # Relational Feature Progress Report
 
+This ticket-level report summarizes the relational engine roadmap, capturing what has shipped, what remains, and which code paths we expect to touch next so the team can quickly regain context when switching threads.
+
 _Last updated: 2025-11-03_
 
 Latest validation: Release `ctest` (420/420) on 2025-11-03.
