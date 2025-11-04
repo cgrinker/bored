@@ -1,7 +1,21 @@
 #include "bored/executor/spool_executor.hpp"
 
+#include "bored/executor/executor_context.hpp"
+
 #include <stdexcept>
 #include <utility>
+
+namespace {
+
+bool snapshots_equal(const bored::txn::Snapshot& lhs, const bored::txn::Snapshot& rhs)
+{
+    if (lhs.read_lsn != rhs.read_lsn || lhs.xmin != rhs.xmin || lhs.xmax != rhs.xmax) {
+        return false;
+    }
+    return lhs.in_progress == rhs.in_progress;
+}
+
+}  // namespace
 
 namespace bored::executor {
 
@@ -51,12 +65,21 @@ void SpoolExecutor::reset() noexcept
     materialized_ = false;
     position_ = 0U;
     child_buffer_.reset();
+    materialized_snapshot_ = {};
 }
 
 void SpoolExecutor::ensure_materialized(ExecutorContext& context)
 {
+    const auto& current_snapshot = context.snapshot();
     if (materialized_) {
-        return;
+        if (snapshots_equal(materialized_snapshot_, current_snapshot)) {
+            return;
+        }
+
+        materialized_rows_.clear();
+        child_buffer_.reset();
+        materialized_ = false;
+        position_ = 0U;
     }
 
     if (child_count() != 1U) {
@@ -76,6 +99,7 @@ void SpoolExecutor::ensure_materialized(ExecutorContext& context)
     }
     input->close(context);
 
+    materialized_snapshot_ = current_snapshot;
     materialized_ = true;
     position_ = 0U;
 }

@@ -63,7 +63,11 @@ Latest validation: Release `ctest` (430/430) on 2025-11-04 after wiring executor
    - Parser/AST: ✅ Non-recursive WITH clause grammar and nodes merged; recursive support remains future work.
    - Planner: ✅ Memo deduplicates non-recursive CTE producers, tracks reusable groups, and injects materialize/spool alternatives so the cost model can compare inline versus reuse plans.
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
-   - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines now wrap planner materialize nodes with spool-backed iterators; shell diagnostics surface executor pipeline chains and spool telemetry tests account for terminal reads. Remaining: extend worktable infrastructure for recursive CTEs and integrate with snapshot visibility guarantees.
+   - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines now wrap planner materialize nodes with spool-backed iterators; shell diagnostics surface executor pipeline chains and spool telemetry tests account for terminal reads.
+   - Remaining tasks:
+      1. Extend worktable infrastructure so spool-backed iterators respect transaction snapshots and can reuse materialized rows across recursive CTE seeds.
+      2. Add crash/restart drills that exercise spool-enabled SELECT/UPDATE/DELETE pipelines and verify recovery replay rehydrates worktables.
+      3. Document operator-facing spool controls (diagnostics toggles, telemetry identifiers) once iterator plumbing lands.
    - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp
    - Next work item: Prototype snapshot-aware worktable iterators, including spool worktable reuse across recursive CTE seeds, and add crash/restart drills that exercise spool-backed SELECT/UPDATE/DELETE pipelines.
 

@@ -2,6 +2,7 @@
 #include "bored/executor/spool_executor.hpp"
 #include "bored/executor/tuple_buffer.hpp"
 #include "bored/executor/tuple_format.hpp"
+#include "bored/txn/transaction_types.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -16,6 +17,7 @@ using bored::executor::ExecutorNode;
 using bored::executor::ExecutorNodePtr;
 using bored::executor::SpoolExecutor;
 using bored::executor::TupleBuffer;
+using bored::txn::Snapshot;
 
 namespace {
 
@@ -203,4 +205,66 @@ TEST_CASE("SpoolExecutor reset clears materialised data")
     CHECK(child_ptr->open_count() == 2U);
     CHECK(child_ptr->close_count() == 2U);
     CHECK(child_ptr->produced_count() == 5U);
+}
+
+TEST_CASE("SpoolExecutor rematerialises when snapshot changes")
+{
+    std::vector<std::vector<std::byte>> initial_rows;
+    initial_rows.push_back(encode_u32(7U));
+    initial_rows.push_back(encode_u32(14U));
+
+    auto child = std::make_unique<MockChildExecutor>(initial_rows);
+    auto* child_ptr = child.get();
+
+    SpoolExecutor spool{std::move(child), {}};
+
+    ExecutorContext context{};
+    TupleBuffer buffer{};
+
+    Snapshot first_snapshot{};
+    first_snapshot.read_lsn = 10U;
+    first_snapshot.xmin = 1U;
+    first_snapshot.xmax = 20U;
+    context.set_snapshot(first_snapshot);
+
+    spool.open(context);
+    std::vector<std::uint32_t> observed;
+    while (spool.next(context, buffer)) {
+        auto tuple_view = bored::executor::TupleView::from_buffer(buffer);
+        REQUIRE(tuple_view.valid());
+        const auto column = tuple_view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        observed.push_back(decode_u32(column.data));
+        buffer.reset();
+    }
+    spool.close(context);
+
+    REQUIRE(observed == std::vector<std::uint32_t>{7U, 14U});
+    CHECK(child_ptr->open_count() == 1U);
+    CHECK(child_ptr->close_count() == 1U);
+
+    std::vector<std::vector<std::byte>> refreshed_rows;
+    refreshed_rows.push_back(encode_u32(21U));
+    refreshed_rows.push_back(encode_u32(28U));
+    child_ptr->set_rows(std::move(refreshed_rows));
+
+    Snapshot second_snapshot = first_snapshot;
+    second_snapshot.xmin = 2U;
+    context.set_snapshot(second_snapshot);
+
+    observed.clear();
+    spool.open(context);
+    while (spool.next(context, buffer)) {
+        auto tuple_view = bored::executor::TupleView::from_buffer(buffer);
+        REQUIRE(tuple_view.valid());
+        const auto column = tuple_view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        observed.push_back(decode_u32(column.data));
+        buffer.reset();
+    }
+    spool.close(context);
+
+    REQUIRE(observed == std::vector<std::uint32_t>{21U, 28U});
+    CHECK(child_ptr->open_count() == 2U);
+    CHECK(child_ptr->close_count() == 2U);
 }

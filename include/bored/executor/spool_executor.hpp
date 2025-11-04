@@ -3,6 +3,7 @@
 #include "bored/executor/executor_node.hpp"
 #include "bored/executor/executor_telemetry.hpp"
 #include "bored/executor/tuple_buffer.hpp"
+#include "bored/txn/transaction_types.hpp"
 
 #include <cstddef>
 #include <string>
@@ -34,6 +35,7 @@ private:
     std::size_t position_ = 0U;
     std::vector<TupleBuffer> materialized_rows_{};
     TupleBuffer child_buffer_{};
+    txn::Snapshot materialized_snapshot_{};
 };
 
 }  // namespace bored::executor
