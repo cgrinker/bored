@@ -133,7 +133,7 @@ TEST_CASE("binder resolves qualified columns", "[parser][binder]")
     CHECK(left_identifier.binding->column_name == "id");
 }
 
-TEST_CASE("binder rejects WITH clauses", "[parser][binder]")
+TEST_CASE("binder binds simple CTE", "[parser][binder]")
 {
     StubCatalog catalog_adapter;
     catalog_adapter.add_table(make_inventory_metadata());
@@ -143,16 +143,31 @@ TEST_CASE("binder rejects WITH clauses", "[parser][binder]")
     config.default_schema = std::string{"sales"};
 
     const std::string sql =
-        "WITH items AS (SELECT inventory.id FROM sales.inventory AS inventory) SELECT * FROM items;";
+        "WITH items AS (SELECT inventory.id FROM sales.inventory AS inventory) SELECT items.id FROM items;";
     auto parse_result = bored::parser::parse_select(sql);
     REQUIRE(parse_result.success());
     REQUIRE(parse_result.statement != nullptr);
 
     auto binding_result = relational::bind_select(config, *parse_result.statement);
-    REQUIRE_FALSE(binding_result.success());
-    REQUIRE(binding_result.diagnostics.size() == 1U);
-    CHECK(binding_result.diagnostics.front().message ==
-          "Common table expressions (WITH clauses) are not supported yet");
+    REQUIRE(binding_result.success());
+    REQUIRE(binding_result.diagnostics.empty());
+
+    auto* query = parse_result.statement->query;
+    REQUIRE(query != nullptr);
+    REQUIRE(query->from != nullptr);
+    REQUIRE(query->from->binding.has_value());
+    CHECK(query->from->binding->table_name == "items");
+    CHECK_FALSE(query->from->binding->table_alias.has_value());
+
+    REQUIRE(query->select_items.size() == 1U);
+    auto* item = query->select_items.front();
+    REQUIRE(item != nullptr);
+    REQUIRE(item->expression != nullptr);
+    auto& identifier = static_cast<relational::IdentifierExpression&>(*item->expression);
+    REQUIRE(identifier.binding.has_value());
+    CHECK(identifier.binding->column_name == "id");
+    CHECK(identifier.binding->table_name == "items");
+    CHECK_FALSE(identifier.binding->table_alias.has_value());
 }
 
 TEST_CASE("binder rejects missing columns", "[parser][binder]")

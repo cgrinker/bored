@@ -119,6 +119,34 @@ ComparisonAnalysis analyse_comparison(ScalarType lhs, ScalarType rhs)
     return analysis;
 }
 
+struct CteColumn final {
+    std::string name{};
+    ScalarType type = ScalarType::Unknown;
+    bool nullable = true;
+};
+
+struct CteBinding final {
+    const CommonTableExpression* node = nullptr;
+    std::vector<CteColumn> columns{};
+    bool valid = true;
+};
+
+using CteBindingMap = std::unordered_map<std::string, CteBinding>;
+
+catalog::CatalogColumnType to_catalog_column_type(ScalarType type)
+{
+    switch (type) {
+    case ScalarType::Int64:
+        return catalog::CatalogColumnType::Int64;
+    case ScalarType::UInt32:
+        return catalog::CatalogColumnType::UInt32;
+    case ScalarType::Utf8:
+        return catalog::CatalogColumnType::Utf8;
+    default:
+        return catalog::CatalogColumnType::Unknown;
+    }
+}
+
 struct ColumnMatch final {
     const ColumnBinding* binding = nullptr;
     const TableBinding* table_binding = nullptr;
@@ -162,6 +190,29 @@ public:
         if (!binding.schema_name.empty()) {
             register_symbol(binding.schema_name + "." + binding.table_name, index);
         }
+        if (binding.table_alias && !binding.table_alias->empty()) {
+            register_symbol(*binding.table_alias, index);
+        }
+    }
+
+    void register_derived_table(TableReference& node,
+                                const TableBinding& binding,
+                                const std::vector<ColumnBinding>& columns)
+    {
+        BoundTable table{};
+        table.node = &node;
+        table.binding = binding;
+        table.columns.reserve(columns.size());
+        for (const auto& column : columns) {
+            auto stored = column;
+            const auto key = normalise_identifier(stored.column_name);
+            table.columns.emplace(key, std::move(stored));
+        }
+
+        tables_.push_back(std::move(table));
+        const auto index = tables_.size() - 1U;
+
+        register_symbol(binding.table_name, index);
         if (binding.table_alias && !binding.table_alias->empty()) {
             register_symbol(*binding.table_alias, index);
         }
@@ -302,13 +353,9 @@ public:
             return result;
         }
 
+        CteBindingMap cte_bindings{};
         if (statement.with != nullptr) {
-            ParserDiagnostic diagnostic{};
-            diagnostic.severity = ParserSeverity::Error;
-            diagnostic.message = "Common table expressions (WITH clauses) are not supported yet";
-            diagnostic.remediation_hints = {"Rewrite the query without a WITH clause."};
-            result.diagnostics.push_back(std::move(diagnostic));
-            return result;
+            bind_with_clause(*statement.with, cte_bindings, result);
         }
 
         if (statement.query == nullptr) {
@@ -316,14 +363,155 @@ public:
         }
 
         Scope scope{};
-        bind_from_clause(*statement.query, scope, result);
-        bind_join_clauses(*statement.query, scope, result);
-        const auto aliases = bind_select_list(*statement.query, scope, result);
-        bind_where_clause(*statement.query, scope, result);
-        bind_group_by(*statement.query, scope, aliases, result);
-        bind_order_by(*statement.query, scope, aliases, result);
-        bind_limit(*statement.query, scope, result);
+        bind_query(*statement.query, scope, cte_bindings, result);
         return result;
+    }
+
+    void bind_with_clause(WithClause& clause,
+                          CteBindingMap& cte_bindings,
+                          BindingResult& result) const
+    {
+        for (auto* cte : clause.expressions) {
+            if (cte == nullptr) {
+                continue;
+            }
+
+            const auto key = normalise_identifier(cte->name.value);
+            if (key.empty()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "CTE name cannot be empty";
+                diagnostic.remediation_hints = {"Provide a valid identifier for each CTE."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+
+            if (cte_bindings.find(key) != cte_bindings.end()) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Duplicate CTE name '" + cte->name.value + "' in WITH clause";
+                diagnostic.remediation_hints = {"Rename the CTE or remove the duplicate definition."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                continue;
+            }
+
+            CteBinding binding{};
+            binding.node = cte;
+
+            if (cte->query == nullptr) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "CTE '" + cte->name.value + "' requires a SELECT statement";
+                diagnostic.remediation_hints = {"Provide a SELECT query inside the CTE definition."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                binding.valid = false;
+                cte_bindings.emplace(key, std::move(binding));
+                continue;
+            }
+
+            const auto diagnostic_count_before = result.diagnostics.size();
+            Scope cte_scope{};
+            bind_query(*cte->query, cte_scope, cte_bindings, result);
+            binding.columns = derive_cte_columns(*cte, result);
+            const auto diagnostic_count_after = result.diagnostics.size();
+            binding.valid = (diagnostic_count_after == diagnostic_count_before) && !binding.columns.empty();
+            cte_bindings.emplace(key, std::move(binding));
+        }
+    }
+
+    void bind_query(QuerySpecification& query,
+                    Scope& scope,
+                    const CteBindingMap& cte_bindings,
+                    BindingResult& result) const
+    {
+        bind_from_clause(query, scope, cte_bindings, result);
+        bind_join_clauses(query, scope, result);
+        const auto aliases = bind_select_list(query, scope, result);
+        bind_where_clause(query, scope, result);
+        bind_group_by(query, scope, aliases, result);
+        bind_order_by(query, scope, aliases, result);
+        bind_limit(query, scope, result);
+    }
+
+    std::vector<CteColumn> derive_cte_columns(const CommonTableExpression& cte,
+                                              BindingResult& result) const
+    {
+        std::vector<CteColumn> columns{};
+        if (cte.query == nullptr) {
+            return columns;
+        }
+
+        const auto& select_items = cte.query->select_items;
+        if (select_items.empty()) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "CTE '" + cte.name.value + "' must project at least one column";
+            diagnostic.remediation_hints = {"Add one or more columns to the CTE SELECT list."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return columns;
+        }
+
+        if (!cte.column_names.empty() && cte.column_names.size() != select_items.size()) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "CTE column list for '" + cte.name.value + "' has " +
+                                 std::to_string(cte.column_names.size()) +
+                                 " entries but SELECT list returns " +
+                                 std::to_string(select_items.size());
+            diagnostic.remediation_hints = {"Adjust the CTE column list to match the SELECT list."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return columns;
+        }
+
+        columns.reserve(select_items.size());
+        for (std::size_t index = 0U; index < select_items.size(); ++index) {
+            const auto* item = select_items[index];
+            if (item == nullptr || item->expression == nullptr) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "CTE '" + cte.name.value + "' has an empty select item";
+                diagnostic.remediation_hints = {"Provide an expression for each select item."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                columns.clear();
+                return columns;
+            }
+
+            if (item->expression->kind == NodeKind::StarExpression) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "CTE '" + cte.name.value + "' does not support '*' in the select list";
+                diagnostic.remediation_hints = {"Replace '*' with explicit column expressions or provide a column list."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                columns.clear();
+                return columns;
+            }
+
+            std::string column_name{};
+            if (!cte.column_names.empty()) {
+                column_name = cte.column_names[index].value;
+            } else if (item->alias.has_value()) {
+                column_name = item->alias->value;
+            } else if (item->expression->kind == NodeKind::IdentifierExpression) {
+                const auto& identifier = static_cast<const IdentifierExpression&>(*item->expression);
+                if (!identifier.name.parts.empty()) {
+                    column_name = identifier.name.parts.back().value;
+                }
+            }
+
+            if (column_name.empty()) {
+                column_name = "column" + std::to_string(index + 1U);
+            }
+
+            CteColumn column{};
+            column.name = std::move(column_name);
+            if (item->expression->inferred_type.has_value()) {
+                column.type = item->expression->inferred_type->type;
+                column.nullable = item->expression->inferred_type->nullable;
+            }
+            columns.push_back(std::move(column));
+        }
+
+        return columns;
     }
 
     BindingResult bind(InsertStatement& statement) const
@@ -343,7 +531,8 @@ public:
         }
 
         Scope scope{};
-        bind_table_reference(*statement.target, scope, result);
+        const CteBindingMap empty_ctes{};
+        bind_table_reference(*statement.target, scope, empty_ctes, result);
         if (!result.success()) {
             return result;
         }
@@ -468,8 +657,9 @@ public:
             return result;
         }
 
-        Scope scope{};
-        bind_table_reference(*statement.target, scope, result);
+    Scope scope{};
+    const CteBindingMap empty_cte_bindings;
+    bind_table_reference(*statement.target, scope, empty_cte_bindings, result);
         if (!result.success()) {
             return result;
         }
@@ -565,8 +755,9 @@ public:
             return result;
         }
 
-        Scope scope{};
-        bind_table_reference(*statement.target, scope, result);
+    Scope scope{};
+    const CteBindingMap empty_cte_bindings;
+    bind_table_reference(*statement.target, scope, empty_cte_bindings, result);
         if (!result.success()) {
             return result;
         }
@@ -599,7 +790,10 @@ private:
         return false;
     }
 
-    void bind_from_clause(QuerySpecification& query, Scope& scope, BindingResult& result) const
+    void bind_from_clause(QuerySpecification& query,
+                          Scope& scope,
+                          const CteBindingMap& cte_bindings,
+                          BindingResult& result) const
     {
         if (query.from_tables.empty()) {
             return;
@@ -608,7 +802,7 @@ private:
             if (table == nullptr) {
                 continue;
             }
-            bind_table_reference(*table, scope, result);
+            bind_table_reference(*table, scope, cte_bindings, result);
         }
     }
 
@@ -627,7 +821,10 @@ private:
         }
     }
 
-    void bind_table_reference(TableReference& table, Scope& scope, BindingResult& result) const
+    void bind_table_reference(TableReference& table,
+                              Scope& scope,
+                              const CteBindingMap& cte_bindings,
+                              BindingResult& result) const
     {
         auto parts = parse_table_name(table.name);
         if (!parts.has_value()) {
@@ -637,6 +834,57 @@ private:
             diagnostic.remediation_hints = {"Rewrite the query to avoid multi-part table references."};
             result.diagnostics.push_back(std::move(diagnostic));
             return;
+        }
+
+        if (!parts->table.empty()) {
+            const auto cte_key = normalise_identifier(parts->table);
+            auto cte_it = cte_bindings.find(cte_key);
+            if (cte_it != cte_bindings.end()) {
+                if (parts->schema.has_value()) {
+                    ParserDiagnostic diagnostic{};
+                    diagnostic.severity = ParserSeverity::Error;
+                    diagnostic.message = "CTE references do not support schema qualifiers";
+                    diagnostic.remediation_hints = {"Refer to the CTE by its unqualified name or provide an alias."};
+                    result.diagnostics.push_back(std::move(diagnostic));
+                    return;
+                }
+
+                const auto& cte_binding = cte_it->second;
+                if (!cte_binding.valid) {
+                    ParserDiagnostic diagnostic{};
+                    diagnostic.severity = ParserSeverity::Error;
+                    diagnostic.message = "CTE '" + cte_binding.node->name.value + "' has binding errors";
+                    diagnostic.remediation_hints = {"Resolve the errors in the CTE definition before referencing it."};
+                    result.diagnostics.push_back(std::move(diagnostic));
+                    return;
+                }
+
+                TableBinding binding{};
+                binding.schema_name.clear();
+                binding.table_name = cte_binding.node->name.value;
+                if (table.alias) {
+                    binding.table_alias = table.alias->value;
+                }
+
+                table.binding = binding;
+
+                std::vector<ColumnBinding> columns;
+                columns.reserve(cte_binding.columns.size());
+                for (const auto& column : cte_binding.columns) {
+                    ColumnBinding column_binding{};
+                    column_binding.column_type = to_catalog_column_type(column.type);
+                    column_binding.schema_name = binding.schema_name;
+                    column_binding.table_name = binding.table_name;
+                    if (binding.table_alias.has_value()) {
+                        column_binding.table_alias = binding.table_alias;
+                    }
+                    column_binding.column_name = column.name;
+                    columns.push_back(std::move(column_binding));
+                }
+
+                scope.register_derived_table(table, binding, columns);
+                return;
+            }
         }
 
         std::optional<std::string_view> schema = parts->schema;
