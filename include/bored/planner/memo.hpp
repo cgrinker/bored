@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace bored::planner {
@@ -37,6 +38,7 @@ public:
 
 private:
     std::vector<MemoGroup> groups_{};
+    std::unordered_map<std::size_t, std::vector<GroupId>> expression_index_{};
 };
 
 }  // namespace bored::planner

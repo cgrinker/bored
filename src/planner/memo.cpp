@@ -1,11 +1,50 @@
 #include "bored/planner/memo.hpp"
 
+#include <algorithm>
 #include <cstddef>
+#include <functional>
+#include <string>
 #include <utility>
 
 namespace bored::planner {
 
 namespace {
+
+std::size_t hash_combine(std::size_t seed, std::size_t value) noexcept
+{
+    constexpr std::size_t kMagic = 0x9e3779b97f4a7c15ULL;
+    seed ^= value + kMagic + (seed << 6U) + (seed >> 2U);
+    return seed;
+}
+
+std::size_t expression_fingerprint(const LogicalOperatorPtr& expression)
+{
+    if (!expression) {
+        return 0U;
+    }
+
+    std::size_t seed = static_cast<std::size_t>(expression->type());
+
+    const auto& props = expression->properties();
+    seed = hash_combine(seed, props.estimated_cardinality);
+    seed = hash_combine(seed, props.preserves_order ? 1U : 0U);
+    seed = hash_combine(seed, static_cast<std::size_t>(props.relation_id.value));
+
+    std::hash<std::string> string_hash;
+    seed = hash_combine(seed, string_hash(props.relation_name));
+    seed = hash_combine(seed, props.output_columns.size());
+    for (const auto& column : props.output_columns) {
+        seed = hash_combine(seed, string_hash(column));
+    }
+
+    const auto& children = expression->children();
+    seed = hash_combine(seed, children.size());
+    for (const auto& child : children) {
+        seed = hash_combine(seed, expression_fingerprint(child));
+    }
+
+    return seed;
+}
 
 bool expressions_equivalent(const LogicalOperatorPtr& lhs, const LogicalOperatorPtr& rhs)
 {
@@ -65,12 +104,34 @@ const std::vector<LogicalOperatorPtr>& MemoGroup::expressions() const noexcept
 
 Memo::GroupId Memo::add_group(LogicalOperatorPtr expression)
 {
-    groups_.emplace_back();
-    auto id = static_cast<GroupId>(groups_.size() - 1U);
     if (expression) {
-        groups_.back().add_expression(std::move(expression));
+        const auto fingerprint = expression_fingerprint(expression);
+        if (auto it = expression_index_.find(fingerprint); it != expression_index_.end()) {
+            for (const auto candidate : it->second) {
+                const auto* group = find_group(candidate);
+                if (group == nullptr) {
+                    continue;
+                }
+                for (const auto& existing : group->expressions()) {
+                    if (expressions_equivalent(existing, expression)) {
+                        return candidate;
+                    }
+                }
+            }
+        }
+
+        groups_.emplace_back();
+        const auto id = static_cast<GroupId>(groups_.size() - 1U);
+        groups_.back().add_expression(expression);
+        auto& bucket = expression_index_[fingerprint];
+        if (std::find(bucket.begin(), bucket.end(), id) == bucket.end()) {
+            bucket.push_back(id);
+        }
+        return id;
     }
-    return id;
+
+    groups_.emplace_back();
+    return static_cast<GroupId>(groups_.size() - 1U);
 }
 
 void Memo::add_expression(GroupId group, LogicalOperatorPtr expression)
@@ -78,7 +139,19 @@ void Memo::add_expression(GroupId group, LogicalOperatorPtr expression)
     if (!expression || group >= groups_.size()) {
         return;
     }
-    groups_[group].add_expression(std::move(expression));
+    auto& memo_group = groups_[group];
+    for (const auto& existing : memo_group.expressions()) {
+        if (expressions_equivalent(existing, expression)) {
+            return;
+        }
+    }
+
+    memo_group.add_expression(expression);
+    const auto fingerprint = expression_fingerprint(expression);
+    auto& bucket = expression_index_[fingerprint];
+    if (std::find(bucket.begin(), bucket.end(), group) == bucket.end()) {
+        bucket.push_back(group);
+    }
 }
 
 const MemoGroup* Memo::find_group(GroupId group) const noexcept

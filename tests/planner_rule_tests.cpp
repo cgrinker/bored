@@ -267,6 +267,43 @@ TEST_CASE("Join associativity rotates left-deep join")
     CHECK(trace.applications.front().success);
 }
 
+TEST_CASE("Memo reuses groups for equivalent expressions")
+{
+    Memo memo;
+
+    LogicalProperties scan_props{};
+    scan_props.output_columns = {"id"};
+
+    auto first_scan = LogicalOperator::make(LogicalOperatorType::TableScan, {}, scan_props);
+    auto second_scan = LogicalOperator::make(LogicalOperatorType::TableScan, {}, scan_props);
+
+    auto first_group = memo.add_group(first_scan);
+    auto second_group = memo.add_group(second_scan);
+
+    REQUIRE(first_group == second_group);
+
+    const auto* group = memo.find_group(first_group);
+    REQUIRE(group != nullptr);
+    CHECK(group->expressions().size() == 1U);
+
+    LogicalProperties projection_props = scan_props;
+    auto projection_one = LogicalOperator::make(
+        LogicalOperatorType::Projection,
+        std::vector<LogicalOperatorPtr>{first_scan},
+        projection_props);
+    memo.add_expression(first_group, projection_one);
+
+    auto projection_two = LogicalOperator::make(
+        LogicalOperatorType::Projection,
+        std::vector<LogicalOperatorPtr>{second_scan},
+        projection_props);
+    memo.add_expression(first_group, projection_two);
+
+    group = memo.find_group(first_group);
+    REQUIRE(group != nullptr);
+    CHECK(group->expressions().size() == 2U);
+}
+
 TEST_CASE("Rule engine handles empty registry")
 {
     RuleEngine engine{nullptr};

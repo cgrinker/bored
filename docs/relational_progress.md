@@ -4,7 +4,7 @@ This ticket-level report summarizes the relational engine roadmap, capturing wha
 
 _Last updated: 2025-11-04_
 
-Latest validation: Release `ctest` (427/427) on 2025-11-04 after aligning planner integration coverage with projection pruning from CTE inlining.
+Latest validation: Release `ctest` (427/427) on 2025-11-04 after enabling planner memo reuse for repeated CTE projections.
 
 ## Current Capabilities
 
@@ -26,13 +26,13 @@ Latest validation: Release `ctest` (427/427) on 2025-11-04 after aligning planne
 | Key/foreign constraints | **Available (shell integration)** | Catalog metadata, planner & executor enforcement, and bored_shell INSERT/UPDATE pipelines enforcing PRIMARY KEY/UNIQUE/FOREIGN KEY checks. |
 | Auto-incrementing primary keys | **In progress** | Sequence allocator now stages transactional `next_value` updates with tests; planner/executor integration remains. |
 | Join execution | **Available** | Logical lowering, planner, and executor support nested-loop and hash joins with tests covering join predicates and pipelines. |
-| Common table expressions (CTEs) | **In progress** | Parser/AST and binder accept non-recursive WITH clauses; lowering now inlines CTE producers with regression coverage for nested projections; planner memo/executor materialization still pending. |
+| Common table expressions (CTEs) | **In progress** | Parser/AST and binder accept non-recursive WITH clauses; lowering now inlines CTE producers with regression coverage for nested projections; planner memo deduplicates reusable producers while executor materialization remains pending. |
 
 ## Gaps to Close
 
 1. **Constraint Enforcement**: Finish catalog DDL plumbing for constraint creation/drop and surface richer shell diagnostics for violations now that enforcement is active.
 2. **Sequence/Identity Support**: Wire planner/executor and DDL verbs to consume the transactional sequence allocator so auto-increment columns surface to users.
-3. **CTE Parsing & Execution**: Finish wiring newly-landed parser/AST support into planner memo and execution pipelines now that binder and lowering coverage are in place; add execution support (materialized or pipelined) with snapshot-aware iterators.
+3. **CTE Parsing & Execution**: Planner memo now deduplicates non-recursive CTE producers; finish introducing materialization/spool alternatives and executor support with snapshot-aware iterators.
 4. **Transaction Visibility**: Finish Transaction & Concurrency Milestone 1 to provide consistent snapshots across planner/executor and integrate with retention manager for snapshot retirement.
 5. **Optimizer Enhancements**: Broaden rule set, add cost-based join order selection, and integrate catalog statistics for selectivity estimates.
 6. **Index DDL Integration**: Surface index creation options (unique, covering, partial) and ensure planner/executor leverage indexes for predicates and joins.
@@ -61,11 +61,11 @@ Latest validation: Release `ctest` (427/427) on 2025-11-04 after aligning planne
 
 4. **CTE Enablement (Planned)**
    - Parser/AST: ✅ Non-recursive WITH clause grammar and nodes merged; recursive support remains future work.
-   - Planner: Logical lowering now inlines CTE producers for downstream planning; add memo entries and materialization strategies to manage reuse and cost.
+   - Planner: ✅ Memo deduplicates non-recursive CTE producers and tracks reusable groups; add spool/materialization strategies so the cost model can compare inline versus reuse plans.
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
    - Executor: Provide worktable infrastructure for recursive CTEs and integrate with snapshot visibility.
    - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp
-   - Next work item: Extend the planner memo so non-recursive CTE producers register reusable groups with costed materialization options prior to executor wiring.
+   - Next work item: Introduce logical spool/materialize alternatives (and associated costing stubs) for shared CTE groups ahead of executor integration.
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.
