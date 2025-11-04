@@ -114,6 +114,9 @@ Memo::GroupId Memo::add_group(LogicalOperatorPtr expression)
                 }
                 for (const auto& existing : group->expressions()) {
                     if (expressions_equivalent(existing, expression)) {
+                        if (existing.get() != expression.get()) {
+                            ensure_materialized_alternative(candidate, existing);
+                        }
                         return candidate;
                     }
                 }
@@ -152,6 +155,24 @@ void Memo::add_expression(GroupId group, LogicalOperatorPtr expression)
     if (std::find(bucket.begin(), bucket.end(), group) == bucket.end()) {
         bucket.push_back(group);
     }
+}
+
+void Memo::ensure_materialized_alternative(GroupId group, const LogicalOperatorPtr& representative)
+{
+    if (group >= groups_.size() || !representative) {
+        return;
+    }
+    if (!materialized_groups_.insert(group).second) {
+        return;
+    }
+
+    LogicalProperties materialize_props = representative->properties();
+    auto materialize = LogicalOperator::make(
+        LogicalOperatorType::Materialize,
+        std::vector<LogicalOperatorPtr>{representative},
+        std::move(materialize_props));
+
+    groups_[group].add_expression(std::move(materialize));
 }
 
 const MemoGroup* Memo::find_group(GroupId group) const noexcept

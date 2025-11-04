@@ -4,7 +4,7 @@ This ticket-level report summarizes the relational engine roadmap, capturing wha
 
 _Last updated: 2025-11-04_
 
-Latest validation: Release `ctest` (427/427) on 2025-11-04 after enabling planner memo reuse for repeated CTE projections.
+Latest validation: Release `ctest` (428/428) on 2025-11-04 after adding materialize spool alternatives for shared CTE producers.
 
 ## Current Capabilities
 
@@ -26,7 +26,7 @@ Latest validation: Release `ctest` (427/427) on 2025-11-04 after enabling planne
 | Key/foreign constraints | **Available (shell integration)** | Catalog metadata, planner & executor enforcement, and bored_shell INSERT/UPDATE pipelines enforcing PRIMARY KEY/UNIQUE/FOREIGN KEY checks. |
 | Auto-incrementing primary keys | **In progress** | Sequence allocator now stages transactional `next_value` updates with tests; planner/executor integration remains. |
 | Join execution | **Available** | Logical lowering, planner, and executor support nested-loop and hash joins with tests covering join predicates and pipelines. |
-| Common table expressions (CTEs) | **In progress** | Parser/AST and binder accept non-recursive WITH clauses; lowering now inlines CTE producers with regression coverage for nested projections; planner memo deduplicates reusable producers while executor materialization remains pending. |
+| Common table expressions (CTEs) | **In progress** | Parser/AST and binder accept non-recursive WITH clauses; lowering now inlines CTE producers with regression coverage for nested projections; planner memo deduplicates reusable producers and injects materialize/spool alternatives while executor materialization remains pending. |
 
 ## Gaps to Close
 
@@ -61,11 +61,11 @@ Latest validation: Release `ctest` (427/427) on 2025-11-04 after enabling planne
 
 4. **CTE Enablement (Planned)**
    - Parser/AST: ✅ Non-recursive WITH clause grammar and nodes merged; recursive support remains future work.
-   - Planner: ✅ Memo deduplicates non-recursive CTE producers and tracks reusable groups; add spool/materialization strategies so the cost model can compare inline versus reuse plans.
+   - Planner: ✅ Memo deduplicates non-recursive CTE producers, tracks reusable groups, and injects materialize/spool alternatives so the cost model can compare inline versus reuse plans.
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
    - Executor: Provide worktable infrastructure for recursive CTEs and integrate with snapshot visibility.
    - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp
-   - Next work item: Introduce logical spool/materialize alternatives (and associated costing stubs) for shared CTE groups ahead of executor integration.
+   - Next work item: Wire materialize/spool nodes into executor worktable infrastructure with snapshot-aware iterators.
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.

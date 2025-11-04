@@ -188,6 +188,8 @@ PhysicalOperatorType to_physical(LogicalOperatorType type) noexcept
         return PhysicalOperatorType::SeqScan;
     case LogicalOperatorType::Values:
         return PhysicalOperatorType::Values;
+    case LogicalOperatorType::Materialize:
+        return PhysicalOperatorType::Materialize;
     case LogicalOperatorType::Insert:
         return PhysicalOperatorType::Insert;
     case LogicalOperatorType::Update:
@@ -304,6 +306,13 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
         operator_type = PhysicalOperatorType::Update;
     } else if (logical->type() == LogicalOperatorType::Delete) {
         operator_type = PhysicalOperatorType::Delete;
+    }
+
+    if (logical->type() == LogicalOperatorType::Materialize && !lowered_children.empty()) {
+        inherit_child_shape(lowered_children.front(), logical->properties(), properties);
+        if (properties.executor_strategy.empty()) {
+            properties.executor_strategy = "materialize(spool)";
+        }
     }
 
     const auto apply_constraint_enforcement = [&](std::vector<PhysicalOperatorPtr>& children) {

@@ -284,7 +284,15 @@ TEST_CASE("Memo reuses groups for equivalent expressions")
 
     const auto* group = memo.find_group(first_group);
     REQUIRE(group != nullptr);
-    CHECK(group->expressions().size() == 1U);
+    CHECK(group->expressions().size() == 2U);
+
+    std::size_t materialize_count = 0U;
+    for (const auto& expression : group->expressions()) {
+        if (expression->type() == LogicalOperatorType::Materialize) {
+            ++materialize_count;
+        }
+    }
+    CHECK(materialize_count == 1U);
 
     LogicalProperties projection_props = scan_props;
     auto projection_one = LogicalOperator::make(
@@ -301,7 +309,15 @@ TEST_CASE("Memo reuses groups for equivalent expressions")
 
     group = memo.find_group(first_group);
     REQUIRE(group != nullptr);
-    CHECK(group->expressions().size() == 2U);
+    CHECK(group->expressions().size() == 3U);
+
+    materialize_count = 0U;
+    for (const auto& expression : group->expressions()) {
+        if (expression->type() == LogicalOperatorType::Materialize) {
+            ++materialize_count;
+        }
+    }
+    CHECK(materialize_count == 1U);
 }
 
 TEST_CASE("Rule engine handles empty registry")

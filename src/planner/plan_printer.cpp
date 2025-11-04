@@ -29,6 +29,8 @@ std::string to_string(PhysicalOperatorType type)
         return "HashJoin";
     case PhysicalOperatorType::Values:
         return "Values";
+    case PhysicalOperatorType::Materialize:
+        return "Materialize";
     case PhysicalOperatorType::Insert:
         return "Insert";
     case PhysicalOperatorType::Update:

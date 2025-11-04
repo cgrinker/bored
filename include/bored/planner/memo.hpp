@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace bored::planner {
@@ -39,6 +40,9 @@ public:
 private:
     std::vector<MemoGroup> groups_{};
     std::unordered_map<std::size_t, std::vector<GroupId>> expression_index_{};
+    std::unordered_set<GroupId> materialized_groups_{};
+
+    void ensure_materialized_alternative(GroupId group, const LogicalOperatorPtr& representative);
 };
 
 }  // namespace bored::planner

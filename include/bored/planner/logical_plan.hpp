@@ -20,6 +20,7 @@ enum class LogicalOperatorType {
     Join,
     TableScan,
     Values,
+    Materialize,
     Insert,
     Update,
     Delete

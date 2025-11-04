@@ -13,6 +13,8 @@ constexpr double kJoinCpuPerPair = 0.00001;
 constexpr double kJoinIoPerInputTuple = 0.0025;
 constexpr double kDefaultBatchDivisor = 4.0;
 constexpr double kMaxBatchSize = 1024.0;
+constexpr double kMaterializeIoPerTuple = 0.0035;
+constexpr double kMaterializeCpuPerTuple = 0.00075;
 
 std::size_t recommend_batch_size(double rows)
 {
@@ -113,6 +115,19 @@ CostEstimate CostModel::estimate_node(const LogicalOperatorPtr& node) const
         result.output_rows = std::max(1.0, std::min(left_rows, right_rows));
         result.recommended_batch_size = recommend_batch_size(result.output_rows);
         return result;
+    }
+    case LogicalOperatorType::Materialize: {
+        const auto& children = node->children();
+        if (children.empty()) {
+            return {};
+        }
+
+        auto child_estimate = estimate_node(children.front());
+        const auto rows = std::max(1.0, child_estimate.output_rows);
+        child_estimate.cost.io += rows * kMaterializeIoPerTuple;
+        child_estimate.cost.cpu += rows * kMaterializeCpuPerTuple;
+        child_estimate.recommended_batch_size = recommend_batch_size(child_estimate.output_rows);
+        return child_estimate;
     }
     case LogicalOperatorType::Values:
     default: {

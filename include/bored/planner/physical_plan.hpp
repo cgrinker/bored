@@ -25,6 +25,7 @@ enum class PhysicalOperatorType {
     NestedLoopJoin,
     HashJoin,
     Values,
+    Materialize,
     Insert,
     Update,
     Delete,
