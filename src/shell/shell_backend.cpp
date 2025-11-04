@@ -71,6 +71,11 @@ namespace bored::shell {
 
 using ScalarValue = std::variant<std::int64_t, std::string>;
 
+void encode_key_from_values(const ShellBackend::TableData& table,
+                            const std::vector<std::size_t>& column_indexes,
+                            const std::vector<ScalarValue>& values,
+                            std::vector<std::byte>& buffer);
+
 struct ShellBackendSessionAccess final {
     static txn::TransactionContext* session_transaction_context(ShellBackend& backend) noexcept
     {
