@@ -1,5 +1,11 @@
 #include "bored/catalog/catalog_bootstrap_ids.hpp"
 #include "bored/catalog/catalog_encoding.hpp"
+#include "bored/executor/delete_executor.hpp"
+#include "bored/executor/executor_context.hpp"
+#include "bored/executor/spool_executor.hpp"
+#include "bored/executor/tuple_buffer.hpp"
+#include "bored/executor/update_executor.hpp"
+#include "bored/executor/worktable_registry.hpp"
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/checkpoint_image_store.hpp"
 #include "bored/storage/checkpoint_manager.hpp"
@@ -15,6 +21,8 @@
 #include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_undo_walker.hpp"
 #include "bored/storage/wal_writer.hpp"
+#include "bored/txn/snapshot_utils.hpp"
+#include "bored/txn/transaction_types.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -31,6 +39,7 @@
 #include <sstream>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using bored::storage::AsyncIo;
@@ -141,6 +150,222 @@ bored::storage::WalCommitHeader make_commit_header(const std::shared_ptr<WalWrit
     header.oldest_active_commit_lsn = oldest_active_commit_lsn != 0U ? oldest_active_commit_lsn : header.commit_lsn;
     return header;
 }
+
+class VectorChild final : public bored::executor::ExecutorNode {
+public:
+    VectorChild(const std::vector<std::vector<std::byte>>* rows, std::size_t* iterations)
+        : rows_{rows}
+        , iterations_{iterations}
+    {
+    }
+
+    void open(bored::executor::ExecutorContext&) override
+    {
+        position_ = 0U;
+    }
+
+    bool next(bored::executor::ExecutorContext&, bored::executor::TupleBuffer& buffer) override
+    {
+        if (rows_ == nullptr || position_ >= rows_->size()) {
+            return false;
+        }
+
+        buffer.reset();
+        const auto& row = (*rows_)[position_++];
+        buffer.write(std::span<const std::byte>(row.data(), row.size()));
+        if (iterations_ != nullptr) {
+            ++(*iterations_);
+        }
+        return true;
+    }
+
+    void close(bored::executor::ExecutorContext&) override {}
+
+private:
+    const std::vector<std::vector<std::byte>>* rows_ = nullptr;
+    std::size_t* iterations_ = nullptr;
+    std::size_t position_ = 0U;
+};
+
+std::vector<std::vector<std::byte>> collect_page_rows(std::span<const std::byte> page,
+                                                      const std::vector<std::uint16_t>& slots)
+{
+    std::vector<std::vector<std::byte>> rows;
+    rows.reserve(slots.size());
+    for (auto slot : slots) {
+        auto tuple = bored::storage::read_tuple(page, slot);
+        rows.emplace_back(tuple.begin(), tuple.end());
+    }
+    return rows;
+}
+
+std::vector<std::byte> make_update_tuple_row(std::uint64_t row_id, std::span<const std::byte> new_payload)
+{
+    bored::executor::TupleBuffer buffer{};
+    bored::executor::TupleWriter writer{buffer};
+    std::array<std::byte, sizeof(row_id)> row_bytes{};
+    std::memcpy(row_bytes.data(), &row_id, row_bytes.size());
+    writer.append_column(std::span<const std::byte>(row_bytes.data(), row_bytes.size()), false);
+    writer.append_column(new_payload, false);
+    writer.finalize();
+    auto span = buffer.span();
+    return std::vector<std::byte>(span.begin(), span.end());
+}
+
+std::vector<std::byte> make_delete_tuple_row(std::uint64_t row_id)
+{
+    bored::executor::TupleBuffer buffer{};
+    bored::executor::TupleWriter writer{buffer};
+    std::array<std::byte, sizeof(row_id)> row_bytes{};
+    std::memcpy(row_bytes.data(), &row_id, row_bytes.size());
+    writer.append_column(std::span<const std::byte>(row_bytes.data(), row_bytes.size()), false);
+    writer.finalize();
+    auto span = buffer.span();
+    return std::vector<std::byte>(span.begin(), span.end());
+}
+
+struct SpoolTestRow final {
+    std::uint64_t row_id = 0U;
+    std::uint16_t slot_index = 0U;
+    std::vector<std::byte> payload{};
+};
+
+class PageUpdateTarget final : public bored::executor::UpdateExecutor::Target {
+public:
+    PageUpdateTarget(bored::storage::PageManager* manager,
+                     std::span<std::byte> page,
+                     std::unordered_map<std::uint64_t, std::uint16_t>* slot_map,
+                     std::unordered_map<std::uint64_t, std::vector<std::byte>>* expected_payloads)
+        : manager_{manager}
+        , page_{page}
+        , slot_map_{slot_map}
+        , expected_payloads_{expected_payloads}
+    {
+    }
+
+    std::error_code update_tuple(const bored::executor::TupleView& tuple,
+                                 bored::executor::ExecutorContext&,
+                                 bored::executor::UpdateExecutor::UpdateStats& out_stats) override
+    {
+        if (!manager_ || !slot_map_ || tuple.column_count() < 2U) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        const auto row_view = tuple.column(0U);
+        const auto new_payload_view = tuple.column(1U);
+        if (row_view.is_null || new_payload_view.is_null || row_view.data.size() != sizeof(std::uint64_t)) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        std::uint64_t row_id = 0U;
+        std::memcpy(&row_id, row_view.data.data(), sizeof(row_id));
+        auto slot_it = slot_map_->find(row_id);
+        if (slot_it == slot_map_->end()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        bored::storage::PageManager::TupleUpdateResult result{};
+        auto ec = manager_->update_tuple(page_, slot_it->second, new_payload_view.data, row_id, result);
+        if (ec) {
+            return ec;
+        }
+
+        slot_it->second = result.slot.index;
+        out_stats.new_payload_bytes = new_payload_view.data.size();
+        out_stats.old_payload_bytes = result.old_length;
+        out_stats.wal_bytes = result.wal.written_bytes;
+
+        if (expected_payloads_ != nullptr) {
+            (*expected_payloads_)[row_id] = std::vector<std::byte>(new_payload_view.data.begin(),
+                                                                   new_payload_view.data.end());
+        }
+
+        ++updated_;
+        return {};
+    }
+
+    std::error_code flush(bored::executor::ExecutorContext&) override
+    {
+        if (!manager_) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        return manager_->flush_wal();
+    }
+
+    [[nodiscard]] std::size_t updated_count() const noexcept { return updated_; }
+
+private:
+    bored::storage::PageManager* manager_ = nullptr;
+    std::span<std::byte> page_{};
+    std::unordered_map<std::uint64_t, std::uint16_t>* slot_map_ = nullptr;
+    std::unordered_map<std::uint64_t, std::vector<std::byte>>* expected_payloads_ = nullptr;
+    std::size_t updated_ = 0U;
+};
+
+class PageDeleteTarget final : public bored::executor::DeleteExecutor::Target {
+public:
+    PageDeleteTarget(bored::storage::PageManager* manager,
+                     std::span<std::byte> page,
+                     std::unordered_map<std::uint64_t, std::uint16_t>* slot_map)
+        : manager_{manager}
+        , page_{page}
+        , slot_map_{slot_map}
+    {
+    }
+
+    std::error_code delete_tuple(const bored::executor::TupleView& tuple,
+                                 bored::executor::ExecutorContext&,
+                                 bored::executor::DeleteExecutor::DeleteStats& out_stats) override
+    {
+        if (!manager_ || !slot_map_ || tuple.column_count() < 1U) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        const auto row_view = tuple.column(0U);
+        if (row_view.is_null || row_view.data.size() != sizeof(std::uint64_t)) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        std::uint64_t row_id = 0U;
+        std::memcpy(&row_id, row_view.data.data(), sizeof(row_id));
+        auto slot_it = slot_map_->find(row_id);
+        if (slot_it == slot_map_->end()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+
+        auto page_const = std::span<const std::byte>(page_.data(), page_.size());
+        auto tuple_span = bored::storage::read_tuple(page_const, slot_it->second);
+        const auto reclaimed = tuple_span.size();
+
+        bored::storage::PageManager::TupleDeleteResult result{};
+        auto ec = manager_->delete_tuple(page_, slot_it->second, row_id, result);
+        if (ec) {
+            return ec;
+        }
+
+        slot_map_->erase(slot_it);
+        out_stats.reclaimed_bytes = reclaimed;
+        out_stats.wal_bytes = result.wal.written_bytes;
+        ++deleted_;
+        return {};
+    }
+
+    std::error_code flush(bored::executor::ExecutorContext&) override
+    {
+        if (!manager_) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        return manager_->flush_wal();
+    }
+
+    [[nodiscard]] std::size_t deleted_count() const noexcept { return deleted_; }
+
+private:
+    bored::storage::PageManager* manager_ = nullptr;
+    std::span<std::byte> page_{};
+    std::unordered_map<std::uint64_t, std::uint16_t>* slot_map_ = nullptr;
+    std::size_t deleted_ = 0U;
+};
 
 }  // namespace
 
@@ -3437,6 +3662,471 @@ TEST_CASE("Wal crash drill rehydrates checkpointed heap and index pages")
     REQUIRE(metadata.size() == index_entries.size());
     CHECK(metadata.front().index_id == index_identifier);
     CHECK(metadata.front().high_water_lsn == checkpoint_lsn);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("Wal crash drill rehydrates spool SELECT worktables")
+{
+    using namespace bored::storage;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_spool_select_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * kWalBlockSize;
+    config.buffer_size = 2U * kWalBlockSize;
+    config.start_lsn = kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = 51001U;
+    alignas(8) std::array<std::byte, kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+    std::vector<SpoolTestRow> baseline_rows;
+    baseline_rows.reserve(3U);
+    for (std::uint64_t index = 0U; index < 3U; ++index) {
+        const auto row_id = 10'000U + index;
+        std::vector<std::byte> payload(24U + index * 8U);
+        for (std::size_t pos = 0; pos < payload.size(); ++pos) {
+            payload[pos] = static_cast<std::byte>((index + 1U) * (pos + 3U));
+        }
+        PageManager::TupleInsertResult insert_result{};
+        REQUIRE_FALSE(manager.insert_tuple(page_span,
+                                           std::span<const std::byte>(payload.data(), payload.size()),
+                                           row_id,
+                                           insert_result));
+        baseline_rows.push_back(SpoolTestRow{row_id, insert_result.slot.index, std::move(payload)});
+    }
+
+    auto insert_commit = make_commit_header(wal_writer, 4000U, 4001U, 4000U);
+    WalAppendResult insert_commit_result{};
+    REQUIRE_FALSE(wal_writer->append_commit_record(insert_commit, insert_commit_result));
+    REQUIRE_FALSE(wal_writer->flush());
+
+    std::vector<std::uint16_t> slot_order;
+    slot_order.reserve(baseline_rows.size());
+    for (const auto& row : baseline_rows) {
+        slot_order.push_back(row.slot_index);
+    }
+
+    auto baseline_tuple_rows = collect_page_rows(std::span<const std::byte>(page_span.data(), page_span.size()), slot_order);
+
+    bored::executor::WorkTableRegistry baseline_registry;
+    bored::executor::SpoolExecutor::Config baseline_config{};
+    baseline_config.reserve_rows = baseline_tuple_rows.size();
+    baseline_config.worktable_registry = &baseline_registry;
+    baseline_config.worktable_id = 0x5A5A5A5AU;
+
+    std::size_t baseline_child_reads = 0U;
+    auto baseline_child = std::make_unique<VectorChild>(&baseline_tuple_rows, &baseline_child_reads);
+    auto baseline_spool = std::make_unique<bored::executor::SpoolExecutor>(std::move(baseline_child), baseline_config);
+
+    bored::executor::ExecutorContext baseline_context{};
+    bored::txn::Snapshot baseline_snapshot{};
+    baseline_snapshot.read_lsn = insert_commit.commit_lsn;
+    baseline_context.set_snapshot(baseline_snapshot);
+
+    std::vector<std::vector<std::byte>> materialized_rows;
+    bored::executor::TupleBuffer tuple_buffer{};
+
+    baseline_spool->open(baseline_context);
+    while (baseline_spool->next(baseline_context, tuple_buffer)) {
+        auto span = tuple_buffer.span();
+        materialized_rows.emplace_back(span.begin(), span.end());
+        tuple_buffer.reset();
+    }
+    baseline_spool->close(baseline_context);
+
+    CHECK(baseline_child_reads == baseline_tuple_rows.size());
+    REQUIRE(materialized_rows == baseline_tuple_rows);
+
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir, config.file_prefix, config.file_extension, nullptr, wal_dir / "checkpoints"};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    WalReplayContext replay_context{PageType::Table, nullptr};
+    WalReplayer replayer{replay_context};
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    auto replay_page = replay_context.get_page(page_id);
+    auto replay_span = std::span<const std::byte>(replay_page.data(), replay_page.size());
+    auto recovered_rows = collect_page_rows(replay_span, slot_order);
+    REQUIRE(recovered_rows == baseline_tuple_rows);
+
+    bored::executor::WorkTableRegistry recovered_registry;
+    bored::executor::SpoolExecutor::Config recovered_config{};
+    recovered_config.reserve_rows = recovered_rows.size();
+    recovered_config.worktable_registry = &recovered_registry;
+    recovered_config.worktable_id = 0x5A5A5A5AU;
+
+    std::size_t recovered_child_reads = 0U;
+    auto recovered_child = std::make_unique<VectorChild>(&recovered_rows, &recovered_child_reads);
+    auto recovered_spool = std::make_unique<bored::executor::SpoolExecutor>(std::move(recovered_child), recovered_config);
+
+    bored::executor::ExecutorContext recovered_context{};
+    recovered_context.set_snapshot(baseline_snapshot);
+
+    std::vector<std::vector<std::byte>> rehydrated_rows;
+    bored::executor::TupleBuffer recovered_buffer{};
+
+    recovered_spool->open(recovered_context);
+    while (recovered_spool->next(recovered_context, recovered_buffer)) {
+        auto span = recovered_buffer.span();
+        rehydrated_rows.emplace_back(span.begin(), span.end());
+        recovered_buffer.reset();
+    }
+    recovered_spool->close(recovered_context);
+
+    CHECK(recovered_child_reads == recovered_rows.size());
+    REQUIRE(rehydrated_rows == recovered_rows);
+
+    std::size_t cached_child_reads = 0U;
+    auto cached_child = std::make_unique<VectorChild>(&recovered_rows, &cached_child_reads);
+    auto cached_spool = std::make_unique<bored::executor::SpoolExecutor>(std::move(cached_child), recovered_config);
+
+    std::vector<std::vector<std::byte>> cached_rows;
+    bored::executor::TupleBuffer cached_buffer{};
+    cached_spool->open(recovered_context);
+    while (cached_spool->next(recovered_context, cached_buffer)) {
+        auto span = cached_buffer.span();
+        cached_rows.emplace_back(span.begin(), span.end());
+        cached_buffer.reset();
+    }
+    cached_spool->close(recovered_context);
+
+    CHECK(cached_child_reads == 0U);
+    REQUIRE(cached_rows == recovered_rows);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("Wal crash drill rehydrates spool UPDATE worktables")
+{
+    using namespace bored::storage;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_spool_update_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * kWalBlockSize;
+    config.buffer_size = 2U * kWalBlockSize;
+    config.start_lsn = kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = 52001U;
+    alignas(8) std::array<std::byte, kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+    std::vector<SpoolTestRow> rows;
+    rows.reserve(3U);
+    std::unordered_map<std::uint64_t, std::uint16_t> slot_map;
+    std::unordered_map<std::uint64_t, std::vector<std::byte>> expected_payloads;
+
+    for (std::uint64_t index = 0U; index < 3U; ++index) {
+        const auto row_id = 20'000U + index;
+        std::vector<std::byte> payload(32U + index * 4U);
+        for (std::size_t pos = 0; pos < payload.size(); ++pos) {
+            payload[pos] = static_cast<std::byte>((pos + 7U) ^ (index + 3U));
+        }
+        PageManager::TupleInsertResult insert_result{};
+        REQUIRE_FALSE(manager.insert_tuple(page_span,
+                                           std::span<const std::byte>(payload.data(), payload.size()),
+                                           row_id,
+                                           insert_result));
+        rows.push_back(SpoolTestRow{row_id, insert_result.slot.index, payload});
+        slot_map[row_id] = insert_result.slot.index;
+        expected_payloads[row_id] = rows.back().payload;
+    }
+
+    auto insert_commit = make_commit_header(wal_writer, 5000U, 5001U, 5000U);
+    WalAppendResult insert_commit_result{};
+    REQUIRE_FALSE(wal_writer->append_commit_record(insert_commit, insert_commit_result));
+
+    std::vector<std::vector<std::byte>> update_payloads;
+    update_payloads.reserve(rows.size());
+    for (std::size_t idx = 0U; idx < rows.size(); ++idx) {
+        auto payload = rows[idx].payload;
+        for (std::size_t pos = 0; pos < payload.size(); ++pos) {
+            payload[pos] = static_cast<std::byte>((payload[pos] ^ std::byte{0x5A}) + static_cast<std::byte>(idx + 1U));
+        }
+        expected_payloads[rows[idx].row_id] = payload;
+        update_payloads.push_back(std::move(payload));
+    }
+
+    std::vector<std::vector<std::byte>> update_rows;
+    update_rows.reserve(rows.size());
+    for (std::size_t idx = 0U; idx < rows.size(); ++idx) {
+        update_rows.push_back(make_update_tuple_row(rows[idx].row_id,
+                                                    std::span<const std::byte>(update_payloads[idx].data(),
+                                                                               update_payloads[idx].size())));
+    }
+
+    bored::executor::WorkTableRegistry registry;
+    bored::executor::SpoolExecutor::Config spool_config{};
+    spool_config.reserve_rows = update_rows.size();
+    spool_config.worktable_registry = &registry;
+    spool_config.worktable_id = 0x6B6B6B6BU;
+
+    std::size_t child_reads = 0U;
+    auto child = std::make_unique<VectorChild>(&update_rows, &child_reads);
+    auto spool_node = std::make_unique<bored::executor::SpoolExecutor>(std::move(child), spool_config);
+
+    PageUpdateTarget update_target{&manager, page_span, &slot_map, &expected_payloads};
+    bored::executor::UpdateExecutor::Config update_config{};
+    update_config.target = &update_target;
+
+    bored::executor::UpdateExecutor update_executor{std::move(spool_node), update_config};
+
+    bored::executor::ExecutorContext context{};
+    bored::txn::Snapshot snapshot{};
+    snapshot.read_lsn = wal_writer->next_lsn();
+    context.set_snapshot(snapshot);
+
+    bored::executor::TupleBuffer sink{};
+    update_executor.open(context);
+    while (update_executor.next(context, sink)) {
+        sink.reset();
+    }
+    update_executor.close(context);
+
+    CHECK(child_reads == update_rows.size());
+    CHECK(update_target.updated_count() == update_rows.size());
+
+    auto update_commit = make_commit_header(wal_writer, 5001U, 5002U, 5001U);
+    WalAppendResult update_commit_result{};
+    REQUIRE_FALSE(wal_writer->append_commit_record(update_commit, update_commit_result));
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir, config.file_prefix, config.file_extension, nullptr, wal_dir / "checkpoints"};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    WalReplayContext replay_context{PageType::Table, nullptr};
+    WalReplayer replayer{replay_context};
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    auto replay_page = replay_context.get_page(page_id);
+    auto replay_span = std::span<const std::byte>(replay_page.data(), replay_page.size());
+
+    std::vector<std::uint16_t> slot_order;
+    slot_order.reserve(rows.size());
+    for (const auto& row : rows) {
+        auto it = slot_map.find(row.row_id);
+        REQUIRE(it != slot_map.end());
+        slot_order.push_back(it->second);
+        auto tuple_span = bored::storage::read_tuple(replay_span, it->second);
+        auto payload = tuple_payload_vector(tuple_span);
+        const auto expected_it = expected_payloads.find(row.row_id);
+        REQUIRE(expected_it != expected_payloads.end());
+        REQUIRE(payload == expected_it->second);
+    }
+
+    auto recovered_rows = collect_page_rows(replay_span, slot_order);
+
+    bored::executor::WorkTableRegistry recovered_registry;
+    bored::executor::SpoolExecutor::Config recovered_config{};
+    recovered_config.reserve_rows = recovered_rows.size();
+    recovered_config.worktable_registry = &recovered_registry;
+    recovered_config.worktable_id = 0x6B6B6B6BU;
+
+    std::size_t recovered_child_reads = 0U;
+    auto recovered_child = std::make_unique<VectorChild>(&recovered_rows, &recovered_child_reads);
+    auto recovered_spool = std::make_unique<bored::executor::SpoolExecutor>(std::move(recovered_child), recovered_config);
+
+    bored::executor::ExecutorContext recovered_context{};
+    snapshot.read_lsn = update_commit.commit_lsn;
+    recovered_context.set_snapshot(snapshot);
+
+    std::vector<std::vector<std::byte>> rehydrated_rows;
+    bored::executor::TupleBuffer recovered_buffer{};
+
+    recovered_spool->open(recovered_context);
+    while (recovered_spool->next(recovered_context, recovered_buffer)) {
+        auto span = recovered_buffer.span();
+        rehydrated_rows.emplace_back(span.begin(), span.end());
+        recovered_buffer.reset();
+    }
+    recovered_spool->close(recovered_context);
+
+    CHECK(recovered_child_reads == recovered_rows.size());
+    REQUIRE(rehydrated_rows == recovered_rows);
+
+    std::size_t cached_child_reads = 0U;
+    auto cached_child = std::make_unique<VectorChild>(&recovered_rows, &cached_child_reads);
+    auto cached_spool = std::make_unique<bored::executor::SpoolExecutor>(std::move(cached_child), recovered_config);
+
+    std::vector<std::vector<std::byte>> cached_rows;
+    bored::executor::TupleBuffer cached_buffer{};
+    cached_spool->open(recovered_context);
+    while (cached_spool->next(recovered_context, cached_buffer)) {
+        auto span = cached_buffer.span();
+        cached_rows.emplace_back(span.begin(), span.end());
+        cached_buffer.reset();
+    }
+    cached_spool->close(recovered_context);
+
+    CHECK(cached_child_reads == 0U);
+    REQUIRE(cached_rows == recovered_rows);
+
+    (void)std::filesystem::remove_all(wal_dir);
+}
+
+TEST_CASE("Wal crash drill rehydrates spool DELETE worktables")
+{
+    using namespace bored::storage;
+
+    auto io = make_async_io();
+    auto wal_dir = make_temp_dir("bored_wal_spool_delete_");
+
+    WalWriterConfig config{};
+    config.directory = wal_dir;
+    config.segment_size = 4U * kWalBlockSize;
+    config.buffer_size = 2U * kWalBlockSize;
+    config.start_lsn = kWalBlockSize;
+
+    auto wal_writer = std::make_shared<WalWriter>(io, config);
+    FreeSpaceMap fsm;
+    PageManager manager{&fsm, wal_writer};
+
+    constexpr std::uint32_t page_id = 53001U;
+    alignas(8) std::array<std::byte, kPageSize> page_buffer{};
+    auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+    REQUIRE_FALSE(manager.initialize_page(page_span, PageType::Table, page_id));
+
+    std::vector<SpoolTestRow> rows;
+    rows.reserve(3U);
+    std::unordered_map<std::uint64_t, std::uint16_t> slot_map;
+
+    for (std::uint64_t index = 0U; index < 3U; ++index) {
+        const auto row_id = 30'000U + index;
+        std::vector<std::byte> payload(28U + index * 6U);
+        for (std::size_t pos = 0; pos < payload.size(); ++pos) {
+            payload[pos] = static_cast<std::byte>((pos + 11U) * (index + 5U));
+        }
+        PageManager::TupleInsertResult insert_result{};
+        REQUIRE_FALSE(manager.insert_tuple(page_span,
+                                           std::span<const std::byte>(payload.data(), payload.size()),
+                                           row_id,
+                                           insert_result));
+        rows.push_back(SpoolTestRow{row_id, insert_result.slot.index, std::move(payload)});
+        slot_map[row_id] = insert_result.slot.index;
+    }
+
+    auto insert_commit = make_commit_header(wal_writer, 6000U, 6001U, 6000U);
+    WalAppendResult insert_commit_result{};
+    REQUIRE_FALSE(wal_writer->append_commit_record(insert_commit, insert_commit_result));
+
+    std::vector<std::vector<std::byte>> delete_rows;
+    delete_rows.reserve(rows.size());
+    for (const auto& row : rows) {
+        delete_rows.push_back(make_delete_tuple_row(row.row_id));
+    }
+
+    bored::executor::WorkTableRegistry registry;
+    bored::executor::SpoolExecutor::Config spool_config{};
+    spool_config.reserve_rows = delete_rows.size();
+    spool_config.worktable_registry = &registry;
+    spool_config.worktable_id = 0x7C7C7C7CU;
+
+    std::size_t child_reads = 0U;
+    auto child = std::make_unique<VectorChild>(&delete_rows, &child_reads);
+    auto spool_node = std::make_unique<bored::executor::SpoolExecutor>(std::move(child), spool_config);
+
+    PageDeleteTarget delete_target{&manager, page_span, &slot_map};
+    bored::executor::DeleteExecutor::Config delete_config{};
+    delete_config.target = &delete_target;
+
+    bored::executor::DeleteExecutor delete_executor{std::move(spool_node), delete_config};
+
+    bored::executor::ExecutorContext context{};
+    bored::txn::Snapshot snapshot{};
+    snapshot.read_lsn = wal_writer->next_lsn();
+    context.set_snapshot(snapshot);
+
+    bored::executor::TupleBuffer sink{};
+    delete_executor.open(context);
+    while (delete_executor.next(context, sink)) {
+        sink.reset();
+    }
+    delete_executor.close(context);
+
+    CHECK(child_reads == delete_rows.size());
+    CHECK(delete_target.deleted_count() == delete_rows.size());
+
+    auto delete_commit = make_commit_header(wal_writer, 6001U, 6002U, 6001U);
+    WalAppendResult delete_commit_result{};
+    REQUIRE_FALSE(wal_writer->append_commit_record(delete_commit, delete_commit_result));
+    REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(manager.close_wal());
+    io->shutdown();
+
+    WalRecoveryDriver driver{wal_dir, config.file_prefix, config.file_extension, nullptr, wal_dir / "checkpoints"};
+    WalRecoveryPlan plan{};
+    REQUIRE_FALSE(driver.build_plan(plan));
+
+    WalReplayContext replay_context{PageType::Table, nullptr};
+    WalReplayer replayer{replay_context};
+    REQUIRE_FALSE(replayer.apply_redo(plan));
+    REQUIRE_FALSE(replayer.apply_undo(plan));
+
+    auto replay_page = replay_context.get_page(page_id);
+    auto header = bored::storage::page_header(std::span<const std::byte>(replay_page.data(), replay_page.size()));
+    CHECK(header.tuple_count == 0U);
+
+    std::vector<std::vector<std::byte>> recovered_rows;
+    bored::executor::WorkTableRegistry recovered_registry;
+    bored::executor::SpoolExecutor::Config recovered_config{};
+    recovered_config.reserve_rows = 0U;
+    recovered_config.worktable_registry = &recovered_registry;
+    recovered_config.worktable_id = 0x7C7C7C7CU;
+
+    bored::executor::ExecutorContext recovered_context{};
+    snapshot.read_lsn = delete_commit.commit_lsn;
+    recovered_context.set_snapshot(snapshot);
+
+    std::size_t recovered_child_reads = 0U;
+    auto recovered_child = std::make_unique<VectorChild>(&recovered_rows, &recovered_child_reads);
+    auto recovered_spool = std::make_unique<bored::executor::SpoolExecutor>(std::move(recovered_child), recovered_config);
+
+    bored::executor::TupleBuffer recovered_buffer{};
+    recovered_spool->open(recovered_context);
+    while (recovered_spool->next(recovered_context, recovered_buffer)) {
+        recovered_buffer.reset();
+    }
+    recovered_spool->close(recovered_context);
+
+    CHECK(recovered_child_reads == 0U);
+
+    std::size_t cached_child_reads = 0U;
+    auto cached_child = std::make_unique<VectorChild>(&recovered_rows, &cached_child_reads);
+    auto cached_spool = std::make_unique<bored::executor::SpoolExecutor>(std::move(cached_child), recovered_config);
+    bored::executor::TupleBuffer cached_buffer{};
+    cached_spool->open(recovered_context);
+    while (cached_spool->next(recovered_context, cached_buffer)) {
+        cached_buffer.reset();
+    }
+    cached_spool->close(recovered_context);
+
+    CHECK(cached_child_reads == 0U);
 
     (void)std::filesystem::remove_all(wal_dir);
 }
