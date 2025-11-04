@@ -25,6 +25,7 @@
 #include "bored/executor/executor_telemetry.hpp"
 #include "bored/executor/filter_executor.hpp"
 #include "bored/executor/insert_executor.hpp"
+#include "bored/executor/spool_executor.hpp"
 #include "bored/executor/projection_executor.hpp"
 #include "bored/executor/foreign_key_check_executor.hpp"
 #include "bored/executor/unique_enforce_executor.hpp"
@@ -54,6 +55,7 @@
 #include <numeric>
 #include <cstring>
 #include <iomanip>
+#include <initializer_list>
 #include <stdexcept>
 #include <system_error>
 #include <optional>
@@ -685,6 +687,33 @@ std::string join_strings(const std::vector<std::string>& values, std::string_vie
         first = false;
     }
     return result;
+}
+
+std::string build_executor_pipeline_detail(std::string_view statement,
+                                           std::string_view root,
+                                           std::initializer_list<std::string_view> chain,
+                                           bool materialized)
+{
+    std::string detail = "executor.pipeline=";
+    detail.append(statement);
+    detail.append(" root=");
+    detail.append(root);
+    detail.append(" chain=");
+    if (chain.size() == 0U) {
+        detail.append("<none>");
+    } else {
+        bool first = true;
+        for (auto node : chain) {
+            if (!first) {
+                detail.append("->");
+            }
+            detail.append(node);
+            first = false;
+        }
+    }
+    detail.append(" materialized=");
+    detail.append(materialized ? "true" : "false");
+    return detail;
 }
 
 std::string_view logical_operator_kind_name(parser::relational::LogicalOperatorKind kind) noexcept
@@ -2731,17 +2760,26 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
                                           std::move(planner_result.diagnostics),
                                           "Planner produced unexpected physical operator for " + statement + ".");
     }
-    planner::PhysicalOperatorPtr leaf = plan_root->children().empty() ? planner::PhysicalOperatorPtr{}
-                                                                      : plan_root->children().front();
-    while (leaf &&
-           (leaf->type() == planner::PhysicalOperatorType::UniqueEnforce ||
-            leaf->type() == planner::PhysicalOperatorType::ForeignKeyCheck)) {
-        if (leaf->children().empty()) {
+    const planner::PhysicalOperator* current = nullptr;
+    if (!plan_root->children().empty() && plan_root->children().front()) {
+        current = plan_root->children().front().get();
+    }
+
+    bool requires_materialize_spool = false;
+    while (current &&
+           (current->type() == planner::PhysicalOperatorType::Materialize ||
+            current->type() == planner::PhysicalOperatorType::UniqueEnforce ||
+            current->type() == planner::PhysicalOperatorType::ForeignKeyCheck)) {
+        if (current->type() == planner::PhysicalOperatorType::Materialize) {
+            requires_materialize_spool = true;
+        }
+        if (current->children().empty() || !current->children().front()) {
             break;
         }
-        leaf = leaf->children().front();
+        current = current->children().front().get();
     }
-    if (!leaf || leaf->type() != planner::PhysicalOperatorType::SeqScan) {
+
+    if (!current || current->type() != planner::PhysicalOperatorType::SeqScan) {
         return make_planner_error_metrics(sql,
                                           std::move(planner_result.diagnostics),
                                           "Planner " + statement + " plan is missing SeqScan child.");
@@ -2751,6 +2789,7 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     details.plan = std::move(planner_result.plan);
     details.root_detail = std::string(root_label) + " (children=" + std::to_string(plan_root->children().size()) + ")";
     details.detail_lines = std::move(planner_result.diagnostics);
+    details.requires_materialize_spool = requires_materialize_spool;
     return details;
 }
 
@@ -2812,6 +2851,18 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
         return detail;
     };
 
+    bool requires_materialize_spool = false;
+    const planner::PhysicalOperator* cursor = plan_root.get();
+    while (cursor != nullptr) {
+        if (cursor->type() == planner::PhysicalOperatorType::Materialize) {
+            requires_materialize_spool = true;
+        }
+        if (cursor->children().empty() || !cursor->children().front()) {
+            break;
+        }
+        cursor = cursor->children().front().get();
+    }
+
     const planner::PhysicalOperator* execution_root = plan_root.get();
     if (execution_root->type() == planner::PhysicalOperatorType::Materialize && !execution_root->children().empty()) {
         execution_root = execution_root->children().front().get();
@@ -2842,6 +2893,7 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     details.plan = std::move(planner_result.plan);
     details.root_detail = std::move(root_detail);
     details.detail_lines = std::move(planner_result.diagnostics);
+    details.requires_materialize_spool = requires_materialize_spool;
     return details;
 }
 
@@ -3509,6 +3561,11 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
                                 plan_details.detail_lines.end());
+    const auto insert_pipeline = build_executor_pipeline_detail("INSERT",
+                                                                "Insert",
+                                                                {"Values"},
+                                                                plan_details.requires_materialize_spool);
+    metrics.detail_lines.push_back(insert_pipeline);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
                                 executor_detail_lines.end());
@@ -3915,6 +3972,13 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
                                                   std::optional<std::size_t>{0U});
     }
 
+    if (plan_details.requires_materialize_spool) {
+        bored::executor::SpoolExecutor::Config spool_config{};
+        spool_config.telemetry = &update_telemetry;
+        spool_config.telemetry_identifier = "shell.update.materialize";
+        update_input = std::make_unique<bored::executor::SpoolExecutor>(std::move(update_input), std::move(spool_config));
+    }
+
     ShellUpdateTarget update_target{table, storage_.get()};
     bored::executor::UpdateExecutor::Config update_config{};
     update_config.target = &update_target;
@@ -3948,6 +4012,14 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
                                 plan_details.detail_lines.end());
+    const auto update_chain = plan_details.requires_materialize_spool ?
+                                  std::initializer_list<std::string_view>{"Spool", "Projection", "Filter", "SeqScan"} :
+                                  std::initializer_list<std::string_view>{"Projection", "Filter", "SeqScan"};
+    const auto update_pipeline = build_executor_pipeline_detail("UPDATE",
+                                                                "Update",
+                                                                update_chain,
+                                                                plan_details.requires_materialize_spool);
+    metrics.detail_lines.push_back(update_pipeline);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
                                 executor_detail_lines.end());
@@ -4159,12 +4231,20 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     auto projection_node = std::make_unique<bored::executor::ProjectionExecutor>(std::move(filter_node),
                                                                                   std::move(projection_config));
 
+    bored::executor::ExecutorNodePtr delete_input = std::move(projection_node);
+    if (plan_details.requires_materialize_spool) {
+        bored::executor::SpoolExecutor::Config spool_config{};
+        spool_config.telemetry = &delete_telemetry;
+        spool_config.telemetry_identifier = "shell.delete.materialize";
+        delete_input = std::make_unique<bored::executor::SpoolExecutor>(std::move(delete_input), std::move(spool_config));
+    }
+
     ShellDeleteTarget delete_target{table, storage_.get()};
     bored::executor::DeleteExecutor::Config delete_config{};
     delete_config.target = &delete_target;
     delete_config.telemetry = &delete_telemetry;
 
-    bored::executor::DeleteExecutor delete_executor{std::move(projection_node), delete_config};
+    bored::executor::DeleteExecutor delete_executor{std::move(delete_input), delete_config};
 
     bored::executor::ExecutorContext executor_context{};
     executor_context.set_transaction_id(txn_context.id());
@@ -4190,6 +4270,14 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
                                 plan_details.detail_lines.end());
+    const auto delete_chain = plan_details.requires_materialize_spool ?
+                                  std::initializer_list<std::string_view>{"Spool", "Projection", "Filter", "SeqScan"} :
+                                  std::initializer_list<std::string_view>{"Projection", "Filter", "SeqScan"};
+    const auto delete_pipeline = build_executor_pipeline_detail("DELETE",
+                                                                "Delete",
+                                                                delete_chain,
+                                                                plan_details.requires_materialize_spool);
+    metrics.detail_lines.push_back(delete_pipeline);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
                                 executor_detail_lines.end());
@@ -4342,7 +4430,16 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     scan_config.relation_id = table->relation_id;
     scan_config.telemetry = &select_telemetry;
 
-    bored::executor::SequentialScanExecutor scan_executor{scan_config};
+    bored::executor::ExecutorNodePtr select_pipeline =
+        std::make_unique<bored::executor::SequentialScanExecutor>(scan_config);
+
+    if (plan_details.requires_materialize_spool) {
+        bored::executor::SpoolExecutor::Config spool_config{};
+        spool_config.telemetry = &select_telemetry;
+        spool_config.telemetry_identifier = "shell.select.materialize";
+        select_pipeline = std::make_unique<bored::executor::SpoolExecutor>(std::move(select_pipeline), std::move(spool_config));
+    }
+
     bored::executor::ExecutorContext executor_context{};
     executor_context.set_transaction_id(txn_context.id());
     executor_context.set_snapshot(txn_context.snapshot());
@@ -4350,31 +4447,32 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     bored::executor::TupleBuffer executor_buffer{};
 
     std::vector<std::vector<ScalarValue>> materialized_rows;
-    scan_executor.open(executor_context);
-    while (scan_executor.next(executor_context, executor_buffer)) {
+    auto* executor_root = select_pipeline.get();
+    executor_root->open(executor_context);
+    while (executor_root->next(executor_context, executor_buffer)) {
         auto tuple_view = bored::executor::TupleView::from_buffer(executor_buffer);
         if (!tuple_view.valid() || tuple_view.column_count() < 2U) {
-            scan_executor.close(executor_context);
+            executor_root->close(executor_context);
             return release_and_return(make_error_metrics(sql, "Executor returned invalid tuple payload."));
         }
 
         const auto payload_column = tuple_view.column(1U);
         if (payload_column.is_null) {
-            scan_executor.close(executor_context);
+            executor_root->close(executor_context);
             return release_and_return(make_error_metrics(sql, "Executor returned null tuple payload."));
         }
 
         std::uint64_t row_id = 0U;
         std::vector<ScalarValue> decoded_values;
         if (!decode_row_payload(*table, payload_column.data, row_id, decoded_values)) {
-            scan_executor.close(executor_context);
+            executor_root->close(executor_context);
             return release_and_return(make_error_metrics(sql, "Failed to decode tuple payload."));
         }
 
         materialized_rows.push_back(std::move(decoded_values));
         executor_buffer.reset();
     }
-    scan_executor.close(executor_context);
+    executor_root->close(executor_context);
 
     std::vector<std::size_t> order(materialized_rows.size());
     std::iota(order.begin(), order.end(), 0U);
@@ -4429,6 +4527,14 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 plan_details.detail_lines.begin(),
                                 plan_details.detail_lines.end());
+    const auto select_chain = plan_details.requires_materialize_spool ?
+                                   std::initializer_list<std::string_view>{"SeqScan"} :
+                                   std::initializer_list<std::string_view>{};
+    const auto select_pipeline_detail = build_executor_pipeline_detail("SELECT",
+                                                                       plan_details.requires_materialize_spool ? "Spool" : "SeqScan",
+                                                                       select_chain,
+                                                                       plan_details.requires_materialize_spool);
+    metrics.detail_lines.push_back(select_pipeline_detail);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
                                 executor_detail_lines.end());

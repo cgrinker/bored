@@ -144,6 +144,7 @@ private:
         std::string root_detail{};
         std::vector<std::string> detail_lines{};
         planner::PhysicalPlan plan{};
+        bool requires_materialize_spool = false;
     };
 
     struct UniqueConstraintPlan final {

@@ -127,7 +127,7 @@ TEST_CASE("SpoolExecutor materialises child rows once")
     CHECK(child_ptr->produced_count() == rows.size());
 
     const auto snapshot = telemetry.snapshot();
-    CHECK(snapshot.spool_latency.invocations == rows.size());
+    CHECK(snapshot.spool_latency.invocations == rows.size() + 1U);
     CHECK(snapshot.spool_latency.total_duration_ns >= snapshot.spool_latency.last_duration_ns);
 
     // Re-open should replay cached rows without re-reading the child.

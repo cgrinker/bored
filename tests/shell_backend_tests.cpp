@@ -39,7 +39,7 @@ struct ShellBackendHarness final {
 
 }  // namespace
 
-TEST_CASE("ShellBackend emits executor stub diagnostics for SELECT")
+TEST_CASE("ShellBackend emits executor pipeline diagnostics for SELECT")
 {
     ShellBackendHarness harness;
 
@@ -63,11 +63,13 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for SELECT")
     });
     REQUIRE(root_it != metrics.detail_lines.end());
 
-    auto stub_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
-        return starts_with(line, "executor.stub=SELECT pipeline ready");
+    auto pipeline_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "executor.pipeline=SELECT");
     });
-    REQUIRE(stub_it != metrics.detail_lines.end());
-    CHECK_THAT(*stub_it, ContainsSubstring("Projection"));
+    REQUIRE(pipeline_it != metrics.detail_lines.end());
+    CHECK_THAT(*pipeline_it, ContainsSubstring("root=SeqScan"));
+    CHECK_THAT(*pipeline_it, ContainsSubstring("chain=<none>"));
+    CHECK_THAT(*pipeline_it, ContainsSubstring("materialized=false"));
 
     auto plan_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "executor.plan:");
@@ -75,12 +77,12 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for SELECT")
     REQUIRE(plan_it != metrics.detail_lines.end());
 
     CHECK(std::distance(metrics.detail_lines.begin(), root_it) <
-          std::distance(metrics.detail_lines.begin(), stub_it));
+          std::distance(metrics.detail_lines.begin(), pipeline_it));
     CHECK(std::distance(metrics.detail_lines.begin(), logical_root_it) <
           std::distance(metrics.detail_lines.begin(), root_it));
 }
 
-TEST_CASE("ShellBackend emits executor stub diagnostics for INSERT")
+TEST_CASE("ShellBackend emits executor pipeline diagnostics for INSERT")
 {
     ShellBackendHarness harness;
 
@@ -101,11 +103,13 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for INSERT")
     REQUIRE(root_it != metrics.detail_lines.end());
     CHECK_THAT(*root_it, ContainsSubstring("Insert"));
 
-    auto stub_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
-        return starts_with(line, "executor.stub=INSERT pipeline ready");
+    auto pipeline_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "executor.pipeline=INSERT");
     });
-    REQUIRE(stub_it != metrics.detail_lines.end());
-    CHECK_THAT(*stub_it, ContainsSubstring("root=Insert"));
+    REQUIRE(pipeline_it != metrics.detail_lines.end());
+    CHECK_THAT(*pipeline_it, ContainsSubstring("root=Insert"));
+    CHECK_THAT(*pipeline_it, ContainsSubstring("chain=Values"));
+    CHECK_THAT(*pipeline_it, ContainsSubstring("materialized=false"));
 
     auto plan_line_count = std::count_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "executor.plan:");
@@ -115,7 +119,7 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for INSERT")
           std::distance(metrics.detail_lines.begin(), root_it));
 }
 
-TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
+TEST_CASE("ShellBackend emits executor pipeline diagnostics for UPDATE")
 {
     ShellBackendHarness harness;
 
@@ -135,12 +139,13 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
     REQUIRE(planner_it != metrics.detail_lines.end());
     CHECK_THAT(*planner_it, ContainsSubstring("Update"));
 
-    auto stub_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
-        return starts_with(line, "executor.stub=UPDATE pipeline ready");
+    auto pipeline_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "executor.pipeline=UPDATE");
     });
-    REQUIRE(stub_it != metrics.detail_lines.end());
-    CHECK_THAT(*stub_it, ContainsSubstring("root=Update"));
-    CHECK_THAT(*stub_it, ContainsSubstring("SeqScan"));
+    REQUIRE(pipeline_it != metrics.detail_lines.end());
+    CHECK_THAT(*pipeline_it, ContainsSubstring("root=Update"));
+    CHECK_THAT(*pipeline_it, ContainsSubstring("chain=Projection->Filter->SeqScan"));
+    CHECK_THAT(*pipeline_it, ContainsSubstring("materialized=false"));
 
     auto plan_line_count = std::count_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "executor.plan:");
@@ -149,10 +154,10 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for UPDATE")
     CHECK(std::distance(metrics.detail_lines.begin(), logical_it) <
           std::distance(metrics.detail_lines.begin(), planner_it));
     CHECK(std::distance(metrics.detail_lines.begin(), planner_it) <
-          std::distance(metrics.detail_lines.begin(), stub_it));
+          std::distance(metrics.detail_lines.begin(), pipeline_it));
 }
 
-TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
+TEST_CASE("ShellBackend emits executor pipeline diagnostics for DELETE")
 {
     ShellBackendHarness harness;
 
@@ -173,11 +178,13 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
     REQUIRE(planner_it != metrics.detail_lines.end());
     CHECK_THAT(*planner_it, ContainsSubstring("Delete"));
 
-    auto stub_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
-        return starts_with(line, "executor.stub=DELETE pipeline ready");
+    auto pipeline_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
+        return starts_with(line, "executor.pipeline=DELETE");
     });
-    REQUIRE(stub_it != metrics.detail_lines.end());
-    CHECK_THAT(*stub_it, ContainsSubstring("root=Delete"));
+    REQUIRE(pipeline_it != metrics.detail_lines.end());
+    CHECK_THAT(*pipeline_it, ContainsSubstring("root=Delete"));
+    CHECK_THAT(*pipeline_it, ContainsSubstring("chain=Projection->Filter->SeqScan"));
+    CHECK_THAT(*pipeline_it, ContainsSubstring("materialized=false"));
 
     auto plan_it = std::find_if(metrics.detail_lines.begin(), metrics.detail_lines.end(), [](const std::string& line) {
         return starts_with(line, "executor.plan:");
@@ -186,7 +193,7 @@ TEST_CASE("ShellBackend emits executor stub diagnostics for DELETE")
     CHECK(std::distance(metrics.detail_lines.begin(), logical_it) <
           std::distance(metrics.detail_lines.begin(), planner_it));
     CHECK(std::distance(metrics.detail_lines.begin(), planner_it) <
-          std::distance(metrics.detail_lines.begin(), stub_it));
+          std::distance(metrics.detail_lines.begin(), pipeline_it));
 }
 
 TEST_CASE("ShellBackend executes DML statements when preceded by comments")

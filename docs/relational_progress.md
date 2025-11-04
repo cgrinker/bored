@@ -4,7 +4,7 @@ This ticket-level report summarizes the relational engine roadmap, capturing wha
 
 _Last updated: 2025-11-04_
 
-Latest validation: Release `ctest` (428/428) on 2025-11-04 after adding materialize spool alternatives for shared CTE producers.
+Latest validation: Release `ctest` (430/430) on 2025-11-04 after wiring executor pipeline diagnostics for spool-aware plans and refreshing spool telemetry expectations.
 
 ## Current Capabilities
 
@@ -59,13 +59,13 @@ Latest validation: Release `ctest` (428/428) on 2025-11-04 after adding material
    - [x] Executor: Implement uniqueness checks (indexes + deferred validation) and referential integrity probes with transactional awareness.
    - [x] Shell: Apply constraint enforcement to INSERT/UPDATE pipelines using planner metadata and simulated index probes.
 
-4. **CTE Enablement (Planned)**
+4. **CTE Enablement (In progress)**
    - Parser/AST: ✅ Non-recursive WITH clause grammar and nodes merged; recursive support remains future work.
    - Planner: ✅ Memo deduplicates non-recursive CTE producers, tracks reusable groups, and injects materialize/spool alternatives so the cost model can compare inline versus reuse plans.
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
-   - Executor: Spool executor in place; extend worktable infrastructure for recursive CTEs and integrate with snapshot visibility guarantees.
-   - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp
-   - Next work item: Hook spool executor into shell pipelines and complete snapshot-aware worktable iterators.
+   - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines now wrap planner materialize nodes with spool-backed iterators; shell diagnostics surface executor pipeline chains and spool telemetry tests account for terminal reads. Remaining: extend worktable infrastructure for recursive CTEs and integrate with snapshot visibility guarantees.
+   - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp
+   - Next work item: Prototype snapshot-aware worktable iterators, including spool worktable reuse across recursive CTE seeds, and add crash/restart drills that exercise spool-backed SELECT/UPDATE/DELETE pipelines.
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.
