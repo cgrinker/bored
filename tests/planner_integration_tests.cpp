@@ -154,3 +154,44 @@ TEST_CASE("planner integration executes update pipeline with snapshot")
     CHECK(physical_snapshot.xmin == 40U);
     CHECK(physical_snapshot.xmax == 60U);
 }
+
+TEST_CASE("planner integration handles nested projections from CTE inlining")
+{
+    auto scan = make_table_scan("public.inventory", 500U, {"id", "quantity"});
+
+    bored::planner::LogicalProperties base_projection_props{};
+    base_projection_props.output_columns = {"id"};
+    base_projection_props.estimated_cardinality = 500U;
+
+    auto cte_projection = LogicalOperator::make(
+        LogicalOperatorType::Projection,
+        std::vector<LogicalOperatorPtr>{scan},
+        base_projection_props);
+
+    bored::planner::LogicalProperties outer_projection_props{};
+    outer_projection_props.output_columns = {"id"};
+    outer_projection_props.estimated_cardinality = 500U;
+
+    auto outer_projection = LogicalOperator::make(
+        LogicalOperatorType::Projection,
+        std::vector<LogicalOperatorPtr>{cte_projection},
+        outer_projection_props);
+
+    LogicalPlan plan{outer_projection};
+
+    PlannerContextConfig config{};
+    PlannerContext context{config};
+
+    PlannerResult result = plan_query(context, plan);
+    REQUIRE(result.plan.root());
+
+    SmokeExecutor executor;
+    auto sequence = executor.execute(result.plan);
+    REQUIRE(sequence.size() == 2U);
+    CHECK(sequence[0] == PhysicalOperatorType::Projection);
+    CHECK(sequence[1] == PhysicalOperatorType::SeqScan);
+
+    const auto& root_props = result.plan.root()->properties();
+    REQUIRE(root_props.output_columns.size() == 1U);
+    CHECK(root_props.output_columns.front() == "id");
+}
