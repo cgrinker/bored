@@ -45,6 +45,7 @@ struct ExecutorTelemetrySnapshot final {
     OperatorLatencySnapshot seq_scan_latency{};
     OperatorLatencySnapshot filter_latency{};
     OperatorLatencySnapshot projection_latency{};
+    OperatorLatencySnapshot spool_latency{};
     OperatorLatencySnapshot nested_loop_latency{};
     OperatorLatencySnapshot hash_join_latency{};
     OperatorLatencySnapshot aggregation_latency{};
@@ -59,6 +60,7 @@ public:
         SeqScan = 0,
         Filter,
         Projection,
+    Spool,
         NestedLoopJoin,
         HashJoin,
         Aggregation,

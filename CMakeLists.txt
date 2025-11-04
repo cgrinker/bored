@@ -87,6 +87,7 @@ add_library(${PROJECT_NAME}_lib
     src/executor/seq_scan_executor.cpp
     src/executor/filter_executor.cpp
     src/executor/projection_executor.cpp
+    src/executor/spool_executor.cpp
     src/executor/nested_loop_join_executor.cpp
     src/executor/hash_join_executor.cpp
     src/executor/aggregation_executor.cpp
@@ -274,6 +275,7 @@ if(BORED_ENABLE_TESTS)
     tests/executor_update_tests.cpp
     tests/executor_dml_recovery_tests.cpp
     tests/executor_temp_resource_manager_tests.cpp
+    tests/executor_spool_tests.cpp
     tests/executor_spill_recovery_integration_tests.cpp
     tests/executor_join_aggregate_integration_tests.cpp
         tests/executor_milestone1_tests.cpp

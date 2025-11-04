@@ -284,12 +284,13 @@ executor::ExecutorTelemetrySnapshot make_executor(std::uint64_t seed)
     snapshot.seq_scan_latency = make_latency(seed);
     snapshot.filter_latency = make_latency(seed + 10U);
     snapshot.projection_latency = make_latency(seed + 20U);
-    snapshot.nested_loop_latency = make_latency(seed + 30U);
-    snapshot.hash_join_latency = make_latency(seed + 40U);
-    snapshot.aggregation_latency = make_latency(seed + 50U);
-    snapshot.insert_latency = make_latency(seed + 60U);
-    snapshot.update_latency = make_latency(seed + 70U);
-    snapshot.delete_latency = make_latency(seed + 80U);
+    snapshot.spool_latency = make_latency(seed + 30U);
+    snapshot.nested_loop_latency = make_latency(seed + 40U);
+    snapshot.hash_join_latency = make_latency(seed + 50U);
+    snapshot.aggregation_latency = make_latency(seed + 60U);
+    snapshot.insert_latency = make_latency(seed + 70U);
+    snapshot.update_latency = make_latency(seed + 80U);
+    snapshot.delete_latency = make_latency(seed + 90U);
     return snapshot;
 }
 
@@ -404,6 +405,10 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.executors.total.seq_scan_latency.invocations == ((2U + 1U) + (5U + 1U)));
     REQUIRE(doc.executors.total.seq_scan_latency.total_duration_ns == ((2U + 2U) * 10U + (5U + 2U) * 10U));
     REQUIRE(doc.executors.total.seq_scan_latency.last_duration_ns == std::max((2U + 3U) * 5U, (5U + 3U) * 5U));
+    REQUIRE(doc.executors.total.spool_latency.invocations == ((2U + 30U + 1U) + (5U + 30U + 1U)));
+    REQUIRE(doc.executors.total.spool_latency.total_duration_ns == ((2U + 30U + 2U) * 10U + (5U + 30U + 2U) * 10U));
+    REQUIRE(doc.executors.total.spool_latency.last_duration_ns ==
+        std::max((2U + 30U + 3U) * 5U, (5U + 30U + 3U) * 5U));
     REQUIRE(doc.collected_at.time_since_epoch().count() != 0);
 
     REQUIRE(doc.page_managers.details.front().identifier == "pm_a");
@@ -425,6 +430,7 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.executors.details.front().identifier == "exec_a");
     REQUIRE(doc.executors.details.back().identifier == "exec_b");
     REQUIRE(doc.executors.details.front().snapshot.seq_scan_latency.invocations == (2U + 1U));
+    REQUIRE(doc.executors.details.front().snapshot.spool_latency.invocations == (2U + 30U + 1U));
     REQUIRE(doc.last_checkpoint_lsn == doc.checkpoints.total.last_checkpoint_lsn);
     REQUIRE(doc.outstanding_replay_backlog_bytes == doc.recovery.total.last_replay_backlog_bytes);
 }
@@ -529,6 +535,7 @@ TEST_CASE("storage_diagnostics_to_json serialises expected fields")
     REQUIRE(json.find("\"nested_loop_rows_compared\"") != std::string::npos);
     REQUIRE(json.find("\"hash_join_build_rows\"") != std::string::npos);
     REQUIRE(json.find("\"aggregation_groups_emitted\"") != std::string::npos);
+    REQUIRE(json.find("\"spool_latency\"") != std::string::npos);
     REQUIRE(json.find("\"mutation_attempts\"") != std::string::npos);
     REQUIRE(json.find("\"schema_version\"") != std::string::npos);
     REQUIRE(json.find("\"outstanding_replay_backlog_bytes\"") != std::string::npos);

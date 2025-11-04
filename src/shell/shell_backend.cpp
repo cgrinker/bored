@@ -656,6 +656,8 @@ std::string_view physical_operator_name(planner::PhysicalOperatorType type) noex
         return "HashJoin";
     case PhysicalOperatorType::Values:
         return "Values";
+    case PhysicalOperatorType::Materialize:
+        return "Materialize";
     case PhysicalOperatorType::Insert:
         return "Insert";
     case PhysicalOperatorType::Update:
@@ -2798,22 +2800,43 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
                                           "Failed to plan SELECT statement.");
     }
 
-    std::string root_detail;
-    if (plan_root->type() == planner::PhysicalOperatorType::Projection) {
-        if (plan_root->children().empty() ||
-            plan_root->children().front()->type() != planner::PhysicalOperatorType::SeqScan) {
+    const auto describe_node = [](const planner::PhysicalOperator& node) {
+        std::string detail = std::string(physical_operator_name(node.type()));
+        detail.append(" (children=");
+        detail.append(std::to_string(node.children().size()));
+        if (!node.children().empty() && node.children().front()) {
+            detail.append(" first_child=");
+            detail.append(physical_operator_name(node.children().front()->type()));
+        }
+        detail.push_back(')');
+        return detail;
+    };
+
+    const planner::PhysicalOperator* execution_root = plan_root.get();
+    if (execution_root->type() == planner::PhysicalOperatorType::Materialize && !execution_root->children().empty()) {
+        execution_root = execution_root->children().front().get();
+    }
+
+    if (execution_root == nullptr) {
+        return make_planner_error_metrics(sql,
+                                          std::move(planner_result.diagnostics),
+                                          "Planner produced an empty SELECT plan.");
+    }
+
+    if (execution_root->type() == planner::PhysicalOperatorType::Projection) {
+        const auto& projection_children = execution_root->children();
+        if (projection_children.empty() || projection_children.front()->type() != planner::PhysicalOperatorType::SeqScan) {
             return make_planner_error_metrics(sql,
                                               std::move(planner_result.diagnostics),
                                               "Planner SELECT plan is missing SeqScan child.");
         }
-        root_detail = "Projection (children=" + std::to_string(plan_root->children().size()) + ")";
-    } else if (plan_root->type() == planner::PhysicalOperatorType::SeqScan) {
-        root_detail = "SeqScan (children=" + std::to_string(plan_root->children().size()) + ")";
-    } else {
+    } else if (execution_root->type() != planner::PhysicalOperatorType::SeqScan) {
         return make_planner_error_metrics(sql,
                                           std::move(planner_result.diagnostics),
                                           "Planner produced unexpected physical operator for SELECT.");
     }
+
+    std::string root_detail = describe_node(*plan_root);
 
     PlannerPlanDetails details{};
     details.plan = std::move(planner_result.plan);

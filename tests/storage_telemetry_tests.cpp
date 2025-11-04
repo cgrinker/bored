@@ -290,12 +290,13 @@ executor::ExecutorTelemetrySnapshot make_executor_snapshot(std::uint64_t seed)
     snapshot.seq_scan_latency = make_latency(seed);
     snapshot.filter_latency = make_latency(seed + 10U);
     snapshot.projection_latency = make_latency(seed + 20U);
-    snapshot.nested_loop_latency = make_latency(seed + 30U);
-    snapshot.hash_join_latency = make_latency(seed + 40U);
-    snapshot.aggregation_latency = make_latency(seed + 50U);
-    snapshot.insert_latency = make_latency(seed + 60U);
-    snapshot.update_latency = make_latency(seed + 70U);
-    snapshot.delete_latency = make_latency(seed + 80U);
+    snapshot.spool_latency = make_latency(seed + 30U);
+    snapshot.nested_loop_latency = make_latency(seed + 40U);
+    snapshot.hash_join_latency = make_latency(seed + 50U);
+    snapshot.aggregation_latency = make_latency(seed + 60U);
+    snapshot.insert_latency = make_latency(seed + 70U);
+    snapshot.update_latency = make_latency(seed + 80U);
+    snapshot.delete_latency = make_latency(seed + 90U);
     return snapshot;
 }
 
@@ -584,6 +585,10 @@ TEST_CASE("StorageTelemetryRegistry aggregates executor telemetry")
     REQUIRE(total.seq_scan_latency.invocations == ((2U + 1U) + (5U + 1U)));
     REQUIRE(total.seq_scan_latency.total_duration_ns == ((2U + 2U) * 10U + (5U + 2U) * 10U));
     REQUIRE(total.seq_scan_latency.last_duration_ns == std::max((2U + 3U) * 5U, (5U + 3U) * 5U));
+    REQUIRE(total.spool_latency.invocations == ((2U + 30U + 1U) + (5U + 30U + 1U)));
+    REQUIRE(total.spool_latency.total_duration_ns == ((2U + 30U + 2U) * 10U + (5U + 30U + 2U) * 10U));
+    REQUIRE(total.spool_latency.last_duration_ns ==
+        std::max((2U + 30U + 3U) * 5U, (5U + 30U + 3U) * 5U));
 }
 
 TEST_CASE("StorageTelemetryRegistry visits executor samplers")

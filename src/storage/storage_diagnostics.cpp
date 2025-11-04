@@ -482,6 +482,7 @@ void append_executor_snapshot(std::string& out, const bored::executor::ExecutorT
     append_latency("seq_scan_latency", snapshot.seq_scan_latency);
     append_latency("filter_latency", snapshot.filter_latency);
     append_latency("projection_latency", snapshot.projection_latency);
+    append_latency("spool_latency", snapshot.spool_latency);
     append_latency("nested_loop_latency", snapshot.nested_loop_latency);
     append_latency("hash_join_latency", snapshot.hash_join_latency);
     append_latency("aggregation_latency", snapshot.aggregation_latency);

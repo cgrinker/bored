@@ -26,13 +26,13 @@ Latest validation: Release `ctest` (428/428) on 2025-11-04 after adding material
 | Key/foreign constraints | **Available (shell integration)** | Catalog metadata, planner & executor enforcement, and bored_shell INSERT/UPDATE pipelines enforcing PRIMARY KEY/UNIQUE/FOREIGN KEY checks. |
 | Auto-incrementing primary keys | **In progress** | Sequence allocator now stages transactional `next_value` updates with tests; planner/executor integration remains. |
 | Join execution | **Available** | Logical lowering, planner, and executor support nested-loop and hash joins with tests covering join predicates and pipelines. |
-| Common table expressions (CTEs) | **In progress** | Parser/AST and binder accept non-recursive WITH clauses; lowering now inlines CTE producers with regression coverage for nested projections; planner memo deduplicates reusable producers and injects materialize/spool alternatives while executor materialization remains pending. |
+| Common table expressions (CTEs) | **In progress** | Parser/AST and binder accept non-recursive WITH clauses; lowering now inlines CTE producers with regression coverage for nested projections; planner memo deduplicates reusable producers and injects materialize/spool alternatives while executor worktable integration remains. |
 
 ## Gaps to Close
 
 1. **Constraint Enforcement**: Finish catalog DDL plumbing for constraint creation/drop and surface richer shell diagnostics for violations now that enforcement is active.
 2. **Sequence/Identity Support**: Wire planner/executor and DDL verbs to consume the transactional sequence allocator so auto-increment columns surface to users.
-3. **CTE Parsing & Execution**: Planner memo now deduplicates non-recursive CTE producers; finish introducing materialization/spool alternatives and executor support with snapshot-aware iterators.
+3. **CTE Parsing & Execution**: Planner memo now deduplicates non-recursive CTE producers; spool executor is available but needs worktable integration with snapshot-aware iterators and shell wiring.
 4. **Transaction Visibility**: Finish Transaction & Concurrency Milestone 1 to provide consistent snapshots across planner/executor and integrate with retention manager for snapshot retirement.
 5. **Optimizer Enhancements**: Broaden rule set, add cost-based join order selection, and integrate catalog statistics for selectivity estimates.
 6. **Index DDL Integration**: Surface index creation options (unique, covering, partial) and ensure planner/executor leverage indexes for predicates and joins.
@@ -63,9 +63,9 @@ Latest validation: Release `ctest` (428/428) on 2025-11-04 after adding material
    - Parser/AST: ✅ Non-recursive WITH clause grammar and nodes merged; recursive support remains future work.
    - Planner: ✅ Memo deduplicates non-recursive CTE producers, tracks reusable groups, and injects materialize/spool alternatives so the cost model can compare inline versus reuse plans.
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
-   - Executor: Provide worktable infrastructure for recursive CTEs and integrate with snapshot visibility.
-   - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp
-   - Next work item: Wire materialize/spool nodes into executor worktable infrastructure with snapshot-aware iterators.
+   - Executor: Spool executor in place; extend worktable infrastructure for recursive CTEs and integrate with snapshot visibility guarantees.
+   - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp
+   - Next work item: Hook spool executor into shell pipelines and complete snapshot-aware worktable iterators.
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.

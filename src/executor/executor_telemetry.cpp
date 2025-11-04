@@ -175,6 +175,7 @@ ExecutorTelemetrySnapshot ExecutorTelemetry::snapshot() const noexcept
     snapshot.seq_scan_latency = make_latency_snapshot(Operator::SeqScan);
     snapshot.filter_latency = make_latency_snapshot(Operator::Filter);
     snapshot.projection_latency = make_latency_snapshot(Operator::Projection);
+    snapshot.spool_latency = make_latency_snapshot(Operator::Spool);
     snapshot.nested_loop_latency = make_latency_snapshot(Operator::NestedLoopJoin);
     snapshot.hash_join_latency = make_latency_snapshot(Operator::HashJoin);
     snapshot.aggregation_latency = make_latency_snapshot(Operator::Aggregation);

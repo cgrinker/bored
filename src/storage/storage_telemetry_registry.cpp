@@ -345,6 +345,7 @@ bored::executor::ExecutorTelemetrySnapshot& accumulate(bored::executor::Executor
     accumulate_latency(target.seq_scan_latency, source.seq_scan_latency);
     accumulate_latency(target.filter_latency, source.filter_latency);
     accumulate_latency(target.projection_latency, source.projection_latency);
+    accumulate_latency(target.spool_latency, source.spool_latency);
     accumulate_latency(target.nested_loop_latency, source.nested_loop_latency);
     accumulate_latency(target.hash_join_latency, source.hash_join_latency);
     accumulate_latency(target.aggregation_latency, source.aggregation_latency);
