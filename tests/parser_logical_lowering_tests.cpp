@@ -208,3 +208,72 @@ TEST_CASE("lowering builds join pipeline", "[parser][logical_lowering]")
     REQUIRE(right_scan->table.table_alias.has_value());
     CHECK(*right_scan->table.table_alias == "shp");
 }
+
+TEST_CASE("lowering inlines simple CTE", "[parser][logical_lowering]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    const std::string sql =
+        "WITH items AS (SELECT inventory.id FROM sales.inventory AS inventory WHERE inventory.quantity > 0) "
+        "SELECT items.id FROM items;";
+
+    auto lowering = lower_sql(sql, catalog_adapter);
+    REQUIRE(lowering.success());
+    REQUIRE(lowering.plan != nullptr);
+
+    auto* outer_project = dynamic_cast<relational::LogicalProject*>(lowering.plan.get());
+    REQUIRE(outer_project != nullptr);
+    REQUIRE(outer_project->input != nullptr);
+    REQUIRE(outer_project->output_schema.size() == 1U);
+    CHECK(outer_project->output_schema.front().name == "items.id");
+
+    auto* inner_project = dynamic_cast<relational::LogicalProject*>(outer_project->input.get());
+    REQUIRE(inner_project != nullptr);
+    REQUIRE(inner_project->input != nullptr);
+    REQUIRE(inner_project->output_schema.size() == 1U);
+
+    auto* filter = dynamic_cast<relational::LogicalFilter*>(inner_project->input.get());
+    REQUIRE(filter != nullptr);
+    REQUIRE(filter->input != nullptr);
+    CHECK(filter->predicate != nullptr);
+
+    auto* scan = dynamic_cast<relational::LogicalScan*>(filter->input.get());
+    REQUIRE(scan != nullptr);
+    CHECK(scan->table.table_name == "inventory");
+}
+
+TEST_CASE("lowering allows chained CTE references", "[parser][logical_lowering]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    const std::string sql =
+        "WITH base AS (SELECT inventory.id FROM sales.inventory AS inventory WHERE inventory.quantity > 0), "
+        "final AS (SELECT base.id FROM base) "
+        "SELECT final.id FROM final;";
+
+    auto lowering = lower_sql(sql, catalog_adapter);
+    REQUIRE(lowering.success());
+    REQUIRE(lowering.plan != nullptr);
+
+    auto* outer_project = dynamic_cast<relational::LogicalProject*>(lowering.plan.get());
+    REQUIRE(outer_project != nullptr);
+    REQUIRE(outer_project->input != nullptr);
+
+    auto* middle_project = dynamic_cast<relational::LogicalProject*>(outer_project->input.get());
+    REQUIRE(middle_project != nullptr);
+    REQUIRE(middle_project->input != nullptr);
+
+    auto* inner_project = dynamic_cast<relational::LogicalProject*>(middle_project->input.get());
+    REQUIRE(inner_project != nullptr);
+    REQUIRE(inner_project->input != nullptr);
+
+    auto* filter = dynamic_cast<relational::LogicalFilter*>(inner_project->input.get());
+    REQUIRE(filter != nullptr);
+    REQUIRE(filter->input != nullptr);
+
+    auto* scan = dynamic_cast<relational::LogicalScan*>(filter->input.get());
+    REQUIRE(scan != nullptr);
+    CHECK(scan->table.table_name == "inventory");
+}

@@ -1,7 +1,11 @@
 #include "bored/parser/relational/logical_lowering.hpp"
 
+#include <cctype>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace bored::parser::relational {
@@ -21,6 +25,16 @@ std::string projection_label(const SelectItem& item, std::size_t index)
     std::ostringstream stream;
     stream << "column_" << (index + 1U);
     return stream.str();
+}
+
+std::string normalise_identifier(std::string_view text)
+{
+    std::string result;
+    result.reserve(text.size());
+    for (char ch : text) {
+        result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return result;
 }
 
 std::vector<LogicalColumn> propagate_schema(const LogicalOperatorPtr& input)
@@ -45,6 +59,17 @@ public:
         : statement_(statement)
         , config_(config)
     {
+        if (statement_.with != nullptr) {
+            for (auto* cte : statement_.with->expressions) {
+                if (cte == nullptr) {
+                    continue;
+                }
+                const auto key = normalise_identifier(cte->name.value);
+                if (!key.empty()) {
+                    cte_definitions_.emplace(key, cte);
+                }
+            }
+        }
     }
 
     LoweringResult run()
@@ -173,9 +198,19 @@ private:
                 return nullptr;
             }
 
-            auto scan = std::make_unique<LogicalScan>();
-            scan->table = *table->binding;
-            table_nodes[index] = std::move(scan);
+            LogicalOperatorPtr node;
+            const auto table_key = normalise_identifier(table->binding->table_name);
+            if (cte_definitions_.find(table_key) != cte_definitions_.end()) {
+                node = lower_cte_reference(*table, result);
+            } else {
+                auto scan = std::make_unique<LogicalScan>();
+                scan->table = *table->binding;
+                node = std::move(scan);
+            }
+            if (node == nullptr) {
+                return nullptr;
+            }
+            table_nodes[index] = std::move(node);
         }
 
         const auto make_reference_error = [&](std::string message) -> LogicalOperatorPtr {
@@ -315,6 +350,60 @@ private:
 
     const SelectStatement& statement_;
     const LoweringConfig& config_;
+    std::unordered_map<std::string, const CommonTableExpression*> cte_definitions_{};
+    std::unordered_set<std::string> active_ctes_{};
+
+    LogicalOperatorPtr lower_cte_reference(const TableReference& table, LoweringResult& result)
+    {
+        if (!table.binding.has_value()) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "CTE reference is missing binding information";
+            diagnostic.remediation_hints = {
+                "Ensure the binder resolves WITH clause references before lowering."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return nullptr;
+        }
+
+        const auto& binding = *table.binding;
+        const auto key = normalise_identifier(binding.table_name);
+        auto it = cte_definitions_.find(key);
+        if (it == cte_definitions_.end()) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "CTE '" + binding.table_name + "' is not available during lowering";
+            diagnostic.remediation_hints = {
+                "Verify the WITH clause defines the referenced CTE before it is used."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return nullptr;
+        }
+
+        if (active_ctes_.count(key) != 0U) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "Recursive CTE reference '" + binding.table_name + "' is not supported";
+            diagnostic.remediation_hints = {
+                "Rewrite the query to avoid referencing a CTE within its own definition."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return nullptr;
+        }
+
+        const auto* cte = it->second;
+        if (cte == nullptr || cte->query == nullptr) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "CTE '" + binding.table_name + "' has an empty query body";
+            diagnostic.remediation_hints = {
+                "Provide a SELECT statement inside the CTE definition."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return nullptr;
+        }
+
+        active_ctes_.insert(key);
+        auto plan = lower_query(*cte->query, result);
+        active_ctes_.erase(key);
+        return plan;
+    }
 };
 
 }  // namespace
