@@ -68,6 +68,12 @@ struct kw_view : keyword<'V', 'I', 'E', 'W'> {
 struct kw_select : keyword<'S', 'E', 'L', 'E', 'C', 'T'> {
 };
 
+struct kw_with : keyword<'W', 'I', 'T', 'H'> {
+};
+
+struct kw_recursive : keyword<'R', 'E', 'C', 'U', 'R', 'S', 'I', 'V', 'E'> {
+};
+
 struct kw_distinct : keyword<'D', 'I', 'S', 'T', 'I', 'N', 'C', 'T'> {
 };
 
@@ -1199,7 +1205,106 @@ struct SelectParseState final {
     relational::BinaryOperator pending_operator = relational::BinaryOperator::Equal;
     bool has_pending_operator = false;
     relational::QualifiedName star_qualifier{};
+    struct QueryContextSnapshot final {
+        relational::QuerySpecification* query = nullptr;
+        relational::SelectItem* current_select_item = nullptr;
+        relational::TableReference* current_table = nullptr;
+        std::size_t current_table_index = 0U;
+        std::size_t last_table_index = 0U;
+        bool has_last_table = false;
+        std::optional<std::size_t> last_join_index{};
+        relational::JoinType join_type_override = relational::JoinType::Inner;
+        bool join_type_override_set = false;
+        std::optional<PendingJoin> pending_join{};
+        relational::Expression* pending_join_predicate = nullptr;
+        relational::OrderByItem* current_order_item = nullptr;
+        relational::LimitClause* limit_clause = nullptr;
+        std::vector<relational::Expression*> expression_stack{};
+        relational::BinaryOperator pending_operator = relational::BinaryOperator::Equal;
+        bool has_pending_operator = false;
+        relational::QualifiedName star_qualifier{};
+    };
+    std::vector<QueryContextSnapshot> context_stack{};
+    relational::WithClause* with_clause = nullptr;
+    relational::CommonTableExpression* current_cte = nullptr;
+    bool in_cte_column_list = false;
 };
+
+void reset_query_context(SelectParseState& state)
+{
+    state.current_select_item = nullptr;
+    state.current_table = nullptr;
+    state.current_table_index = 0U;
+    state.last_table_index = 0U;
+    state.has_last_table = false;
+    state.last_join_index.reset();
+    state.join_type_override = relational::JoinType::Inner;
+    state.join_type_override_set = false;
+    state.pending_join.reset();
+    state.pending_join_predicate = nullptr;
+    state.current_order_item = nullptr;
+    state.limit_clause = nullptr;
+    state.expression_stack.clear();
+    state.pending_operator = relational::BinaryOperator::Equal;
+    state.has_pending_operator = false;
+    state.star_qualifier.parts.clear();
+}
+
+void push_query_context(SelectParseState& state)
+{
+    SelectParseState::QueryContextSnapshot snapshot{};
+    snapshot.query = state.query;
+    snapshot.current_select_item = state.current_select_item;
+    snapshot.current_table = state.current_table;
+    snapshot.current_table_index = state.current_table_index;
+    snapshot.last_table_index = state.last_table_index;
+    snapshot.has_last_table = state.has_last_table;
+    snapshot.last_join_index = state.last_join_index;
+    snapshot.join_type_override = state.join_type_override;
+    snapshot.join_type_override_set = state.join_type_override_set;
+    snapshot.pending_join = state.pending_join;
+    snapshot.pending_join_predicate = state.pending_join_predicate;
+    snapshot.current_order_item = state.current_order_item;
+    snapshot.limit_clause = state.limit_clause;
+    snapshot.expression_stack = std::move(state.expression_stack);
+    snapshot.pending_operator = state.pending_operator;
+    snapshot.has_pending_operator = state.has_pending_operator;
+    snapshot.star_qualifier = std::move(state.star_qualifier);
+    state.context_stack.push_back(std::move(snapshot));
+
+    state.expression_stack.clear();
+    state.star_qualifier.parts.clear();
+}
+
+void pop_query_context(SelectParseState& state)
+{
+    if (state.context_stack.empty()) {
+        reset_query_context(state);
+        state.query = nullptr;
+        return;
+    }
+
+    auto snapshot = std::move(state.context_stack.back());
+    state.context_stack.pop_back();
+
+    state.query = snapshot.query;
+    state.current_select_item = snapshot.current_select_item;
+    state.current_table = snapshot.current_table;
+    state.current_table_index = snapshot.current_table_index;
+    state.last_table_index = snapshot.last_table_index;
+    state.has_last_table = snapshot.has_last_table;
+    state.last_join_index = snapshot.last_join_index;
+    state.join_type_override = snapshot.join_type_override;
+    state.join_type_override_set = snapshot.join_type_override_set;
+    state.pending_join = snapshot.pending_join;
+    state.pending_join_predicate = snapshot.pending_join_predicate;
+    state.current_order_item = snapshot.current_order_item;
+    state.limit_clause = snapshot.limit_clause;
+    state.expression_stack = std::move(snapshot.expression_stack);
+    state.pending_operator = snapshot.pending_operator;
+    state.has_pending_operator = snapshot.has_pending_operator;
+    state.star_qualifier = std::move(snapshot.star_qualifier);
+}
 
 Identifier make_identifier(std::string_view text)
 {
@@ -1521,9 +1626,8 @@ struct limit_clause_rule
                  pegtl::opt<required_space, kw_offset, required_space, limit_offset_expression_rule>> {
 };
 
-struct select_statement_grammar
-    : pegtl::seq<optional_space,
-                 kw_select,
+struct select_statement_body_rule
+    : pegtl::seq<kw_select,
                  pegtl::opt<required_space, kw_distinct>,
                  required_space,
                  select_list_rule,
@@ -1531,7 +1635,69 @@ struct select_statement_grammar
                  pegtl::opt<required_space, where_clause_rule>,
                  pegtl::opt<required_space, group_by_clause_rule>,
                  pegtl::opt<required_space, order_by_clause_rule>,
-                 pegtl::opt<required_space, limit_clause_rule>,
+                 pegtl::opt<required_space, limit_clause_rule>> {
+};
+
+struct with_cte_column_list_lparen : pegtl::one<'('> {
+};
+
+struct with_cte_column_list_rparen : pegtl::one<')'> {
+};
+
+struct with_cte_column_identifier_rule : identifier_rule {
+};
+
+struct with_cte_column_list_rule
+    : pegtl::seq<with_cte_column_list_lparen,
+                 optional_space,
+                 with_cte_column_identifier_rule,
+                 pegtl::star<optional_space, comma, optional_space, with_cte_column_identifier_rule>,
+                 optional_space,
+                 with_cte_column_list_rparen> {
+};
+
+struct with_cte_body_lparen : pegtl::one<'('> {
+};
+
+struct with_cte_body_rparen : pegtl::one<')'> {
+};
+
+struct with_cte_name_rule : identifier_rule {
+};
+
+struct with_cte_body_rule
+    : pegtl::seq<with_cte_body_lparen,
+                 optional_space,
+                 select_statement_body_rule,
+                 optional_space,
+                 with_cte_body_rparen> {
+};
+
+struct with_cte_rule
+    : pegtl::seq<with_cte_name_rule,
+                 pegtl::opt<optional_space, with_cte_column_list_rule>,
+                 required_space,
+                 kw_as,
+                 optional_space,
+                 with_cte_body_rule> {
+};
+
+struct with_cte_list_rule
+    : pegtl::seq<with_cte_rule,
+                 pegtl::star<optional_space, comma, optional_space, with_cte_rule>> {
+};
+
+struct with_clause_rule
+    : pegtl::seq<kw_with,
+                 pegtl::opt<required_space, kw_recursive>,
+                 required_space,
+                 with_cte_list_rule> {
+};
+
+struct select_statement_grammar
+    : pegtl::seq<optional_space,
+                 pegtl::opt<with_clause_rule, required_space>,
+                 select_statement_body_rule,
                  optional_space,
                  pegtl::opt<semicolon, optional_space>,
                  pegtl::eof> {
@@ -1553,6 +1719,116 @@ struct select_action<kw_distinct> {
         if (state.query != nullptr) {
             state.query->distinct = true;
         }
+    }
+};
+
+template <>
+struct select_action<kw_with> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr || state.statement == nullptr) {
+            return;
+        }
+        if (state.with_clause == nullptr) {
+            auto& clause = state.arena->make<relational::WithClause>();
+            clause.recursive = false;
+            clause.expressions.clear();
+            state.with_clause = &clause;
+            state.statement->with = &clause;
+        }
+        state.current_cte = nullptr;
+        state.in_cte_column_list = false;
+    }
+};
+
+template <>
+struct select_action<kw_recursive> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.with_clause != nullptr) {
+            state.with_clause->recursive = true;
+        }
+    }
+};
+
+template <>
+struct select_action<with_cte_name_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        if (state.arena == nullptr || state.with_clause == nullptr) {
+            return;
+        }
+
+        auto& cte = state.arena->make<relational::CommonTableExpression>();
+        cte.name = make_identifier(in.string());
+        state.with_clause->expressions.push_back(&cte);
+        state.current_cte = &cte;
+        state.in_cte_column_list = false;
+    }
+};
+
+template <>
+struct select_action<with_cte_column_list_lparen> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.current_cte != nullptr) {
+            state.in_cte_column_list = true;
+            state.current_cte->column_names.clear();
+        }
+    }
+};
+
+template <>
+struct select_action<with_cte_column_identifier_rule> {
+    template <typename Input>
+    static void apply(const Input& in, SelectParseState& state)
+    {
+        if (!state.in_cte_column_list || state.current_cte == nullptr) {
+            return;
+        }
+
+        state.current_cte->column_names.push_back(make_identifier(in.string()));
+    }
+};
+
+template <>
+struct select_action<with_cte_column_list_rparen> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        state.in_cte_column_list = false;
+    }
+};
+
+template <>
+struct select_action<with_cte_body_lparen> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr || state.current_cte == nullptr) {
+            return;
+        }
+
+        auto& query = state.arena->make<relational::QuerySpecification>();
+        state.current_cte->query = &query;
+        push_query_context(state);
+        state.query = &query;
+        reset_query_context(state);
+    }
+};
+
+template <>
+struct select_action<with_cte_body_rparen> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        pop_query_context(state);
+        state.current_cte = nullptr;
+        state.in_cte_column_list = false;
     }
 };
 
@@ -3232,6 +3508,12 @@ SelectParseResult parse_select(std::string_view input)
     state.statement = &result.arena.make<relational::SelectStatement>();
     state.query = &result.arena.make<relational::QuerySpecification>();
     state.statement->query = state.query;
+    state.statement->with = nullptr;
+    state.context_stack.clear();
+    state.with_clause = nullptr;
+    state.current_cte = nullptr;
+    state.in_cte_column_list = false;
+    reset_query_context(state);
 
     pegtl::memory_input in(input, "select_statement");
 

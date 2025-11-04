@@ -302,6 +302,15 @@ public:
             return result;
         }
 
+        if (statement.with != nullptr) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "Common table expressions (WITH clauses) are not supported yet";
+            diagnostic.remediation_hints = {"Rewrite the query without a WITH clause."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return result;
+        }
+
         if (statement.query == nullptr) {
             return result;
         }

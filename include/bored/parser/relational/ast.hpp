@@ -73,6 +73,8 @@ enum class NodeKind : std::uint8_t {
     UpdateStatement,
     DeleteStatement,
     QuerySpecification,
+    WithClause,
+    CommonTableExpression,
     SelectItem,
     TableReference,
     IdentifierExpression,
@@ -83,6 +85,8 @@ enum class NodeKind : std::uint8_t {
     LimitClause
 };
 
+struct WithClause;
+struct CommonTableExpression;
 enum class LiteralTag : std::uint8_t {
     Null = 0,
     Boolean,
@@ -256,6 +260,13 @@ struct LimitClause : Node {
     Expression* offset = nullptr;
 };
 
+struct WithClause : Node {
+    WithClause() noexcept : Node(NodeKind::WithClause) {}
+
+    bool recursive = false;
+    std::vector<CommonTableExpression*> expressions{};
+};
+
 struct QuerySpecification : Node {
     QuerySpecification() noexcept : Node(NodeKind::QuerySpecification) {}
 
@@ -270,9 +281,18 @@ struct QuerySpecification : Node {
     LimitClause* limit = nullptr;
 };
 
+struct CommonTableExpression : Node {
+    CommonTableExpression() noexcept : Node(NodeKind::CommonTableExpression) {}
+
+    Identifier name{};
+    std::vector<Identifier> column_names{};
+    QuerySpecification* query = nullptr;
+};
+
 struct SelectStatement : Node {
     SelectStatement() noexcept : Node(NodeKind::SelectStatement) {}
 
+    WithClause* with = nullptr;
     QuerySpecification* query = nullptr;
 };
 

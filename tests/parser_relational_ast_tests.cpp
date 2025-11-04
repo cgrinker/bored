@@ -124,6 +124,48 @@ TEST_CASE("describe renders select statement", "[parser][relational_ast]")
     REQUIRE(rendered == "SELECT DISTINCT * FROM inventory WHERE (inventory.id = 42) GROUP BY inventory.category ORDER BY inventory.created_at DESC LIMIT 10 OFFSET 5");
 }
 
+TEST_CASE("describe renders with clause", "[parser][relational_ast]")
+{
+    relational::AstArena arena;
+
+    auto& statement = arena.make<relational::SelectStatement>();
+    auto& with_clause = arena.make<relational::WithClause>();
+    statement.with = &with_clause;
+
+    auto& cte = arena.make<relational::CommonTableExpression>();
+    cte.name = bored::parser::Identifier{.value = "items"};
+    cte.column_names.push_back(bored::parser::Identifier{.value = "item_id"});
+
+    auto& cte_query = arena.make<relational::QuerySpecification>();
+    auto& cte_star = arena.make<relational::StarExpression>();
+    auto& cte_item = arena.make<relational::SelectItem>();
+    cte_item.expression = &cte_star;
+    cte_query.select_items.push_back(&cte_item);
+    auto& cte_table = arena.make<relational::TableReference>();
+    cte_table.name.parts.push_back(bored::parser::Identifier{.value = "inventory"});
+    cte_query.from = &cte_table;
+    cte_query.from_tables.push_back(&cte_table);
+    cte.query = &cte_query;
+    with_clause.expressions.push_back(&cte);
+
+    auto& main_query = arena.make<relational::QuerySpecification>();
+    auto& projection = arena.make<relational::SelectItem>();
+    auto& identifier = arena.make<relational::IdentifierExpression>();
+    identifier.name.parts.push_back(bored::parser::Identifier{.value = "items"});
+    identifier.name.parts.push_back(bored::parser::Identifier{.value = "item_id"});
+    projection.expression = &identifier;
+    main_query.select_items.push_back(&projection);
+    auto& main_table = arena.make<relational::TableReference>();
+    main_table.name.parts.push_back(bored::parser::Identifier{.value = "items"});
+    main_query.from = &main_table;
+    main_query.from_tables.push_back(&main_table);
+
+    statement.query = &main_query;
+
+    const auto rendered = relational::describe(statement);
+    REQUIRE(rendered == "WITH items(item_id) AS (SELECT * FROM inventory) SELECT items.item_id FROM items");
+}
+
 TEST_CASE("expression visitor traverses tree", "[parser][relational_ast]")
 {
     relational::AstArena arena;

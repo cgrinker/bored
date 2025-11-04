@@ -133,6 +133,28 @@ TEST_CASE("binder resolves qualified columns", "[parser][binder]")
     CHECK(left_identifier.binding->column_name == "id");
 }
 
+TEST_CASE("binder rejects WITH clauses", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "WITH items AS (SELECT inventory.id FROM sales.inventory AS inventory) SELECT * FROM items;";
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE(binding_result.diagnostics.size() == 1U);
+    CHECK(binding_result.diagnostics.front().message ==
+          "Common table expressions (WITH clauses) are not supported yet");
+}
+
 TEST_CASE("binder rejects missing columns", "[parser][binder]")
 {
     StubCatalog catalog_adapter;

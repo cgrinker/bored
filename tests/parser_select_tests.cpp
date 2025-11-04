@@ -40,6 +40,46 @@ TEST_CASE("parse_select handles basic select", "[parser][select]")
     REQUIRE(query->limit == nullptr);
 }
 
+TEST_CASE("parse_select handles with clause", "[parser][select]")
+{
+    const std::string sql =
+        "WITH items (item_id) AS (SELECT inventory.id FROM inventory) SELECT items.item_id FROM items;";
+    const auto result = bored::parser::parse_select(sql);
+    CAPTURE(sql);
+    if (!result.diagnostics.empty()) {
+        CAPTURE(result.diagnostics.front().message);
+    }
+    REQUIRE(result.success());
+    REQUIRE(result.statement != nullptr);
+
+    const auto* with_clause = result.statement->with;
+    REQUIRE(with_clause != nullptr);
+    CHECK_FALSE(with_clause->recursive);
+    REQUIRE(with_clause->expressions.size() == 1U);
+
+    const auto* cte = with_clause->expressions.front();
+    REQUIRE(cte != nullptr);
+    CHECK(cte->name.value == "items");
+    REQUIRE(cte->column_names.size() == 1U);
+    CHECK(cte->column_names.front().value == "item_id");
+    REQUIRE(cte->query != nullptr);
+    REQUIRE(cte->query->select_items.size() == 1U);
+    REQUIRE(cte->query->from != nullptr);
+    REQUIRE(cte->query->from->name.parts.size() == 1U);
+    CHECK(cte->query->from->name.parts.front().value == "inventory");
+
+    const auto* main_query = result.statement->query;
+    REQUIRE(main_query != nullptr);
+    REQUIRE(main_query->from != nullptr);
+    REQUIRE(main_query->from->name.parts.size() == 1U);
+    CHECK(main_query->from->name.parts.front().value == "items");
+    REQUIRE(main_query->select_items.size() == 1U);
+    const auto* projection = main_query->select_items.front();
+    REQUIRE(projection != nullptr);
+    REQUIRE(projection->expression != nullptr);
+    REQUIRE(projection->expression->kind == relational::NodeKind::IdentifierExpression);
+}
+
 TEST_CASE("parse_select supports distinct order and limit", "[parser][select]")
 {
     const std::string base_plain = "SELECT DISTINCT * FROM inventory AS inv;";

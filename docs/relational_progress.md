@@ -2,9 +2,9 @@
 
 This ticket-level report summarizes the relational engine roadmap, capturing what has shipped, what remains, and which code paths we expect to touch next so the team can quickly regain context when switching threads.
 
-_Last updated: 2025-11-03_
+_Last updated: 2025-11-04_
 
-Latest validation: Release `ctest` (420/420) on 2025-11-03.
+Latest validation: Release `ctest` (424/424) on 2025-11-04.
 
 ## Current Capabilities
 
@@ -12,7 +12,7 @@ Latest validation: Release `ctest` (420/420) on 2025-11-03.
 - **Catalog & DDL**: Persistent catalog with fully wired DDL handlers (create/alter/drop) for schemas, tables, and indexes, including restart-safe catalog bootstrap.
 - **Sequence Allocation (foundation)**: Transactional sequence allocator stages `next_value` updates via catalog mutator hooks, dispatcher now wires allocators into DDL handlers, and Catch2 regression coverage remains; planner/executor wiring is still pending.
 - **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell now supports BEGIN/COMMIT/ROLLBACK so INSERT/UPDATE/DELETE/SELECT flows can share session-scoped transactions with executor snapshots; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard now propagates oldest reader LSNs while cross-session isolation and deadlock handling remain on the roadmap.
-- **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs; binder resolves identifiers and types; lowering and normalization stages generate logical plans for select/join queries.
+- **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs (now including non-recursive `WITH` clause parsing and AST nodes); binder resolves identifiers and types; lowering and normalization stages generate logical plans for select/join queries.
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators.
 - **Constraint Enforcement**: Planner lowers unique/foreign key operators and executor now performs index-backed uniqueness checks plus referential integrity probes with MVCC-aware visibility.
 - **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up.
@@ -26,13 +26,13 @@ Latest validation: Release `ctest` (420/420) on 2025-11-03.
 | Key/foreign constraints | **Available (shell integration)** | Catalog metadata, planner & executor enforcement, and bored_shell INSERT/UPDATE pipelines enforcing PRIMARY KEY/UNIQUE/FOREIGN KEY checks. |
 | Auto-incrementing primary keys | **In progress** | Sequence allocator now stages transactional `next_value` updates with tests; planner/executor integration remains. |
 | Join execution | **Available** | Logical lowering, planner, and executor support nested-loop and hash joins with tests covering join predicates and pipelines. |
-| Common table expressions (CTEs) | **Missing** | Parser and planner lack WITH clause support; no recursive/non-recursive CTE execution pipeline. |
+| Common table expressions (CTEs) | **In progress** | Parser/AST accept non-recursive WITH clauses; binder/planner/executor paths still pending. |
 
 ## Gaps to Close
 
 1. **Constraint Enforcement**: Finish catalog DDL plumbing for constraint creation/drop and surface richer shell diagnostics for violations now that enforcement is active.
 2. **Sequence/Identity Support**: Wire planner/executor and DDL verbs to consume the transactional sequence allocator so auto-increment columns surface to users.
-3. **CTE Parsing & Execution**: Expand grammar, AST, and planner memo to represent WITH clauses; add execution support (materialized or pipelined) with snapshot-aware iterators.
+3. **CTE Parsing & Execution**: Finish wiring newly-landed parser/AST support into binder, planner memo, and execution pipelines; add execution support (materialized or pipelined) with snapshot-aware iterators.
 4. **Transaction Visibility**: Finish Transaction & Concurrency Milestone 1 to provide consistent snapshots across planner/executor and integrate with retention manager for snapshot retirement.
 5. **Optimizer Enhancements**: Broaden rule set, add cost-based join order selection, and integrate catalog statistics for selectivity estimates.
 6. **Index DDL Integration**: Surface index creation options (unique, covering, partial) and ensure planner/executor leverage indexes for predicates and joins.
@@ -60,10 +60,11 @@ Latest validation: Release `ctest` (420/420) on 2025-11-03.
    - [x] Shell: Apply constraint enforcement to INSERT/UPDATE pipelines using planner metadata and simulated index probes.
 
 4. **CTE Enablement (Planned)**
-   - Parser/AST: Add WITH clause grammar and nodes (non-recursive first, recursive second).
+   - Parser/AST: ✅ Non-recursive WITH clause grammar and nodes merged; recursive support remains future work.
    - Planner: Introduce memo entries for CTE producers/consumers and support inlining or materialization strategies.
+   - Binder: Teach binding layer to accept CTE definitions, scopes, and column aliases.
    - Executor: Provide worktable infrastructure for recursive CTEs and integrate with snapshot visibility.
-   - Source files to update: src/parser/grammar.cpp, src/parser/relational_ast.cpp, src/parser/relational_logical_lowering.cpp, src/planner/memo.cpp, src/planner/planner.cpp, src/executor/executor_node.cpp, tests/parser_logical_lowering_tests.cpp, tests/planner_integration_tests.cpp
+   - Source files to update next: src/parser/relational_binder.cpp, src/parser/relational_logical_lowering.cpp, src/planner/memo.cpp, src/planner/planner.cpp, src/executor/executor_node.cpp, tests/parser_logical_lowering_tests.cpp, tests/planner_integration_tests.cpp
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.

@@ -116,33 +116,11 @@ std::string describe_order_by(const OrderByItem& item)
     return stream.str();
 }
 
-}  // namespace
-
-std::string format_qualified_name(const QualifiedName& name)
-{
-    std::ostringstream stream;
-    bool first = true;
-    for (const auto& part : name.parts) {
-        if (!first) {
-            stream << '.';
-        }
-        stream << part.value;
-        first = false;
-    }
-    return stream.str();
-}
-
-std::string describe(const SelectStatement& statement)
+std::string describe_query(const QuerySpecification& query)
 {
     std::ostringstream stream;
     stream << "SELECT";
 
-    if (!statement.query) {
-        stream << " <invalid>";
-        return stream.str();
-    }
-
-    const auto& query = *statement.query;
     if (query.distinct) {
         stream << " DISTINCT";
     }
@@ -230,6 +208,76 @@ std::string describe(const SelectStatement& statement)
         }
     }
 
+    return stream.str();
+}
+
+}  // namespace
+
+std::string format_qualified_name(const QualifiedName& name)
+{
+    std::ostringstream stream;
+    bool first = true;
+    for (const auto& part : name.parts) {
+        if (!first) {
+            stream << '.';
+        }
+        stream << part.value;
+        first = false;
+    }
+    return stream.str();
+}
+
+std::string describe(const SelectStatement& statement)
+{
+    std::ostringstream stream;
+    if (statement.with && !statement.with->expressions.empty()) {
+        stream << "WITH";
+        if (statement.with->recursive) {
+            stream << " RECURSIVE";
+        }
+        bool first_cte = true;
+        for (const auto* cte : statement.with->expressions) {
+            if (!cte) {
+                continue;
+            }
+            if (first_cte) {
+                stream << ' ';
+            } else {
+                stream << ", ";
+            }
+            stream << cte->name.value;
+            if (!cte->column_names.empty()) {
+                stream << '(';
+                bool first_column = true;
+                for (const auto& column : cte->column_names) {
+                    if (!first_column) {
+                        stream << ", ";
+                    }
+                    stream << column.value;
+                    first_column = false;
+                }
+                stream << ')';
+            }
+            stream << " AS (";
+            if (cte->query) {
+                stream << describe_query(*cte->query);
+            } else {
+                stream << "<invalid>";
+            }
+            stream << ')';
+            first_cte = false;
+        }
+        if (!first_cte) {
+            stream << ' ';
+        }
+    }
+
+    if (!statement.query) {
+        stream << "SELECT <invalid>";
+        return stream.str();
+    }
+
+    stream << describe_query(*statement.query);
     return stream.str();
 }
 
