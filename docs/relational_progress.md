@@ -16,7 +16,7 @@ Latest validation: `ctest --output-on-failure` (466/466) on 2025-11-05 covering 
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators.
 - **Constraint Enforcement**: Planner lowers unique/foreign key operators and executor now performs index-backed uniqueness checks plus referential integrity probes with MVCC-aware visibility.
 - **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up; catalog metadata now records uniqueness flags, covering column lists, and partial predicates ahead of planner/executor integration.
-- **Observability & Tooling**: Storage diagnostics, WAL/retention telemetry, checkpoint metrics, and shell integration for disk-backed catalogs and WAL configuration.
+- **Observability & Tooling**: Storage diagnostics, WAL/retention telemetry, checkpoint metrics, shell integration for disk-backed catalogs and WAL configuration, and CI enforcement of storage benchmark baselines.
 
 ## Feature Checklist
 

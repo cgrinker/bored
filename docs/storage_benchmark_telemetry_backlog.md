@@ -5,10 +5,10 @@ This document tracks deferred work related to benchmarking, telemetry, and opera
 ## Completed Benchmark Milestones
 
 - **Workload coverage**: `benchmarks/storage_benchmarks.cpp` now exercises free-space map refresh, WAL retention pruning, overflow replay, and spool recovery paths; refreshed baselines checked in on 2025-11-05.
+- **CI baseline enforcement**: `.github/workflows/ci.yml` runs `bored_benchmarks --samples=5 --baseline benchmarks/baseline_results.json --tolerance=0.20` so regressions fail the pipeline and the current parameters are documented in-source.
 
 ## Deferred Benchmark Tasks
 
-- **CI baseline enforcement**: Wire `bored_benchmarks` into continuous integration, including a stable invocation that records overflow tuple parameters and exits non-zero on regressions via `--baseline` and `--tolerance`.
 - **Fixture hardening**: Resolve the large-overflow tuple allocation limits so we can re-enable the default 16&nbsp;KiB payload in benchmarks before refreshing the persisted baselines.
 - **Threshold governance**: Document how tolerance windows are chosen, who maintains the baselines, and how to regenerate them when hardware or configuration changes occur.
 
