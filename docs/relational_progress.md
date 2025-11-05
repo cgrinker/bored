@@ -4,7 +4,7 @@ This ticket-level report summarizes the relational engine roadmap, capturing wha
 
 _Last updated: 2025-11-05_
 
-Latest validation: `ctest --output-on-failure` (453/453) on 2025-11-05 covering recursive spool selection, multi-statement worktable reuse, and advanced index catalog metadata propagation; `build/bored_benchmarks --samples=10 --json` captured updated baselines (including `spool_worktable_recovery`) on 2025-11-04.
+Latest validation: `ctest --output-on-failure` (465/465) on 2025-11-05 covering recursive spool selection, multi-statement worktable reuse, and advanced index catalog metadata propagation; `build/bored_benchmarks --samples=10 --json` captured updated baselines (including `spool_worktable_recovery`) on 2025-11-04.
 
 ## Current Capabilities
 
@@ -70,7 +70,7 @@ Latest validation: `ctest --output-on-failure` (453/453) on 2025-11-05 covering 
 5. **Advanced Indexing & Optimization (In progress)**
    - Catalog metadata, serialization, and accessor caches now persist index uniqueness flags, covering column lists, and partial predicate text; the DDL command builder maps parsed CREATE INDEX statements (unique flag, covering list, predicate, comparator, fanout) into stageable requests while DDL stage/planner hooks expose the new fields for upcoming planner/executor work.
    - Parser grammar now recognises CREATE INDEX with UNIQUE, INCLUDE, WITH (FANOUT/COMPARATOR), and WHERE clauses; bored_shell wiring and planner/executor rule updates must still cost index scans with the richer metadata before the shell surfaces covering/partial options.
-   - bored_shell constraint enforcement now parses persisted partial index predicates, evaluates them against row payloads, and skips uniqueness probes when the predicate does not apply, with regression coverage in `tests/shell_backend_tests.cpp`.
+   - bored_shell constraint enforcement now parses persisted partial index predicates, evaluates them against row payloads, and skips uniqueness probes when the predicate does not apply, with regression coverage in `tests/shell_backend_tests.cpp` (including end-to-end INSERT scenarios).
    - Enhance optimizer to choose index scans based on statistics and predicates; add cost model refinements.
    - Expand join optimization (multi-join reordering, bushy plans) once statistics available.
    - Source files to update: src/parser/ddl_command_builder.cpp, src/parser/grammar.cpp, src/storage/index_btree_manager.cpp, src/storage/index_retention.cpp, src/planner/cost_model.cpp, src/planner/statistics_catalog.cpp, src/planner/rules/, src/planner/rule.cpp, tests/index_btree_manager_tests.cpp, tests/planner_cost_model_tests.cpp, tests/planner_rule_tests.cpp, tests/ddl_handlers_tests.cpp, tests/catalog_ddl_tests.cpp

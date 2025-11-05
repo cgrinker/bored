@@ -7,6 +7,7 @@
 #include "bored/txn/transaction_types.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_exception.hpp>
 
 #include <algorithm>
 #include <array>
@@ -190,6 +191,36 @@ UniqueEnforceExecutor::KeyExtractor make_single_column_key_extractor(std::size_t
     };
 }
 
+UniqueEnforceExecutor::KeyExtractor make_threshold_predicate_key_extractor(std::size_t column_index,
+                                                                           std::int64_t threshold)
+{
+    return [column_index, threshold](const bored::executor::TupleView& view,
+                                     ExecutorContext&,
+                                     std::vector<std::byte>& out_key,
+                                     bool& has_null) {
+        if (column_index >= view.column_count()) {
+            return false;
+        }
+        auto column = view.column(column_index);
+        has_null = column.is_null;
+        if (column.is_null) {
+            out_key.clear();
+            return true;
+        }
+        if (column.data.size() != sizeof(std::int64_t)) {
+            return false;
+        }
+        std::int64_t value = 0;
+        std::memcpy(&value, column.data.data(), sizeof(value));
+        if (value < threshold) {
+            out_key.clear();
+            return true;
+        }
+        out_key.assign(column.data.begin(), column.data.end());
+        return true;
+    };
+}
+
 ForeignKeyCheckExecutor::KeyExtractor make_fk_key_extractor(std::size_t column_index)
 {
     return [column_index](const bored::executor::TupleView& view,
@@ -279,6 +310,37 @@ TEST_CASE("UniqueEnforceExecutor rejects duplicate keys in batch")
     executor.close(context);
 }
 
+TEST_CASE("UniqueEnforceExecutor skips predicate-filtered keys")
+{
+    std::vector<RowData> rows{
+        RowData{{ColumnData{encode_int64(4), false}}},
+        RowData{{ColumnData{encode_int64(4), false}}},
+        RowData{{ColumnData{encode_int64(11), false}}},
+        RowData{{ColumnData{encode_int64(11), false}}}
+    };
+
+    auto child = std::make_unique<ValuesExecutor>(rows);
+
+    UniqueEnforceExecutor::Config config{};
+    config.key_extractor = make_threshold_predicate_key_extractor(0U, 10);
+    config.allow_null_keys = false;
+
+    UniqueEnforceExecutor executor{std::move(child), config};
+    ExecutorContext context = make_context(TransactionId{99U});
+    TupleBuffer buffer{};
+
+    executor.open(context);
+    REQUIRE(executor.next(context, buffer));
+    buffer.reset();
+    REQUIRE(executor.next(context, buffer));
+    buffer.reset();
+    REQUIRE(executor.next(context, buffer));
+    buffer.reset();
+    REQUIRE_THROWS_MATCHES(executor.next(context, buffer),
+                           std::runtime_error,
+                           Catch::Matchers::Message("Unique constraint violated."));
+    executor.close(context);
+}
 TEST_CASE("UniqueEnforceExecutor detects conflicts via storage reader")
 {
     StubStorageReader reader;
