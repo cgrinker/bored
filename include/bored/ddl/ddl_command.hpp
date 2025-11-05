@@ -138,6 +138,8 @@ struct CreateIndexRequest final {
     std::uint16_t max_fanout = 0U;
     std::string comparator{};
     bool unique = false;
+    std::vector<std::string> covering_column_names{};
+    std::string predicate{};
     bool if_not_exists = false;
 };
 

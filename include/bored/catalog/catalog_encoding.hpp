@@ -52,6 +52,9 @@ struct CatalogIndexView final {
     std::uint16_t max_fanout = 0U;
     std::string_view comparator{};
     std::string_view name{};
+    bool unique = false;
+    std::string_view covering_columns{};
+    std::string_view predicate{};
 };
 
 struct CatalogConstraintView final {
@@ -86,7 +89,10 @@ struct CatalogSequenceView final {
 [[nodiscard]] std::size_t catalog_schema_tuple_size(std::string_view name) noexcept;
 [[nodiscard]] std::size_t catalog_table_tuple_size(std::string_view name) noexcept;
 [[nodiscard]] std::size_t catalog_column_tuple_size(std::string_view name) noexcept;
-[[nodiscard]] std::size_t catalog_index_tuple_size(std::string_view name, std::string_view comparator) noexcept;
+[[nodiscard]] std::size_t catalog_index_tuple_size(std::string_view name,
+                                                   std::string_view comparator,
+                                                   std::string_view covering_columns,
+                                                   std::string_view predicate) noexcept;
 [[nodiscard]] std::size_t catalog_constraint_tuple_size(std::string_view name,
                                                        std::string_view key_columns,
                                                        std::string_view referenced_columns) noexcept;

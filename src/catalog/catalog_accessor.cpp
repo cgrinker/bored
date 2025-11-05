@@ -166,7 +166,10 @@ std::optional<CatalogIndexDescriptor> CatalogAccessor::index(IndexId id) const
                                   entry.root_page_id,
                                   entry.max_fanout,
                                   entry.comparator,
-                                  entry.name};
+                                  entry.name,
+                                  entry.unique,
+                                  entry.covering_columns,
+                                  entry.predicate};
 }
 
 std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes(RelationId relation_id) const
@@ -186,7 +189,10 @@ std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes(RelationId relation
                             entry.root_page_id,
                             entry.max_fanout,
                             entry.comparator,
-                            entry.name);
+                            entry.name,
+                            entry.unique,
+                            entry.covering_columns,
+                            entry.predicate);
     }
     return result;
 }
@@ -208,7 +214,10 @@ std::vector<CatalogIndexDescriptor> CatalogAccessor::indexes_for_schema(SchemaId
                             entry.root_page_id,
                             entry.max_fanout,
                             entry.comparator,
-                            entry.name);
+                            entry.name,
+                            entry.unique,
+                            entry.covering_columns,
+                            entry.predicate);
     }
     return result;
 }
@@ -631,6 +640,9 @@ void CatalogAccessor::ensure_indexes_loaded() const
             entry.max_fanout = view->max_fanout;
             entry.comparator = make_string(view->comparator);
             entry.name = make_string(view->name);
+            entry.unique = view->unique;
+            entry.covering_columns = make_string(view->covering_columns);
+            entry.predicate = make_string(view->predicate);
 
             auto table_it = table_index_.find(entry.relation_id.value);
             if (table_it != table_index_.end()) {

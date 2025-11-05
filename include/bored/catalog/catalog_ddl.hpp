@@ -58,6 +58,9 @@ struct CreateIndexRequest final {
     CatalogIndexType index_type = CatalogIndexType::Unknown;
     std::uint16_t max_fanout = 0U;
     std::string comparator{};
+    bool unique = false;
+    std::string covering_columns{};
+    std::string predicate{};
     std::optional<IndexId> index_id{};
     std::optional<std::uint32_t> root_page_id{};
 };
@@ -67,6 +70,9 @@ struct CreateIndexResult final {
     std::uint32_t root_page_id = 0U;
     std::uint16_t max_fanout = 0U;
     std::string comparator{};
+    bool unique = false;
+    std::string covering_columns{};
+    std::string predicate{};
 };
 
 std::error_code stage_create_schema(CatalogMutator& mutator,

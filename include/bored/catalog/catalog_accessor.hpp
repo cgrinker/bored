@@ -102,6 +102,9 @@ private:
         std::uint16_t max_fanout = 0U;
         std::string comparator{};
         std::string name{};
+        bool unique = false;
+        std::string covering_columns{};
+        std::string predicate{};
     };
 
     struct ConstraintEntry final {

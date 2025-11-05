@@ -175,6 +175,9 @@ std::error_code stage_create_index(CatalogMutator& mutator,
     descriptor.max_fanout = request.max_fanout;
     descriptor.comparator = request.comparator;
     descriptor.name = request.name;
+    descriptor.unique = request.unique;
+    descriptor.covering_columns = request.covering_columns;
+    descriptor.predicate = request.predicate;
 
     auto payload = serialize_catalog_index(descriptor);
     mutator.stage_insert(kCatalogIndexesRelationId, index_id.value, tuple, std::move(payload));
@@ -183,6 +186,9 @@ std::error_code stage_create_index(CatalogMutator& mutator,
     result.root_page_id = root_page_id;
     result.max_fanout = request.max_fanout;
     result.comparator = request.comparator;
+    result.unique = request.unique;
+    result.covering_columns = request.covering_columns;
+    result.predicate = request.predicate;
     return {};
 }
 

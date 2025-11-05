@@ -138,6 +138,9 @@ std::vector<std::byte> serialize_index(const CatalogIndexDescriptor& index)
     descriptor.max_fanout = index.max_fanout;
     descriptor.comparator = index.comparator;
     descriptor.name = index.name;
+    descriptor.unique = index.unique;
+    descriptor.covering_columns = index.covering_columns;
+    descriptor.predicate = index.predicate;
     return catalog::serialize_catalog_index(descriptor);
 }
 
@@ -162,6 +165,30 @@ constexpr std::uint16_t kDefaultBtreeFanout = 128U;
 [[nodiscard]] std::uint16_t default_fanout_for(catalog::CatalogColumnType) noexcept
 {
     return kDefaultBtreeFanout;
+}
+
+[[nodiscard]] std::string join_identifier_list(const std::vector<std::string>& identifiers)
+{
+    if (identifiers.empty()) {
+        return {};
+    }
+
+    std::size_t total_length = identifiers.size() > 1U ? identifiers.size() - 1U : 0U;
+    for (const auto& identifier : identifiers) {
+        total_length += identifier.size();
+    }
+
+    std::string result;
+    result.reserve(total_length);
+    bool first = true;
+    for (const auto& identifier : identifiers) {
+        if (!first) {
+            result.push_back(',');
+        }
+        result.append(identifier);
+        first = false;
+    }
+    return result;
 }
 
 [[nodiscard]] std::size_t max_column_ordinal(const std::vector<CatalogColumnDescriptor>& columns) noexcept
@@ -799,6 +826,16 @@ DdlCommandResponse handle_create_index(DdlCommandContext& context, const CreateI
         return make_failure(make_error_code(DdlErrc::ValidationFailed), "column type is not supported for indexes");
     }
 
+    for (const auto& covering_name : request.covering_column_names) {
+        if (auto ec = validate_identifier(covering_name); ec) {
+            return make_failure(ec, "covering column name is invalid");
+        }
+        const auto* covering_column = find_column(columns, covering_name);
+        if (covering_column == nullptr) {
+            return make_failure(make_error_code(DdlErrc::ValidationFailed), "covering column not found");
+        }
+    }
+
     CreateIndexStoragePlan storage_plan{};
     if (context.create_index_storage) {
         if (auto ec = context.create_index_storage(request, *table_opt, *column, storage_plan); ec) {
@@ -833,6 +870,16 @@ DdlCommandResponse handle_create_index(DdlCommandContext& context, const CreateI
     stage_request.max_fanout = storage_plan.max_fanout;
     stage_request.comparator = storage_plan.comparator;
     stage_request.root_page_id = storage_plan.root_page_id;
+    stage_request.unique = request.unique;
+    stage_request.covering_columns = join_identifier_list(request.covering_column_names);
+    stage_request.predicate = request.predicate;
+
+    if (stage_request.covering_columns.size() > std::numeric_limits<std::uint16_t>::max()) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "covering column list exceeds supported length");
+    }
+    if (stage_request.predicate.size() > std::numeric_limits<std::uint16_t>::max()) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "index predicate exceeds supported length");
+    }
 
     catalog::CreateIndexResult stage_result{};
     if (auto ec = catalog::stage_create_index(*context.mutator, context.allocator, stage_request, stage_result); ec) {

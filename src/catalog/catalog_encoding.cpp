@@ -60,7 +60,9 @@ struct CatalogIndexPrefix final {
     std::uint32_t root_page_id = 0U;
     std::uint16_t name_length = 0U;
     std::uint16_t comparator_length = 0U;
-    std::uint32_t padding = 0U;
+    std::uint16_t covering_columns_length = 0U;
+    std::uint16_t predicate_length = 0U;
+    std::uint32_t flags = 0U;
 };
 
 struct CatalogConstraintPrefix final {
@@ -99,7 +101,7 @@ static_assert(sizeof(CatalogDatabasePrefix) == 48U, "CatalogDatabasePrefix expec
 static_assert(sizeof(CatalogSchemaPrefix) == 48U, "CatalogSchemaPrefix expected to be 48 bytes");
 static_assert(sizeof(CatalogTablePrefix) == 56U, "CatalogTablePrefix expected to be 56 bytes");
 static_assert(sizeof(CatalogColumnPrefix) == 56U, "CatalogColumnPrefix expected to be 56 bytes");
-static_assert(sizeof(CatalogIndexPrefix) == 56U, "CatalogIndexPrefix expected to be 56 bytes");
+static_assert(sizeof(CatalogIndexPrefix) == 64U, "CatalogIndexPrefix expected to be 64 bytes");
 static_assert(sizeof(CatalogConstraintPrefix) == 72U, "CatalogConstraintPrefix expected to be 72 bytes");
 static_assert(sizeof(CatalogSequencePrefix) == 112U, "CatalogSequencePrefix expected to be 112 bytes");
 
@@ -135,9 +137,18 @@ std::size_t catalog_column_tuple_size(std::string_view name) noexcept
     return align8(sizeof(CatalogColumnPrefix) + name.size());
 }
 
-std::size_t catalog_index_tuple_size(std::string_view name, std::string_view comparator) noexcept
+constexpr std::uint32_t kCatalogIndexUniqueFlag = 0x1U;
+
+std::size_t catalog_index_tuple_size(std::string_view name,
+                                     std::string_view comparator,
+                                     std::string_view covering_columns,
+                                     std::string_view predicate) noexcept
 {
-    return align8(sizeof(CatalogIndexPrefix) + name.size() + comparator.size());
+    return align8(sizeof(CatalogIndexPrefix) +
+                  name.size() +
+                  comparator.size() +
+                  covering_columns.size() +
+                  predicate.size());
 }
 
 std::size_t catalog_constraint_tuple_size(std::string_view name,
@@ -204,8 +215,15 @@ std::vector<std::byte> serialize_catalog_index(const CatalogIndexDescriptor& des
 {
     const auto name_length = static_cast<std::uint16_t>(descriptor.name.size());
     const auto comparator_length = static_cast<std::uint16_t>(descriptor.comparator.size());
+    const auto covering_length = static_cast<std::uint16_t>(descriptor.covering_columns.size());
+    const auto predicate_length = static_cast<std::uint16_t>(descriptor.predicate.size());
     const auto prefix_size = sizeof(CatalogIndexPrefix);
-    auto buffer = std::vector<std::byte>(align8(prefix_size + descriptor.name.size() + descriptor.comparator.size()), std::byte{0});
+    auto buffer = std::vector<std::byte>(align8(prefix_size +
+                                               descriptor.name.size() +
+                                               descriptor.comparator.size() +
+                                               descriptor.covering_columns.size() +
+                                               descriptor.predicate.size()),
+                                        std::byte{0});
     auto* prefix = reinterpret_cast<CatalogIndexPrefix*>(buffer.data());
     prefix->tuple = descriptor.tuple;
     prefix->index_id = descriptor.index_id.value;
@@ -215,11 +233,24 @@ std::vector<std::byte> serialize_catalog_index(const CatalogIndexDescriptor& des
     prefix->root_page_id = descriptor.root_page_id;
     prefix->name_length = name_length;
     prefix->comparator_length = comparator_length;
+    prefix->covering_columns_length = covering_length;
+    prefix->predicate_length = predicate_length;
+    prefix->flags = descriptor.unique ? kCatalogIndexUniqueFlag : 0U;
+    auto offset = prefix_size;
     if (name_length > 0U) {
-        std::memcpy(buffer.data() + prefix_size, descriptor.name.data(), descriptor.name.size());
+        std::memcpy(buffer.data() + offset, descriptor.name.data(), descriptor.name.size());
+        offset += descriptor.name.size();
     }
     if (comparator_length > 0U) {
-        std::memcpy(buffer.data() + prefix_size + descriptor.name.size(), descriptor.comparator.data(), descriptor.comparator.size());
+        std::memcpy(buffer.data() + offset, descriptor.comparator.data(), descriptor.comparator.size());
+        offset += descriptor.comparator.size();
+    }
+    if (covering_length > 0U) {
+        std::memcpy(buffer.data() + offset, descriptor.covering_columns.data(), descriptor.covering_columns.size());
+        offset += descriptor.covering_columns.size();
+    }
+    if (predicate_length > 0U) {
+        std::memcpy(buffer.data() + offset, descriptor.predicate.data(), descriptor.predicate.size());
     }
     return buffer;
 }
@@ -361,7 +392,10 @@ std::optional<CatalogIndexView> decode_catalog_index(std::span<const std::byte> 
     }
     const auto* prefix = reinterpret_cast<const CatalogIndexPrefix*>(tuple.data());
     const auto prefix_size = sizeof(CatalogIndexPrefix);
-    const auto total_length = static_cast<std::size_t>(prefix->name_length) + static_cast<std::size_t>(prefix->comparator_length);
+    const auto total_length = static_cast<std::size_t>(prefix->name_length) +
+                              static_cast<std::size_t>(prefix->comparator_length) +
+                              static_cast<std::size_t>(prefix->covering_columns_length) +
+                              static_cast<std::size_t>(prefix->predicate_length);
     if (tuple.size() < prefix_size + total_length) {
         return std::nullopt;
     }
@@ -372,13 +406,22 @@ std::optional<CatalogIndexView> decode_catalog_index(std::span<const std::byte> 
     view.index_type = static_cast<CatalogIndexType>(prefix->index_type);
     view.max_fanout = prefix->max_fanout;
     view.root_page_id = prefix->root_page_id;
+    view.unique = (prefix->flags & kCatalogIndexUniqueFlag) != 0U;
+    auto base = reinterpret_cast<const char*>(tuple.data() + prefix_size);
     if (prefix->name_length > 0U) {
-        const auto* name_data = reinterpret_cast<const char*>(tuple.data() + prefix_size);
-        view.name = {name_data, prefix->name_length};
+        view.name = {base, prefix->name_length};
     }
+    base += prefix->name_length;
     if (prefix->comparator_length > 0U) {
-        const auto* comparator_data = reinterpret_cast<const char*>(tuple.data() + prefix_size + prefix->name_length);
-        view.comparator = {comparator_data, prefix->comparator_length};
+        view.comparator = {base, prefix->comparator_length};
+    }
+    base += prefix->comparator_length;
+    if (prefix->covering_columns_length > 0U) {
+        view.covering_columns = {base, prefix->covering_columns_length};
+    }
+    base += prefix->covering_columns_length;
+    if (prefix->predicate_length > 0U) {
+        view.predicate = {base, prefix->predicate_length};
     }
     return view;
 }

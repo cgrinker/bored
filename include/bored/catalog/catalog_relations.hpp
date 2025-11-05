@@ -134,6 +134,9 @@ struct CatalogIndexDescriptor final {
     std::uint16_t max_fanout = 0U;
     std::string_view comparator{};
     std::string_view name{};
+    bool unique = false;
+    std::string_view covering_columns{};
+    std::string_view predicate{};
 
     constexpr CatalogIndexDescriptor() = default;
     constexpr CatalogIndexDescriptor(const CatalogTupleDescriptor& tuple_descriptor,
@@ -143,7 +146,10 @@ struct CatalogIndexDescriptor final {
                                      std::uint32_t root_page,
                                      std::uint16_t fanout,
                                      std::string_view comparator_view,
-                                     std::string_view name_view) noexcept
+                                     std::string_view name_view,
+                                     bool unique_flag = false,
+                                     std::string_view covering_columns_view = {},
+                                     std::string_view predicate_view = {}) noexcept
         : tuple{tuple_descriptor}
         , index_id{index}
         , relation_id{relation}
@@ -152,6 +158,9 @@ struct CatalogIndexDescriptor final {
         , max_fanout{fanout}
         , comparator{comparator_view}
         , name{name_view}
+        , unique{unique_flag}
+        , covering_columns{covering_columns_view}
+        , predicate{predicate_view}
     {}
 };
 
