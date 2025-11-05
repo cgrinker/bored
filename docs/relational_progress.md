@@ -68,8 +68,8 @@ Latest validation: `ctest --output-on-failure` (453/453) on 2025-11-05 covering 
    - Validation: ✅ Documentation now highlights recursive spool explain output (`docs/spool_operator_guide.md`, `docs/storage.md`), and the full Catch2 suite (`ctest --output-on-failure`, 2025-11-05) passes post-integration.
 
 5. **Advanced Indexing & Optimization (In progress)**
-   - Catalog metadata, serialization, and accessor caches now persist index uniqueness flags, covering column lists, and partial predicate text; DDL stage/planner hooks expose the new fields for upcoming planner/executor work.
-   - Parser, shell command builder, and planner/executor rule updates remain to surface covering/partial options to users and cost index scans with the richer metadata.
+   - Catalog metadata, serialization, and accessor caches now persist index uniqueness flags, covering column lists, and partial predicate text; the DDL command builder now maps parsed CREATE INDEX statements (unique flag, covering list, predicate, comparator, fanout) into stageable requests while DDL stage/planner hooks expose the new fields for upcoming planner/executor work.
+   - Parser grammar and shell wiring remain to accept the extended CREATE INDEX syntax from user scripts, and planner/executor rule updates must cost index scans with the richer metadata before the shell surfaces covering/partial options.
    - Enhance optimizer to choose index scans based on statistics and predicates; add cost model refinements.
    - Expand join optimization (multi-join reordering, bushy plans) once statistics available.
    - Source files to update: src/parser/ddl_command_builder.cpp, src/parser/grammar.cpp, src/storage/index_btree_manager.cpp, src/storage/index_retention.cpp, src/planner/cost_model.cpp, src/planner/statistics_catalog.cpp, src/planner/rules/, src/planner/rule.cpp, tests/index_btree_manager_tests.cpp, tests/planner_cost_model_tests.cpp, tests/planner_rule_tests.cpp, tests/ddl_handlers_tests.cpp, tests/catalog_ddl_tests.cpp

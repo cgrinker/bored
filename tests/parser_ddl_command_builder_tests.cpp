@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <optional>
 #include <string_view>
 #include <variant>
@@ -114,6 +115,74 @@ TEST_CASE("build_ddl_commands reports missing default schema")
     const auto& diagnostic = result.diagnostics.back();
     CHECK(diagnostic.severity == ParserSeverity::Error);
     CHECK(diagnostic.message.find("default schema") != std::string::npos);
+}
+
+TEST_CASE("build_ddl_commands translates CREATE INDEX")
+{
+    auto config = make_config();
+
+    CreateIndexStatement index_ast{};
+    index_ast.name.value = "idx_metrics_tenant";
+    index_ast.table.value = "metrics";
+    index_ast.columns.push_back(Identifier{"tenant_id"});
+    index_ast.unique = true;
+    index_ast.if_not_exists = true;
+    index_ast.max_fanout = static_cast<std::uint16_t>(128);
+    index_ast.comparator = "tenant_cmp";
+    index_ast.covering_columns.push_back(Identifier{"payload"});
+    index_ast.predicate = "tenant_id >= 0";
+
+    ScriptStatement statement{};
+    statement.type = StatementType::CreateIndex;
+    statement.success = true;
+    statement.ast.emplace<CreateIndexStatement>(index_ast);
+
+    const auto result = build_ddl_commands(statement, config);
+
+    REQUIRE(result.diagnostics.empty());
+    REQUIRE(result.commands.size() == 1U);
+    const auto& command = result.commands.front();
+    REQUIRE(std::holds_alternative<bored::ddl::CreateIndexRequest>(command));
+    const auto& request = std::get<bored::ddl::CreateIndexRequest>(command);
+    CHECK(request.schema_id == *config.default_schema_id);
+    CHECK(request.table_name == "metrics");
+    CHECK(request.index_name == "idx_metrics_tenant");
+    CHECK(request.if_not_exists);
+    CHECK(request.unique);
+    REQUIRE(request.column_names.size() == 1U);
+    CHECK(request.column_names.front() == "tenant_id");
+    REQUIRE(request.covering_column_names.size() == 1U);
+    CHECK(request.covering_column_names.front() == "payload");
+    CHECK(request.max_fanout == 128);
+    CHECK(request.comparator == "tenant_cmp");
+    CHECK(request.predicate == "tenant_id >= 0");
+}
+
+TEST_CASE("build_ddl_commands rejects CREATE INDEX without columns")
+{
+    auto config = make_config();
+
+    CreateIndexStatement index_ast{};
+    index_ast.name.value = "idx_metrics_empty";
+    index_ast.table.value = "metrics";
+
+    ScriptStatement statement{};
+    statement.type = StatementType::CreateIndex;
+    statement.success = true;
+    statement.text = "CREATE INDEX idx_metrics_empty ON metrics ();";
+    statement.ast.emplace<CreateIndexStatement>(index_ast);
+
+    const auto result = build_ddl_commands(statement, config);
+
+    CHECK(result.commands.empty());
+    REQUIRE_FALSE(result.diagnostics.empty());
+    const auto has_error_diag = std::any_of(result.diagnostics.begin(),
+                                            result.diagnostics.end(),
+                                            [](const ParserDiagnostic& diagnostic) {
+                                                return diagnostic.severity == ParserSeverity::Error &&
+                                                       diagnostic.message.find("CREATE INDEX") != std::string::npos;
+                                            });
+    CHECK(has_error_diag);
 }
 
 TEST_CASE("build_ddl_commands maps DROP SCHEMA cascade flag")

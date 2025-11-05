@@ -45,6 +45,19 @@ struct DropTableStatement final {
     bool cascade = false;
 };
 
+struct CreateIndexStatement final {
+    Identifier schema{};
+    Identifier name{};
+    Identifier table{};
+    std::vector<Identifier> columns{};
+    std::optional<std::uint16_t> max_fanout{};
+    std::optional<std::string> comparator{};
+    bool unique = false;
+    std::vector<Identifier> covering_columns{};
+    std::optional<std::string> predicate{};
+    bool if_not_exists = false;
+};
+
 struct CreateDatabaseStatement final {
     Identifier name{};
     bool if_not_exists = false;

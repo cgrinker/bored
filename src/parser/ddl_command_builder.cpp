@@ -377,6 +377,80 @@ TranslationOutcome translate_drop_table(const DropTableStatement& ast,
     return outcome;
 }
 
+TranslationOutcome translate_create_index(const CreateIndexStatement& ast,
+                                          const ScriptStatement& statement,
+                                          const DdlCommandBuilderConfig& config)
+{
+    TranslationOutcome outcome{};
+
+    const auto database_id = resolve_database_id(config, {}, statement, outcome.diagnostics);
+    if (!database_id) {
+        return outcome;
+    }
+
+    const auto schema_id = resolve_schema_id(config, ast.schema.value, *database_id, statement, outcome.diagnostics);
+    if (!schema_id) {
+        return outcome;
+    }
+
+    if (ast.name.value.empty()) {
+        outcome.diagnostics.push_back(make_diagnostic(ParserSeverity::Error,
+                                                      "CREATE INDEX requires an index name.",
+                                                      statement,
+                                                      {"Provide an identifier after CREATE INDEX."}));
+    }
+
+    if (ast.table.value.empty()) {
+        outcome.diagnostics.push_back(make_diagnostic(ParserSeverity::Error,
+                                                      "CREATE INDEX requires a target table name.",
+                                                      statement,
+                                                      {"Specify the table to index using ON <table>."}));
+    }
+
+    ddl::CreateIndexRequest request{};
+    request.schema_id = *schema_id;
+    request.table_name = ast.table.value;
+    request.index_name = ast.name.value;
+    request.if_not_exists = ast.if_not_exists;
+    request.unique = ast.unique;
+
+    if (ast.max_fanout && *ast.max_fanout > 0U) {
+        request.max_fanout = *ast.max_fanout;
+    }
+
+    if (ast.comparator) {
+        request.comparator = *ast.comparator;
+    }
+
+    request.column_names.reserve(ast.columns.size());
+    for (const auto& column : ast.columns) {
+        request.column_names.push_back(column.value);
+    }
+
+    if (request.column_names.empty()) {
+        outcome.diagnostics.push_back(make_diagnostic(ParserSeverity::Error,
+                                                      "CREATE INDEX must reference at least one column.",
+                                                      statement,
+                                                      {"Add at least one column inside the index definition."}));
+    }
+
+    request.covering_column_names.reserve(ast.covering_columns.size());
+    for (const auto& covering : ast.covering_columns) {
+        request.covering_column_names.push_back(covering.value);
+    }
+
+    if (ast.predicate) {
+        request.predicate = *ast.predicate;
+    }
+
+    if (has_error(outcome.diagnostics)) {
+        return outcome;
+    }
+
+    outcome.commands.emplace_back(std::move(request));
+    return outcome;
+}
+
 TranslationOutcome translate_statement(const ScriptStatement& statement, const DdlCommandBuilderConfig& config)
 {
     TranslationOutcome outcome{};
@@ -419,6 +493,10 @@ TranslationOutcome translate_statement(const ScriptStatement& statement, const D
 
     if (std::holds_alternative<DropTableStatement>(statement.ast)) {
         return translate_drop_table(std::get<DropTableStatement>(statement.ast), statement, config);
+    }
+
+    if (std::holds_alternative<CreateIndexStatement>(statement.ast)) {
+        return translate_create_index(std::get<CreateIndexStatement>(statement.ast), statement, config);
     }
 
     if (std::holds_alternative<CreateViewStatement>(statement.ast)) {

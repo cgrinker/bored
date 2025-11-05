@@ -43,6 +43,7 @@ enum class StatementType : std::uint8_t {
     DropSchema,
     CreateTable,
     DropTable,
+    CreateIndex,
     CreateView
 };
 
@@ -53,6 +54,7 @@ using StatementAst = std::variant<std::monostate,
                                    DropSchemaStatement,
                                    CreateTableStatement,
                                    DropTableStatement,
+                                   CreateIndexStatement,
                                    CreateViewStatement>;
 
 struct ScriptStatement final {
