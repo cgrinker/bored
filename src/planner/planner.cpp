@@ -313,6 +313,9 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
         if (properties.executor_strategy.empty()) {
             properties.executor_strategy = "materialize(spool)";
         }
+        MaterializeProperties materialize_props{};
+        materialize_props.worktable_id = context.allocate_worktable_id();
+        properties.materialize = materialize_props;
     }
 
     const auto apply_constraint_enforcement = [&](std::vector<PhysicalOperatorPtr>& children) {

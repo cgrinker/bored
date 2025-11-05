@@ -145,6 +145,9 @@ std::optional<WorkTableRegistry::RecursiveCursor> SpoolExecutor::recursive_curso
     if (!materialized_) {
         return std::nullopt;
     }
+    if (!config_.enable_recursive_cursor) {
+        return std::nullopt;
+    }
     if (config_.worktable_registry == nullptr || !config_.worktable_id.has_value()) {
         return std::nullopt;
     }

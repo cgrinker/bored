@@ -23,6 +23,7 @@ public:
         std::size_t reserve_rows = 0U;
         WorkTableRegistry* worktable_registry = nullptr;
         std::optional<std::uint64_t> worktable_id{};
+        bool enable_recursive_cursor = false;
     };
 
     SpoolExecutor(ExecutorNodePtr child, Config config);

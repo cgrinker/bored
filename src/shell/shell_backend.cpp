@@ -692,7 +692,9 @@ std::string join_strings(const std::vector<std::string>& values, std::string_vie
 std::string build_executor_pipeline_detail(std::string_view statement,
                                            std::string_view root,
                                            std::initializer_list<std::string_view> chain,
-                                           bool materialized)
+                                           bool materialized,
+                                           std::optional<std::uint64_t> worktable_id,
+                                           bool recursive_cursor)
 {
     std::string detail = "executor.pipeline=";
     detail.append(statement);
@@ -713,6 +715,16 @@ std::string build_executor_pipeline_detail(std::string_view statement,
     }
     detail.append(" materialized=");
     detail.append(materialized ? "true" : "false");
+    if (materialized) {
+        detail.append(" worktable_id=");
+        if (worktable_id.has_value()) {
+            detail.append(std::to_string(*worktable_id));
+        } else {
+            detail.append("<unspecified>");
+        }
+        detail.append(" recursive_cursor=");
+        detail.append(recursive_cursor ? "true" : "false");
+    }
     return detail;
 }
 
@@ -2766,12 +2778,21 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     }
 
     bool requires_materialize_spool = false;
+    std::optional<std::uint64_t> materialize_worktable_id;
+    bool materialize_requires_recursive_cursor = false;
     while (current &&
            (current->type() == planner::PhysicalOperatorType::Materialize ||
             current->type() == planner::PhysicalOperatorType::UniqueEnforce ||
             current->type() == planner::PhysicalOperatorType::ForeignKeyCheck)) {
         if (current->type() == planner::PhysicalOperatorType::Materialize) {
             requires_materialize_spool = true;
+            if (!materialize_worktable_id.has_value()) {
+                const auto& props = current->properties().materialize;
+                if (props.has_value()) {
+                    materialize_worktable_id = props->worktable_id;
+                    materialize_requires_recursive_cursor = props->enable_recursive_cursor;
+                }
+            }
         }
         if (current->children().empty() || !current->children().front()) {
             break;
@@ -2790,6 +2811,8 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     details.root_detail = std::string(root_label) + " (children=" + std::to_string(plan_root->children().size()) + ")";
     details.detail_lines = std::move(planner_result.diagnostics);
     details.requires_materialize_spool = requires_materialize_spool;
+    details.materialize_worktable_id = materialize_worktable_id;
+    details.materialize_requires_recursive_cursor = materialize_requires_recursive_cursor;
     return details;
 }
 
@@ -2852,10 +2875,19 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     };
 
     bool requires_materialize_spool = false;
+    std::optional<std::uint64_t> materialize_worktable_id;
+    bool materialize_requires_recursive_cursor = false;
     const planner::PhysicalOperator* cursor = plan_root.get();
     while (cursor != nullptr) {
         if (cursor->type() == planner::PhysicalOperatorType::Materialize) {
             requires_materialize_spool = true;
+            if (!materialize_worktable_id.has_value()) {
+                const auto& props = cursor->properties().materialize;
+                if (props.has_value()) {
+                    materialize_worktable_id = props->worktable_id;
+                    materialize_requires_recursive_cursor = props->enable_recursive_cursor;
+                }
+            }
         }
         if (cursor->children().empty() || !cursor->children().front()) {
             break;
@@ -2894,6 +2926,8 @@ std::variant<ShellBackend::PlannerPlanDetails, CommandMetrics> ShellBackend::pla
     details.root_detail = std::move(root_detail);
     details.detail_lines = std::move(planner_result.diagnostics);
     details.requires_materialize_spool = requires_materialize_spool;
+    details.materialize_worktable_id = materialize_worktable_id;
+    details.materialize_requires_recursive_cursor = materialize_requires_recursive_cursor;
     return details;
 }
 
@@ -3564,7 +3598,9 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
     const auto insert_pipeline = build_executor_pipeline_detail("INSERT",
                                                                 "Insert",
                                                                 {"Values"},
-                                                                plan_details.requires_materialize_spool);
+                                                                plan_details.requires_materialize_spool,
+                                                                plan_details.materialize_worktable_id,
+                                                                plan_details.materialize_requires_recursive_cursor);
     metrics.detail_lines.push_back(insert_pipeline);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
@@ -3976,6 +4012,8 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
         bored::executor::SpoolExecutor::Config spool_config{};
         spool_config.telemetry = &update_telemetry;
         spool_config.telemetry_identifier = "shell.update.materialize";
+        spool_config.worktable_id = plan_details.materialize_worktable_id;
+        spool_config.enable_recursive_cursor = plan_details.materialize_requires_recursive_cursor;
         update_input = std::make_unique<bored::executor::SpoolExecutor>(std::move(update_input), std::move(spool_config));
     }
 
@@ -4018,7 +4056,9 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
     const auto update_pipeline = build_executor_pipeline_detail("UPDATE",
                                                                 "Update",
                                                                 update_chain,
-                                                                plan_details.requires_materialize_spool);
+                                                                plan_details.requires_materialize_spool,
+                                                                plan_details.materialize_worktable_id,
+                                                                plan_details.materialize_requires_recursive_cursor);
     metrics.detail_lines.push_back(update_pipeline);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
@@ -4236,6 +4276,8 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
         bored::executor::SpoolExecutor::Config spool_config{};
         spool_config.telemetry = &delete_telemetry;
         spool_config.telemetry_identifier = "shell.delete.materialize";
+        spool_config.worktable_id = plan_details.materialize_worktable_id;
+        spool_config.enable_recursive_cursor = plan_details.materialize_requires_recursive_cursor;
         delete_input = std::make_unique<bored::executor::SpoolExecutor>(std::move(delete_input), std::move(spool_config));
     }
 
@@ -4276,7 +4318,9 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
     const auto delete_pipeline = build_executor_pipeline_detail("DELETE",
                                                                 "Delete",
                                                                 delete_chain,
-                                                                plan_details.requires_materialize_spool);
+                                                                plan_details.requires_materialize_spool,
+                                                                plan_details.materialize_worktable_id,
+                                                                plan_details.materialize_requires_recursive_cursor);
     metrics.detail_lines.push_back(delete_pipeline);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),
@@ -4437,6 +4481,8 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         bored::executor::SpoolExecutor::Config spool_config{};
         spool_config.telemetry = &select_telemetry;
         spool_config.telemetry_identifier = "shell.select.materialize";
+        spool_config.worktable_id = plan_details.materialize_worktable_id;
+        spool_config.enable_recursive_cursor = plan_details.materialize_requires_recursive_cursor;
         select_pipeline = std::make_unique<bored::executor::SpoolExecutor>(std::move(select_pipeline), std::move(spool_config));
     }
 
@@ -4533,7 +4579,9 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
     const auto select_pipeline_detail = build_executor_pipeline_detail("SELECT",
                                                                        plan_details.requires_materialize_spool ? "Spool" : "SeqScan",
                                                                        select_chain,
-                                                                       plan_details.requires_materialize_spool);
+                                                                       plan_details.requires_materialize_spool,
+                                                                       plan_details.materialize_worktable_id,
+                                                                       plan_details.materialize_requires_recursive_cursor);
     metrics.detail_lines.push_back(select_pipeline_detail);
     metrics.detail_lines.insert(metrics.detail_lines.end(),
                                 executor_detail_lines.begin(),

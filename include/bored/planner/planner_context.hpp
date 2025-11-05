@@ -3,6 +3,7 @@
 #include "bored/planner/rule.hpp"
 #include "bored/txn/transaction_types.hpp"
 
+#include <cstdint>
 #include <optional>
 
 namespace bored::catalog {
@@ -42,10 +43,12 @@ public:
     [[nodiscard]] const PlannerOptions& options() const noexcept;
     [[nodiscard]] PlannerTelemetry* telemetry() const noexcept;
     [[nodiscard]] std::uint64_t allocate_executor_operator_id() const noexcept;
+    [[nodiscard]] std::uint64_t allocate_worktable_id() const noexcept;
 
 private:
     PlannerContextConfig config_{};
     mutable std::uint64_t next_executor_operator_id_ = 1U;
+    mutable std::uint64_t next_worktable_id_ = 1U;
 };
 
 }  // namespace bored::planner

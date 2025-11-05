@@ -145,6 +145,8 @@ private:
         std::vector<std::string> detail_lines{};
         planner::PhysicalPlan plan{};
         bool requires_materialize_spool = false;
+        std::optional<std::uint64_t> materialize_worktable_id{};
+        bool materialize_requires_recursive_cursor = false;
     };
 
     struct UniqueConstraintPlan final {

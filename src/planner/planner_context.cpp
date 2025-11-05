@@ -44,4 +44,9 @@ std::uint64_t PlannerContext::allocate_executor_operator_id() const noexcept
     return next_executor_operator_id_++;
 }
 
+std::uint64_t PlannerContext::allocate_worktable_id() const noexcept
+{
+    return next_worktable_id_++;
+}
+
 }  // namespace bored::planner

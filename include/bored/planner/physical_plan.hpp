@@ -4,6 +4,7 @@
 #include "bored/txn/transaction_types.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -52,6 +53,11 @@ struct ForeignKeyEnforcementProperties final {
     std::vector<std::string> referenced_columns{};
 };
 
+struct MaterializeProperties final {
+    std::uint64_t worktable_id = 0U;
+    bool enable_recursive_cursor = false;
+};
+
 struct PhysicalProperties final {
     std::size_t expected_cardinality = 0U;
     bool preserves_order = false;
@@ -67,6 +73,7 @@ struct PhysicalProperties final {
     std::string executor_strategy{};
     std::optional<UniqueEnforcementProperties> unique_enforcement{};
     std::optional<ForeignKeyEnforcementProperties> foreign_key_enforcement{};
+    std::optional<MaterializeProperties> materialize{};
 };
 
 class PhysicalOperator;
