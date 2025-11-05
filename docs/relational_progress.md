@@ -4,7 +4,7 @@ This ticket-level report summarizes the relational engine roadmap, capturing wha
 
 _Last updated: 2025-11-05_
 
-Latest validation: `ctest --output-on-failure` (465/465) on 2025-11-05 covering recursive spool selection, multi-statement worktable reuse, and advanced index catalog metadata propagation; `build/bored_benchmarks --samples=10 --json` captured updated baselines (including `spool_worktable_recovery`) on 2025-11-04.
+Latest validation: `ctest --output-on-failure` (466/466) on 2025-11-05 covering recursive spool selection, multi-statement worktable reuse, and advanced index catalog metadata propagation; `build/bored_benchmarks --samples=10 --json` refreshed FSM refresh, retention pruning, overflow replay, and spool recovery baselines on 2025-11-05.
 
 ## Current Capabilities
 
