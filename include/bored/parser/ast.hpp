@@ -50,7 +50,7 @@ struct CreateIndexStatement final {
     Identifier name{};
     Identifier table{};
     std::vector<Identifier> columns{};
-    std::optional<std::uint16_t> max_fanout{};
+    std::optional<std::uint32_t> max_fanout{};
     std::optional<std::string> comparator{};
     bool unique = false;
     std::vector<Identifier> covering_columns{};

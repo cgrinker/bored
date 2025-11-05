@@ -65,6 +65,21 @@ struct kw_table : keyword<'T', 'A', 'B', 'L', 'E'> {
 struct kw_view : keyword<'V', 'I', 'E', 'W'> {
 };
 
+struct kw_index : keyword<'I', 'N', 'D', 'E', 'X'> {
+};
+
+struct kw_using : keyword<'U', 'S', 'I', 'N', 'G'> {
+};
+
+struct kw_include : keyword<'I', 'N', 'C', 'L', 'U', 'D', 'E'> {
+};
+
+struct kw_fanout : keyword<'F', 'A', 'N', 'O', 'U', 'T'> {
+};
+
+struct kw_comparator : keyword<'C', 'O', 'M', 'P', 'A', 'R', 'A', 'T', 'O', 'R'> {
+};
+
 struct kw_select : keyword<'S', 'E', 'L', 'E', 'C', 'T'> {
 };
 
@@ -277,6 +292,121 @@ struct column_identifier : identifier_rule {
 };
 
 struct type_identifier : identifier_rule {
+};
+
+struct index_name_head : identifier_rule {
+};
+
+struct index_name_tail : identifier_rule {
+};
+
+struct index_name_rule
+    : pegtl::seq<index_name_head,
+                 pegtl::opt<pegtl::seq<optional_space, dot, optional_space, index_name_tail>>> {
+};
+
+struct index_table_identifier : identifier_rule {
+};
+
+struct index_column_identifier : identifier_rule {
+};
+
+struct covering_column_identifier : identifier_rule {
+};
+
+struct index_column_list_rule
+    : pegtl::seq<left_paren,
+                 optional_space,
+                 index_column_identifier,
+                 pegtl::star<pegtl::seq<optional_space, comma, optional_space, index_column_identifier>>,
+                 optional_space,
+                 right_paren> {
+};
+
+struct index_covering_list_rule
+    : pegtl::seq<left_paren,
+                 optional_space,
+                 covering_column_identifier,
+                 pegtl::star<pegtl::seq<optional_space, comma, optional_space, covering_column_identifier>>,
+                 optional_space,
+                 right_paren> {
+};
+
+struct index_using_comparator_identifier : identifier_rule {
+};
+
+struct index_with_comparator_value_rule : identifier_rule {
+};
+
+struct fanout_value_rule : pegtl::plus<pegtl::digit> {
+};
+
+struct index_using_clause_rule : pegtl::seq<required_space, kw_using, required_space, index_using_comparator_identifier> {
+};
+
+struct index_with_fanout_rule
+    : pegtl::seq<kw_fanout, optional_space, pegtl::one<'='>, optional_space, fanout_value_rule> {
+};
+
+struct index_with_comparator_rule
+    : pegtl::seq<kw_comparator, optional_space, pegtl::one<'='>, optional_space, index_with_comparator_value_rule> {
+};
+
+struct index_with_option_rule
+    : pegtl::sor<index_with_fanout_rule, index_with_comparator_rule> {
+};
+
+struct index_with_option_list_rule
+    : pegtl::seq<index_with_option_rule,
+                 pegtl::star<optional_space, comma, optional_space, index_with_option_rule>> {
+};
+
+struct index_with_clause_rule
+    : pegtl::seq<required_space,
+                 kw_with,
+                 optional_space,
+                 left_paren,
+                 optional_space,
+                 index_with_option_list_rule,
+                 optional_space,
+                 right_paren> {
+};
+
+struct index_include_clause_rule
+    : pegtl::seq<required_space, kw_include, optional_space, index_covering_list_rule> {
+};
+
+struct index_columns_clause_rule : pegtl::seq<optional_space, index_column_list_rule> {
+};
+
+struct index_predicate_rule : pegtl::star<pegtl::not_one<';'>> {
+};
+
+struct index_where_clause_rule
+    : pegtl::seq<required_space, kw_where, required_space, index_predicate_rule> {
+};
+
+struct create_index_grammar
+    : pegtl::seq<optional_space,
+                 kw_create,
+                 required_space,
+                 pegtl::opt<pegtl::seq<kw_unique, required_space>>,
+                 kw_index,
+                 required_space,
+                 pegtl::opt<pegtl::seq<if_not_exists_rule, required_space>>,
+                 index_name_rule,
+                 required_space,
+                 kw_on,
+                 required_space,
+                 index_table_identifier,
+                 pegtl::opt<index_using_clause_rule>,
+                 index_columns_clause_rule,
+                 pegtl::opt<index_include_clause_rule>,
+                 pegtl::opt<index_with_clause_rule>,
+                 pegtl::opt<index_where_clause_rule>,
+                 optional_space,
+                 pegtl::opt<pegtl::seq<semicolon, optional_space>>,
+                 pegtl::eof> {
 };
 
 struct not_keyword : keyword<'N', 'O', 'T'> {
@@ -699,6 +829,52 @@ struct CreateTableParseState final {
     std::optional<Identifier> pending_constraint_name{};
 };
 
+struct CreateIndexParseState final {
+    bool fanout_invalid = false;
+    std::string fanout_token{};
+};
+
+void append_create_index_diagnostics(const CreateIndexStatement& statement,
+                                     const CreateIndexParseState& state,
+                                     std::string_view source,
+                                     std::vector<ParserDiagnostic>& diagnostics)
+{
+    std::unordered_set<std::string> seen_columns{};
+    for (const auto& column : statement.columns) {
+        auto [_, inserted] = seen_columns.insert(column.value);
+        if (!inserted) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Warning;
+            diagnostic.message = "Duplicate index column '" + column.value + "'";
+            diagnostic.statement = trim_copy(source);
+            diagnostic.remediation_hints = {"Remove duplicates from the index column list."};
+            diagnostics.push_back(std::move(diagnostic));
+        }
+    }
+
+    std::unordered_set<std::string> seen_covering{};
+    for (const auto& column : statement.covering_columns) {
+        auto [_, inserted] = seen_covering.insert(column.value);
+        if (!inserted) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Warning;
+            diagnostic.message = "Duplicate covering column '" + column.value + "'";
+            diagnostic.statement = trim_copy(source);
+            diagnostic.remediation_hints = {"Remove duplicates from the INCLUDE clause."};
+            diagnostics.push_back(std::move(diagnostic));
+        }
+    }
+
+    if (state.fanout_invalid) {
+        ParserDiagnostic diagnostic{};
+        diagnostic.severity = ParserSeverity::Error;
+        diagnostic.message = "CREATE INDEX fanout value '" + state.fanout_token + "' is not a valid unsigned integer.";
+        diagnostic.statement = trim_copy(source);
+        diagnostic.remediation_hints = {"Specify a positive integer in the WITH ( FANOUT = n ) clause."};
+        diagnostics.push_back(std::move(diagnostic));
+    }
+}
+
 void convert_embedded_statements(const std::vector<std::string>& raw_statements,
                                  CreateSchemaStatement& statement,
                                  std::vector<ParserDiagnostic>& diagnostics)
@@ -1089,6 +1265,130 @@ struct create_table_action<unique_constraint_rule> {
             }
         }
         state.pending_constraint_name.reset();
+    }
+};
+
+template <typename Rule>
+struct create_index_action {
+    template <typename Input>
+    static void apply(const Input&, CreateIndexStatement&, CreateIndexParseState&)
+    {
+    }
+};
+
+template <>
+struct create_index_action<kw_unique> {
+    template <typename Input>
+    static void apply(const Input&, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        statement.unique = true;
+    }
+};
+
+template <>
+struct create_index_action<if_not_exists_rule> {
+    template <typename Input>
+    static void apply(const Input&, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        statement.if_not_exists = true;
+    }
+};
+
+template <>
+struct create_index_action<index_name_head> {
+    template <typename Input>
+    static void apply(const Input& in, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        statement.schema.value.clear();
+        statement.name.value = in.string();
+    }
+};
+
+template <>
+struct create_index_action<index_name_tail> {
+    template <typename Input>
+    static void apply(const Input& in, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        statement.schema.value = statement.name.value;
+        statement.name.value = in.string();
+    }
+};
+
+template <>
+struct create_index_action<index_table_identifier> {
+    template <typename Input>
+    static void apply(const Input& in, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        statement.table.value = in.string();
+    }
+};
+
+template <>
+struct create_index_action<index_column_identifier> {
+    template <typename Input>
+    static void apply(const Input& in, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        Identifier column{};
+        column.value = in.string();
+        statement.columns.push_back(std::move(column));
+    }
+};
+
+template <>
+struct create_index_action<covering_column_identifier> {
+    template <typename Input>
+    static void apply(const Input& in, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        Identifier column{};
+        column.value = in.string();
+        statement.covering_columns.push_back(std::move(column));
+    }
+};
+
+template <>
+struct create_index_action<index_using_comparator_identifier> {
+    template <typename Input>
+    static void apply(const Input& in, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        statement.comparator = in.string();
+    }
+};
+
+template <>
+struct create_index_action<index_with_comparator_value_rule> {
+    template <typename Input>
+    static void apply(const Input& in, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        statement.comparator = in.string();
+    }
+};
+
+template <>
+struct create_index_action<fanout_value_rule> {
+    template <typename Input>
+    static void apply(const Input& in, CreateIndexStatement& statement, CreateIndexParseState& state)
+    {
+        const auto text = trim_copy(in.string());
+        state.fanout_token = text;
+        try {
+            const auto value = std::stoul(text);
+            statement.max_fanout = static_cast<std::uint32_t>(value);
+            state.fanout_invalid = false;
+        } catch (const std::exception&) {
+            statement.max_fanout.reset();
+            state.fanout_invalid = true;
+        }
+    }
+};
+
+template <>
+struct create_index_action<index_predicate_rule> {
+    template <typename Input>
+    static void apply(const Input& in, CreateIndexStatement& statement, CreateIndexParseState&)
+    {
+        if (auto predicate = trim_copy(in.string()); !predicate.empty()) {
+            statement.predicate = std::move(predicate);
+        }
     }
 };
 
@@ -2423,6 +2723,16 @@ StatementType classify_statement(std::string_view text)
         if (iequals(second, "TABLE")) {
             return StatementType::CreateTable;
         }
+        if (iequals(second, "INDEX")) {
+            return StatementType::CreateIndex;
+        }
+        if (iequals(second, "UNIQUE")) {
+            auto lookahead = offset;
+            const auto third = next_token(text, lookahead);
+            if (iequals(third, "INDEX")) {
+                return StatementType::CreateIndex;
+            }
+        }
         if (iequals(second, "VIEW")) {
             return StatementType::CreateView;
         }
@@ -2507,6 +2817,9 @@ ScriptStatement parse_script_statement(std::string text)
             break;
         case StatementType::CreateTable:
             propagate(parse_create_table(statement.text));
+            break;
+        case StatementType::CreateIndex:
+            propagate(parse_create_index(statement.text));
             break;
         case StatementType::DropTable:
             propagate(parse_drop_table(statement.text));
@@ -2689,6 +3002,35 @@ ParseResult<CreateTableStatement> parse_create_table(std::string_view input)
             ParserDiagnostic diagnostic{};
             diagnostic.severity = ParserSeverity::Warning;
             diagnostic.message = "input did not match CREATE TABLE grammar";
+            diagnostic.line = 1U;
+            diagnostic.column = 1U;
+            diagnostic.statement = trim_copy(input);
+            diagnostic.remediation_hints = {"Review the SQL syntax near the reported token."};
+            result.diagnostics.push_back(std::move(diagnostic));
+        }
+    } catch (const pegtl::parse_error& error) {
+        result.diagnostics.push_back(make_parse_error(error, input));
+    }
+
+    return result;
+}
+
+ParseResult<CreateIndexStatement> parse_create_index(std::string_view input)
+{
+    ParseResult<CreateIndexStatement> result{};
+    pegtl::memory_input in(input, "create_index");
+    CreateIndexStatement statement{};
+    CreateIndexParseState state{};
+
+    try {
+        const auto parsed = pegtl::parse<create_index_grammar, create_index_action>(in, statement, state);
+        if (parsed) {
+            append_create_index_diagnostics(statement, state, input, result.diagnostics);
+            result.ast = std::move(statement);
+        } else {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Warning;
+            diagnostic.message = "input did not match CREATE INDEX grammar";
             diagnostic.line = 1U;
             diagnostic.column = 1U;
             diagnostic.statement = trim_copy(input);

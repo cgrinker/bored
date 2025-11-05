@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <utility>
 #include <variant>
@@ -414,8 +415,15 @@ TranslationOutcome translate_create_index(const CreateIndexStatement& ast,
     request.if_not_exists = ast.if_not_exists;
     request.unique = ast.unique;
 
-    if (ast.max_fanout && *ast.max_fanout > 0U) {
-        request.max_fanout = *ast.max_fanout;
+    if (ast.max_fanout) {
+        if (*ast.max_fanout == 0U || *ast.max_fanout > std::numeric_limits<std::uint16_t>::max()) {
+            outcome.diagnostics.push_back(make_diagnostic(ParserSeverity::Error,
+                                                          "CREATE INDEX fanout must be between 1 and 65535.",
+                                                          statement,
+                                                          {"Adjust the WITH ( FANOUT = n ) clause to a supported range."}));
+        } else {
+            request.max_fanout = static_cast<std::uint16_t>(*ast.max_fanout);
+        }
     }
 
     if (ast.comparator) {

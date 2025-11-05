@@ -74,6 +74,7 @@ ParseResult<DropDatabaseStatement> parse_drop_database(std::string_view input);
 ParseResult<CreateSchemaStatement> parse_create_schema(std::string_view input);
 ParseResult<DropSchemaStatement> parse_drop_schema(std::string_view input);
 ParseResult<CreateTableStatement> parse_create_table(std::string_view input);
+ParseResult<CreateIndexStatement> parse_create_index(std::string_view input);
 ParseResult<DropTableStatement> parse_drop_table(std::string_view input);
 ParseResult<CreateViewStatement> parse_create_view(std::string_view input);
 

@@ -127,7 +127,7 @@ TEST_CASE("build_ddl_commands translates CREATE INDEX")
     index_ast.columns.push_back(Identifier{"tenant_id"});
     index_ast.unique = true;
     index_ast.if_not_exists = true;
-    index_ast.max_fanout = static_cast<std::uint16_t>(128);
+    index_ast.max_fanout = 128U;
     index_ast.comparator = "tenant_cmp";
     index_ast.covering_columns.push_back(Identifier{"payload"});
     index_ast.predicate = "tenant_id >= 0";
@@ -183,6 +183,52 @@ TEST_CASE("build_ddl_commands rejects CREATE INDEX without columns")
                                                        diagnostic.message.find("CREATE INDEX") != std::string::npos;
                                             });
     CHECK(has_error_diag);
+}
+
+TEST_CASE("parse_create_index captures optional clauses")
+{
+    const auto result = parse_create_index(
+        "CREATE UNIQUE INDEX IF NOT EXISTS analytics.idx_metrics_tenant ON metrics USING tenant_cmp (tenant_id, created_at) INCLUDE (payload, notes) WITH ( FANOUT = 256, COMPARATOR = tenant_custom_cmp ) WHERE tenant_id >= 0;");
+
+    REQUIRE(result.ast);
+    const auto& statement = *result.ast;
+    CHECK(statement.unique);
+    CHECK(statement.if_not_exists);
+    CHECK(statement.schema.value == "analytics");
+    CHECK(statement.name.value == "idx_metrics_tenant");
+    CHECK(statement.table.value == "metrics");
+    CHECK(statement.comparator == "tenant_custom_cmp");
+    CHECK(statement.max_fanout == 256U);
+    REQUIRE(statement.columns.size() == 2U);
+    CHECK(statement.columns[0].value == "tenant_id");
+    CHECK(statement.columns[1].value == "created_at");
+    REQUIRE(statement.covering_columns.size() == 2U);
+    CHECK(statement.covering_columns[0].value == "payload");
+    CHECK(statement.covering_columns[1].value == "notes");
+    REQUIRE(statement.predicate);
+    CHECK(*statement.predicate == "tenant_id >= 0");
+    CHECK(result.diagnostics.empty());
+}
+
+TEST_CASE("build_ddl_commands translates CREATE INDEX from script")
+{
+    auto config = make_config();
+    const auto script = parse_ddl_script(
+        "CREATE INDEX IF NOT EXISTS idx_metrics_tenant ON metrics (tenant_id) WITH ( FANOUT = 512 );");
+
+    const auto result = build_ddl_commands(script, config);
+
+    REQUIRE(result.diagnostics.empty());
+    REQUIRE(result.commands.size() == 1U);
+    const auto& command = result.commands.front();
+    REQUIRE(std::holds_alternative<bored::ddl::CreateIndexRequest>(command));
+    const auto& request = std::get<bored::ddl::CreateIndexRequest>(command);
+    CHECK(request.schema_id == *config.default_schema_id);
+    CHECK(request.table_name == "metrics");
+    CHECK(request.index_name == "idx_metrics_tenant");
+    REQUIRE(request.column_names.size() == 1U);
+    CHECK(request.column_names.front() == "tenant_id");
+    CHECK(request.max_fanout == 512);
 }
 
 TEST_CASE("build_ddl_commands maps DROP SCHEMA cascade flag")
