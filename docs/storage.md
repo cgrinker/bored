@@ -68,7 +68,7 @@ This document captures the first pass at the on-disk layout for the experimental
 ### Diagnostics Entry Points
 
 - **Telemetry snapshots:** Call `storage::collect_storage_diagnostics()` (see `storage_diagnostics.hpp`) to obtain a JSON blob containing WAL writer throughput, checkpoint cadence, retention pruning counts, vacuum activity, and transaction horizon gauges. The export now promotes `last_checkpoint_lsn` and `outstanding_replay_backlog_bytes` to top-level fields so operators can gauge restart readiness at a glance. Surface this through an HTTP endpoint or CLI command; consumers should treat missing fields as component-disabled rather than failure.
-- **Shell recipes:** Follow the step-by-step `docs/storage_shell_recipes.md` runbook when triaging checkpoint lag, retention backlog, lock contention, or executor hot spots. The recipes pair shell `\d*` introspection commands with `boredctl` diagnostics exports and structured command logs.
+- **Shell recipes:** Follow the step-by-step `docs/storage_shell_recipes.md` runbook when triaging checkpoint lag, retention backlog, lock contention, or executor hot spots. The recipes pair shell `\d*` introspection commands with `boredctl` diagnostics exports and structured command logs. Use `EXPLAIN` to inspect executor pipelines: materialize nodes now surface `worktable=<id>` and `recursive_cursor=enabled|disabled`, making it obvious when recursive spools are active without pulling telemetry dumps.
 
 ### Alert thresholds
 

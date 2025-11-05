@@ -280,6 +280,7 @@ if(BORED_ENABLE_TESTS)
     tests/executor_spill_recovery_integration_tests.cpp
     tests/executor_join_aggregate_integration_tests.cpp
         tests/executor_milestone1_tests.cpp
+    tests/executor_integration_tests.cpp
     )
 
     target_link_libraries(${PROJECT_NAME}_tests

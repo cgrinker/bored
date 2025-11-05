@@ -26,6 +26,7 @@ _Last updated: 2025-11-04_
 
 ## Diagnostics Checklist
 - Inspect shell plan detail lines after `SELECT`, `UPDATE`, or `DELETE` statements; ensure the reported executor pipeline lists `Spool` whenever replay is expected.
+- Run `EXPLAIN` in the shell and confirm the materialize node now prints `Materialize [output=..., worktable=ID, recursive_cursor=enabled|disabled]` so operators can verify cursor wiring without inspecting telemetry dumps.
 - Capture storage diagnostics before and after workload changes to monitor `spool_latency.invocations` and `spool_latency.total_duration_ns` trends.
 - Run the spool crash drills (`ctest -R "Wal crash drill rehydrates spool"`) after changes to recovery code to confirm worktables survive restart scenarios.
 - When custom registries are supplied, make sure each logical worktable uses a stable `worktable_id` so cached rows can be located across executor instances.
@@ -36,7 +37,7 @@ _Last updated: 2025-11-04_
 - Use the recorded metrics in `benchmarks/baseline_results.json` to flag regressions. The baseline currently tracks mean and p95 timings for the recursive spool drill alongside FSM refresh and WAL retention/replay workloads.
 - Training checklist for operators exploring recursive workloads:
   1. Inspect shell plans for `RecursiveMaterialize`/`Spool` pairs and confirm worktable IDs remain stable across statements.
-  2. Verify registry snapshots using the shell telemetry surface (`storage diagnostics spoolLatency`), checking that delta invocations align with expected recursion depth.
+  2. Verify registry snapshots using the shell telemetry surface (`storage diagnostics spoolLatency`), checking that delta invocations align with expected recursion depth. Combine this with the shell `EXPLAIN` output above to confirm recursive cursors stay enabled.
   3. Re-run the benchmark command above after tuning spool heuristics or WAL retention knobs, comparing results to the baseline JSON and capturing deviations in release notes.
 
 Keeping the playbook handy ensures teams validate recursive spool behaviour (seed reuse, delta drains, and latency budgets) before enabling recursive CTE plans in production pipelines.

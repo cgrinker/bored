@@ -92,6 +92,30 @@ TEST_CASE("explain_plan renders join strategy hint")
     CHECK_THAT(rendered, ContainsSubstring("HashJoin [cardinality=1024, batch=128, strategy=hash(build=left, probe=right)]"));
 }
 
+TEST_CASE("explain_plan annotates materialize spool properties")
+{
+    PhysicalProperties scan_props{};
+    scan_props.output_columns = {"id"};
+    auto scan = PhysicalOperator::make(PhysicalOperatorType::SeqScan, {}, scan_props);
+
+    PhysicalProperties materialize_props{};
+    materialize_props.output_columns = scan_props.output_columns;
+    MaterializeProperties materialize_detail{};
+    materialize_detail.worktable_id = 42U;
+    materialize_detail.enable_recursive_cursor = true;
+    materialize_props.materialize = materialize_detail;
+
+    auto materialize = PhysicalOperator::make(PhysicalOperatorType::Materialize, {scan}, materialize_props);
+    PhysicalPlan plan{materialize};
+
+    ExplainOptions options{};
+    options.include_properties = true;
+
+    const auto rendered = explain_plan(plan, options);
+    CHECK_THAT(rendered, ContainsSubstring("Materialize [output=[id], worktable=42, recursive_cursor=enabled]"));
+    CHECK_THAT(rendered, ContainsSubstring("\n  - SeqScan"));
+}
+
 TEST_CASE("explain_plan attaches runtime stats when provided")
 {
     PhysicalProperties scan_props{};

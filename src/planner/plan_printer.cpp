@@ -177,6 +177,13 @@ std::string describe(const PhysicalOperatorPtr& node, const ExplainOptions& opti
             details.push_back("referenced=" + join(fk.referenced_columns));
         }
     }
+    if (props.materialize.has_value()) {
+        const auto& materialize = *props.materialize;
+        if (materialize.worktable_id != 0U) {
+            details.push_back("worktable=" + std::to_string(materialize.worktable_id));
+        }
+        details.push_back(std::string{"recursive_cursor="} + (materialize.enable_recursive_cursor ? "enabled" : "disabled"));
+    }
 
     const auto runtime_detail = format_runtime(props, options);
     if (!runtime_detail.empty()) {

@@ -7,6 +7,10 @@
 #include "bored/ddl/ddl_handlers.hpp"
 #include "bored/parser/ddl_command_builder.hpp"
 #include "bored/parser/ddl_script_executor.hpp"
+#include "bored/executor/spool_executor.hpp"
+#include "bored/executor/tuple_format.hpp"
+#include "bored/executor/worktable_registry.hpp"
+#include "bored/shell/shell_backend.hpp"
 #include "bored/shell/shell_engine.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/txn/transaction_manager.hpp"
@@ -17,7 +21,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
@@ -31,6 +37,17 @@
 #include <vector>
 
 using namespace bored;
+
+namespace bored::shell {
+
+struct ShellBackendTestAccess final {
+    static bored::executor::WorkTableRegistry& worktable_registry(ShellBackend& backend)
+    {
+        return backend.worktable_registry_;
+    }
+};
+
+}  // namespace bored::shell
 
 namespace {
 
@@ -282,4 +299,167 @@ TEST_CASE("ShellEngine executes DDL end-to-end via catalog handlers")
     });
     REQUIRE(name_column != columns.end());
     CHECK(name_column->relation_id == table.relation_id);
+}
+
+namespace {
+
+std::vector<std::byte> encode_uint32(std::uint32_t value)
+{
+    std::vector<std::byte> bytes(sizeof(value));
+    std::memcpy(bytes.data(), &value, sizeof(value));
+    return bytes;
+}
+
+std::uint32_t decode_uint32(const std::span<const std::byte>& bytes)
+{
+    std::uint32_t value = 0U;
+    REQUIRE(bytes.size() == sizeof(value));
+    std::memcpy(&value, bytes.data(), sizeof(value));
+    return value;
+}
+
+class BackendChildExecutor final : public executor::ExecutorNode {
+public:
+    explicit BackendChildExecutor(std::vector<std::vector<std::byte>> rows)
+        : rows_{std::move(rows)}
+    {
+    }
+
+    void open(executor::ExecutorContext&) override
+    {
+        ++open_count_;
+        index_ = 0U;
+    }
+
+    bool next(executor::ExecutorContext&, executor::TupleBuffer& buffer) override
+    {
+        if (index_ >= rows_.size()) {
+            return false;
+        }
+
+        executor::TupleWriter writer{buffer};
+        writer.reset();
+        writer.append_column(std::span<const std::byte>(rows_[index_].data(), rows_[index_].size()), false);
+        writer.finalize();
+        ++index_;
+        ++produced_count_;
+        return true;
+    }
+
+    void close(executor::ExecutorContext&) override
+    {
+        ++close_count_;
+    }
+
+    [[nodiscard]] std::size_t open_count() const noexcept { return open_count_; }
+    [[nodiscard]] std::size_t produced_count() const noexcept { return produced_count_; }
+
+private:
+    std::vector<std::vector<std::byte>> rows_{};
+    std::size_t index_ = 0U;
+    std::size_t open_count_ = 0U;
+    std::size_t close_count_ = 0U;
+    std::size_t produced_count_ = 0U;
+};
+
+struct ShellStatementResult final {
+    std::vector<std::uint32_t> observed;
+    std::size_t child_open_count = 0U;
+    std::size_t child_produced_count = 0U;
+};
+
+executor::TupleBuffer make_tuple_buffer(std::uint32_t value)
+{
+    executor::TupleBuffer buffer{};
+    executor::TupleWriter writer{buffer};
+    writer.reset();
+    auto bytes = encode_uint32(value);
+    writer.append_column(std::span<const std::byte>(bytes.data(), bytes.size()), false);
+    writer.finalize();
+    return buffer;
+}
+
+ShellStatementResult run_backend_statement(executor::WorkTableRegistry& registry,
+                                           txn::Snapshot snapshot,
+                                           std::uint64_t worktable_id,
+                                           std::initializer_list<std::uint32_t> child_values,
+                                           std::optional<std::uint32_t> appended_delta)
+{
+    std::vector<std::vector<std::byte>> encoded;
+    encoded.reserve(child_values.size());
+    for (auto value : child_values) {
+        encoded.push_back(encode_uint32(value));
+    }
+
+    auto child = std::make_unique<BackendChildExecutor>(std::move(encoded));
+    auto* raw_child = child.get();
+
+    executor::SpoolExecutor::Config config{};
+    config.worktable_registry = &registry;
+    config.worktable_id = worktable_id;
+    config.enable_recursive_cursor = true;
+
+    executor::SpoolExecutor spool{std::move(child), config};
+
+    executor::ExecutorContext context{};
+    context.set_snapshot(snapshot);
+
+    executor::TupleBuffer buffer{};
+    ShellStatementResult result{};
+
+    spool.open(context);
+    while (spool.next(context, buffer)) {
+        auto view = executor::TupleView::from_buffer(buffer);
+        REQUIRE(view.valid());
+        REQUIRE(view.column_count() == 1U);
+        const auto column = view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        result.observed.push_back(decode_uint32(column.data));
+        buffer.reset();
+    }
+    spool.close(context);
+
+    result.child_open_count = raw_child->open_count();
+    result.child_produced_count = raw_child->produced_count();
+
+    if (appended_delta.has_value()) {
+        auto cursor_opt = spool.recursive_cursor();
+        REQUIRE(cursor_opt.has_value());
+        auto cursor = std::move(*cursor_opt);
+        executor::TupleBuffer delta = make_tuple_buffer(*appended_delta);
+        cursor.append_delta(std::move(delta));
+        cursor.mark_delta_processed();
+    }
+
+    return result;
+}
+
+}  // namespace
+
+TEST_CASE("ShellBackend shares recursive spool deltas across statements")
+{
+    shell::ShellBackend backend;
+    auto& registry = shell::ShellBackendTestAccess::worktable_registry(backend);
+
+    const std::uint64_t worktable_id = 0xACCE55U;
+
+    txn::Snapshot snapshot{};
+    snapshot.read_lsn = 512U;
+    snapshot.xmin = 11U;
+    snapshot.xmax = 4096U;
+
+    auto first = run_backend_statement(registry, snapshot, worktable_id, {1U, 2U}, 3U);
+    CHECK(first.observed == std::vector<std::uint32_t>{1U, 2U});
+    CHECK(first.child_open_count == 1U);
+    CHECK(first.child_produced_count == 2U);
+
+    auto second = run_backend_statement(registry, snapshot, worktable_id, {}, 4U);
+    CHECK(second.observed == std::vector<std::uint32_t>{1U, 2U, 3U});
+    CHECK(second.child_open_count == 0U);
+    CHECK(second.child_produced_count == 0U);
+
+    auto third = run_backend_statement(registry, snapshot, worktable_id, {}, std::nullopt);
+    CHECK(third.observed == std::vector<std::uint32_t>{1U, 2U, 3U, 4U});
+    CHECK(third.child_open_count == 0U);
+    CHECK(third.child_produced_count == 0U);
 }

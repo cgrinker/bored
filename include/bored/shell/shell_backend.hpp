@@ -58,6 +58,7 @@ class ShellInsertTarget;
 class ShellUpdateTarget;
 class ShellDeleteTarget;
 struct ShellBackendSessionAccess;
+struct ShellBackendTestAccess;
 
 class ShellBackend final {
 public:
@@ -140,6 +141,7 @@ private:
     friend class ShellUpdateTarget;
     friend class ShellDeleteTarget;
     friend struct ShellBackendSessionAccess;
+    friend struct ShellBackendTestAccess;
 
     struct PlannerPlanDetails final {
         std::string root_detail{};
