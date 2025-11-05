@@ -65,10 +65,9 @@ Latest validation: Release `ctest` (432/432) on 2025-11-04 after landing spool c
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
    - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines now wrap planner materialize nodes with spool-backed iterators; shell diagnostics surface executor pipeline chains, spool telemetry tests account for terminal reads, the worktable registry exposes snapshot-aware reuse, and crash/restart drills in `tests/wal_replay_tests.cpp` now verify worktables rehydrate across recovery.
    - Remaining tasks:
-      1. Document operator-facing spool controls (diagnostics toggles, telemetry identifiers, worktable behaviour) once iterator plumbing lands.
-      2. Prototype snapshot-aware iterators for recursive CTE seeds and schedule targeted benchmarks for worktable recovery paths.
-   - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp, docs/parser_operator_guide.md
-   - Next work item: Draft operator documentation for spool controls and begin recursive CTE iterator prototyping alongside recovery benchmarking.
+      1. Prototype snapshot-aware iterators for recursive CTE seeds and schedule targeted benchmarks for worktable recovery paths.
+   - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp, docs/spool_operator_guide.md
+   - Next work item: Begin recursive CTE iterator prototyping alongside recovery benchmarking and use the spool operator guide to seed operator training.
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.
