@@ -1,8 +1,10 @@
+#include "bored/planner/detail/memo_search.hpp"
 #include "bored/planner/planner.hpp"
 #include "bored/planner/rule.hpp"
 #include "bored/planner/memo.hpp"
 #include "bored/planner/rules/join_rules.hpp"
 #include "bored/planner/rules/predicate_pushdown_rule.hpp"
+#include "bored/planner/cost_model.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -348,6 +350,52 @@ TEST_CASE("Memo reuses groups for equivalent expressions")
     }
     CHECK(materialize_count == 1U);
     CHECK_FALSE(materialize_requires_recursive_cursor);
+}
+
+TEST_CASE("Planner memo selection honors recursive cursor requirement")
+{
+    Memo memo;
+
+    LogicalProperties inline_props{};
+    inline_props.output_columns = {"id"};
+    inline_props.estimated_cardinality = 128U;
+
+    auto inline_scan = LogicalOperator::make(LogicalOperatorType::TableScan, {}, inline_props);
+    auto group = memo.add_group(inline_scan);
+
+    LogicalProperties materialize_props = inline_props;
+    materialize_props.requires_recursive_cursor = true;
+
+    auto recursive_materialize = LogicalOperator::make(
+        LogicalOperatorType::Materialize,
+        std::vector<LogicalOperatorPtr>{inline_scan},
+        materialize_props);
+
+    memo.add_expression(group, recursive_materialize);
+
+    PlannerContextConfig config{};
+    CostModel cost_model{nullptr};
+    config.cost_model = &cost_model;
+
+    PlannerContext context{config};
+    RuleEngine engine{nullptr};
+    RuleTrace trace{};
+    bored::planner::PlanDiagnostics diagnostics{};
+
+    auto chosen = bored::planner::detail::explore_memo(
+        context,
+        engine,
+        memo,
+        group,
+        &trace,
+        config.cost_model,
+        &diagnostics);
+
+    REQUIRE(chosen);
+    CHECK(chosen->type() == LogicalOperatorType::Materialize);
+    CHECK(chosen->properties().requires_recursive_cursor);
+    REQUIRE(diagnostics.chosen_logical_plan);
+    CHECK(diagnostics.chosen_logical_plan->type() == LogicalOperatorType::Materialize);
 }
 
 TEST_CASE("Rule engine handles empty registry")

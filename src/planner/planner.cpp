@@ -1,4 +1,5 @@
 #include "bored/planner/planner.hpp"
+#include "bored/planner/detail/memo_search.hpp"
 #include "bored/catalog/catalog_accessor.hpp"
 #include "bored/catalog/catalog_relations.hpp"
 #include "bored/planner/cost_model.hpp"
@@ -403,6 +404,10 @@ const RuleRegistry& default_rule_registry()
     return registry;
 }
 
+}  // namespace
+
+namespace detail {
+
 LogicalOperatorPtr explore_memo(const PlannerContext& context,
                                 const RuleEngine& engine,
                                 Memo& memo,
@@ -502,9 +507,49 @@ LogicalOperatorPtr explore_memo(const PlannerContext& context,
         return nullptr;
     }
 
+    const bool group_requires_recursive_cursor = std::any_of(
+        final_group->expressions().begin(),
+        final_group->expressions().end(),
+        [](const LogicalOperatorPtr& expression) {
+            return expression && expression->properties().requires_recursive_cursor;
+        });
+
+    const bool has_recursive_materialize = std::any_of(
+        final_group->expressions().begin(),
+        final_group->expressions().end(),
+        [](const LogicalOperatorPtr& expression) {
+            return expression &&
+                   expression->type() == LogicalOperatorType::Materialize &&
+                   expression->properties().requires_recursive_cursor;
+        });
+
+    const auto satisfies_requirement = [&](const LogicalOperatorPtr& expression) {
+        if (!expression) {
+            return false;
+        }
+        if (!group_requires_recursive_cursor) {
+            return true;
+        }
+        if (!expression->properties().requires_recursive_cursor) {
+            return false;
+        }
+        if (!has_recursive_materialize) {
+            return true;
+        }
+        if (expression->type() == LogicalOperatorType::Materialize) {
+            return true;
+        }
+        for (const auto& child : expression->children()) {
+            if (child && child->properties().requires_recursive_cursor) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     if (!cost_model) {
         for (auto it = final_group->expressions().rbegin(); it != final_group->expressions().rend(); ++it) {
-            if (*it) {
+            if (*it && satisfies_requirement(*it)) {
                 if (diagnostics) {
                     diagnostics->chosen_logical_plan = *it;
                 }
@@ -518,7 +563,7 @@ LogicalOperatorPtr explore_memo(const PlannerContext& context,
     LogicalOperatorPtr best_expression;
 
     for (const auto& expression : final_group->expressions()) {
-        if (!expression) {
+        if (!expression || !satisfies_requirement(expression)) {
             continue;
         }
         const auto estimate = cost_model->estimate_plan(expression);
@@ -543,7 +588,7 @@ LogicalOperatorPtr explore_memo(const PlannerContext& context,
     return best_expression;
 }
 
-}  // namespace
+}  // namespace detail
 
 PlannerResult plan_query(const PlannerContext& context, const LogicalPlan& plan)
 {
@@ -567,13 +612,13 @@ PlannerResult plan_query(const PlannerContext& context, const LogicalPlan& plan)
     RuleEngine engine{&default_rule_registry(), context.options().rule_options};
     RuleTrace trace{};
     const auto* cost_model = context.cost_model();
-    if (auto representative = explore_memo(context,
-                                           engine,
-                                           memo,
-                                           root_group,
-                                           &trace,
-                                           cost_model,
-                                           &result.plan_diagnostics)) {
+    if (auto representative = detail::explore_memo(context,
+                                                   engine,
+                                                   memo,
+                                                   root_group,
+                                                   &trace,
+                                                   cost_model,
+                                                   &result.plan_diagnostics)) {
         root = std::move(representative);
     }
     if (!result.plan_diagnostics.chosen_logical_plan) {
