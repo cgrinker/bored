@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -523,6 +524,59 @@ LogicalOperatorPtr explore_memo(const PlannerContext& context,
                    expression->properties().requires_recursive_cursor;
         });
 
+    const auto contains_recursive_cursor = [](const LogicalOperatorPtr& expression) {
+        if (!expression) {
+            return false;
+        }
+        std::unordered_set<const LogicalOperator*> visited;
+        std::function<bool(const LogicalOperatorPtr&)> visit = [&](const LogicalOperatorPtr& node) -> bool {
+            if (!node) {
+                return false;
+            }
+            const auto* raw = node.get();
+            if (!visited.insert(raw).second) {
+                return false;
+            }
+            if (node->properties().requires_recursive_cursor) {
+                return true;
+            }
+            for (const auto& child : node->children()) {
+                if (visit(child)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        return visit(expression);
+    };
+
+    const auto contains_recursive_materialize = [](const LogicalOperatorPtr& expression) {
+        if (!expression) {
+            return false;
+        }
+        std::unordered_set<const LogicalOperator*> visited;
+        std::function<bool(const LogicalOperatorPtr&)> visit = [&](const LogicalOperatorPtr& node) -> bool {
+            if (!node) {
+                return false;
+            }
+            const auto* raw = node.get();
+            if (!visited.insert(raw).second) {
+                return false;
+            }
+            if (node->type() == LogicalOperatorType::Materialize &&
+                node->properties().requires_recursive_cursor) {
+                return true;
+            }
+            for (const auto& child : node->children()) {
+                if (visit(child)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        return visit(expression);
+    };
+
     const auto satisfies_requirement = [&](const LogicalOperatorPtr& expression) {
         if (!expression) {
             return false;
@@ -530,21 +584,13 @@ LogicalOperatorPtr explore_memo(const PlannerContext& context,
         if (!group_requires_recursive_cursor) {
             return true;
         }
-        if (!expression->properties().requires_recursive_cursor) {
+        if (!contains_recursive_cursor(expression)) {
             return false;
         }
         if (!has_recursive_materialize) {
             return true;
         }
-        if (expression->type() == LogicalOperatorType::Materialize) {
-            return true;
-        }
-        for (const auto& child : expression->children()) {
-            if (child && child->properties().requires_recursive_cursor) {
-                return true;
-            }
-        }
-        return false;
+        return contains_recursive_materialize(expression);
     };
 
     if (!cost_model) {

@@ -14,6 +14,7 @@ using bored::planner::LogicalOperatorType;
 using bored::planner::LogicalPlan;
 using bored::planner::LogicalProperties;
 using bored::planner::Memo;
+using bored::planner::CostModel;
 using bored::planner::PlannerContext;
 using bored::planner::PlannerContextConfig;
 using bored::planner::PlannerOptions;
@@ -394,6 +395,50 @@ TEST_CASE("Planner memo selection honors recursive cursor requirement")
     REQUIRE(chosen);
     CHECK(chosen->type() == LogicalOperatorType::Materialize);
     CHECK(chosen->properties().requires_recursive_cursor);
+    REQUIRE(diagnostics.chosen_logical_plan);
+    CHECK(diagnostics.chosen_logical_plan->type() == LogicalOperatorType::Materialize);
+}
+
+TEST_CASE("Planner memo prefers recursive materialize alternative when available")
+{
+    Memo memo;
+
+    LogicalProperties recursive_props{};
+    recursive_props.output_columns = {"id"};
+    recursive_props.estimated_cardinality = 64U;
+    recursive_props.requires_recursive_cursor = true;
+
+    auto scan = LogicalOperator::make(LogicalOperatorType::TableScan, {}, recursive_props);
+
+    auto materialize = LogicalOperator::make(
+        LogicalOperatorType::Materialize,
+        std::vector<LogicalOperatorPtr>{scan},
+        recursive_props);
+
+    auto group = memo.add_group(materialize);
+
+    auto projection = LogicalOperator::make(
+        LogicalOperatorType::Projection,
+        std::vector<LogicalOperatorPtr>{scan},
+        recursive_props);
+    memo.add_expression(group, projection);
+
+    PlannerContext context{};
+    RuleEngine engine{nullptr};
+    RuleTrace trace{};
+    bored::planner::PlanDiagnostics diagnostics{};
+
+    auto chosen = bored::planner::detail::explore_memo(
+        context,
+        engine,
+        memo,
+        group,
+        &trace,
+        nullptr,
+        &diagnostics);
+
+    REQUIRE(chosen);
+    CHECK(chosen->type() == LogicalOperatorType::Materialize);
     REQUIRE(diagnostics.chosen_logical_plan);
     CHECK(diagnostics.chosen_logical_plan->type() == LogicalOperatorType::Materialize);
 }

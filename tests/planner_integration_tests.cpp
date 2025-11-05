@@ -195,3 +195,33 @@ TEST_CASE("planner integration handles nested projections from CTE inlining")
     REQUIRE(root_props.output_columns.size() == 1U);
     CHECK(root_props.output_columns.front() == "id");
 }
+
+TEST_CASE("planner integration materializes recursive spool plan")
+{
+    bored::planner::LogicalProperties scan_props{};
+    scan_props.output_columns = {"id"};
+    scan_props.requires_recursive_cursor = true;
+
+    auto scan = LogicalOperator::make(LogicalOperatorType::TableScan, {}, scan_props);
+
+    bored::planner::LogicalProperties materialize_props = scan_props;
+    auto materialize = LogicalOperator::make(
+        LogicalOperatorType::Materialize,
+        std::vector<LogicalOperatorPtr>{scan},
+        materialize_props);
+
+    LogicalPlan plan{materialize};
+
+    PlannerContextConfig config{};
+    PlannerContext context{config};
+
+    PlannerResult result = plan_query(context, plan);
+    REQUIRE(result.plan.root());
+
+    const auto* root = result.plan.root().get();
+    CHECK(root->type() == PhysicalOperatorType::Materialize);
+    REQUIRE(root->properties().materialize.has_value());
+    CHECK(root->properties().materialize->enable_recursive_cursor);
+    REQUIRE_FALSE(root->children().empty());
+    CHECK(root->children().front()->type() == PhysicalOperatorType::SeqScan);
+}

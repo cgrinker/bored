@@ -568,3 +568,167 @@ TEST_CASE("WorkTableRegistry recursive cursor manages seeds and deltas")
     cursor.mark_delta_processed();
     CHECK(cursor.delta_count() == 0U);
 }
+
+TEST_CASE("SpoolExecutor recursive cursor deltas persist across reopen")
+{
+    std::vector<std::vector<std::byte>> seed_rows;
+    seed_rows.push_back(encode_u32(1U));
+    seed_rows.push_back(encode_u32(2U));
+
+    bored::executor::WorkTableRegistry registry;
+
+    auto child = std::make_unique<MockChildExecutor>(seed_rows);
+    auto* child_ptr = child.get();
+
+    SpoolExecutor::Config config{};
+    config.worktable_registry = &registry;
+    config.worktable_id = 0xCAFEU;
+    config.enable_recursive_cursor = true;
+
+    SpoolExecutor spool{std::move(child), config};
+
+    ExecutorContext context{};
+    Snapshot snapshot{};
+    snapshot.read_lsn = 321U;
+    snapshot.xmin = 7U;
+    snapshot.xmax = 512U;
+    context.set_snapshot(snapshot);
+
+    TupleBuffer buffer{};
+    std::vector<std::uint32_t> observed;
+
+    spool.open(context);
+    while (spool.next(context, buffer)) {
+        auto view = bored::executor::TupleView::from_buffer(buffer);
+        REQUIRE(view.valid());
+        REQUIRE(view.column_count() == 1U);
+        const auto column = view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        observed.push_back(decode_u32(column.data));
+        buffer.reset();
+    }
+    spool.close(context);
+
+    REQUIRE(observed == std::vector<std::uint32_t>{1U, 2U});
+    CHECK(child_ptr->open_count() == 1U);
+
+    auto cursor_opt = spool.recursive_cursor();
+    REQUIRE(cursor_opt.has_value());
+    auto cursor = std::move(*cursor_opt);
+
+    TupleBuffer delta_buffer{};
+    bored::executor::TupleWriter writer{delta_buffer};
+    writer.reset();
+    auto delta_bytes = encode_u32(3U);
+    writer.append_column(std::span<const std::byte>(delta_bytes.data(), delta_bytes.size()), false);
+    writer.finalize();
+    cursor.append_delta(std::move(delta_buffer));
+    cursor.mark_delta_processed();
+
+    spool.reset();
+    observed.clear();
+    spool.open(context);
+    while (spool.next(context, buffer)) {
+        auto view = bored::executor::TupleView::from_buffer(buffer);
+        REQUIRE(view.valid());
+        REQUIRE(view.column_count() == 1U);
+        const auto column = view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        observed.push_back(decode_u32(column.data));
+        buffer.reset();
+    }
+    spool.close(context);
+
+    REQUIRE(observed == std::vector<std::uint32_t>{1U, 2U, 3U});
+    CHECK(child_ptr->open_count() == 1U);
+}
+
+TEST_CASE("WorkTableRegistry shares recursive deltas across spool readers")
+{
+    std::vector<std::vector<std::byte>> seed_rows;
+    seed_rows.push_back(encode_u32(5U));
+    seed_rows.push_back(encode_u32(6U));
+
+    bored::executor::WorkTableRegistry registry;
+
+    auto first_child = std::make_unique<MockChildExecutor>(seed_rows);
+    auto* first_child_ptr = first_child.get();
+
+    SpoolExecutor::Config config{};
+    config.worktable_registry = &registry;
+    config.worktable_id = 0xBEEFU;
+    config.enable_recursive_cursor = true;
+
+    SpoolExecutor first_spool{std::move(first_child), config};
+
+    ExecutorContext context{};
+    Snapshot snapshot{};
+    snapshot.read_lsn = 999U;
+    snapshot.xmin = 3U;
+    snapshot.xmax = 4000U;
+    context.set_snapshot(snapshot);
+
+    TupleBuffer buffer{};
+    std::vector<std::uint32_t> observed;
+
+    first_spool.open(context);
+    while (first_spool.next(context, buffer)) {
+        auto view = bored::executor::TupleView::from_buffer(buffer);
+        REQUIRE(view.valid());
+        REQUIRE(view.column_count() == 1U);
+        const auto column = view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        observed.push_back(decode_u32(column.data));
+        buffer.reset();
+    }
+    first_spool.close(context);
+
+    REQUIRE(observed == std::vector<std::uint32_t>{5U, 6U});
+    CHECK(first_child_ptr->open_count() == 1U);
+
+    auto cursor_opt = first_spool.recursive_cursor();
+    REQUIRE(cursor_opt.has_value());
+    auto cursor = std::move(*cursor_opt);
+
+    TupleBuffer delta_one{};
+    bored::executor::TupleWriter writer_one{delta_one};
+    writer_one.reset();
+    auto delta_one_bytes = encode_u32(7U);
+    writer_one.append_column(std::span<const std::byte>(delta_one_bytes.data(), delta_one_bytes.size()), false);
+    writer_one.finalize();
+    cursor.append_delta(std::move(delta_one));
+
+    TupleBuffer delta_two{};
+    bored::executor::TupleWriter writer_two{delta_two};
+    writer_two.reset();
+    auto delta_two_bytes = encode_u32(8U);
+    writer_two.append_column(std::span<const std::byte>(delta_two_bytes.data(), delta_two_bytes.size()), false);
+    writer_two.finalize();
+    cursor.append_delta(std::move(delta_two));
+    cursor.mark_delta_processed();
+
+    std::vector<std::vector<std::byte>> unused_rows;
+    unused_rows.push_back(encode_u32(100U));
+    auto second_child = std::make_unique<MockChildExecutor>(unused_rows);
+    auto* second_child_ptr = second_child.get();
+
+    SpoolExecutor second_spool{std::move(second_child), config};
+    ExecutorContext second_context{};
+    second_context.set_snapshot(snapshot);
+
+    observed.clear();
+    second_spool.open(second_context);
+    while (second_spool.next(second_context, buffer)) {
+        auto view = bored::executor::TupleView::from_buffer(buffer);
+        REQUIRE(view.valid());
+        REQUIRE(view.column_count() == 1U);
+        const auto column = view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        observed.push_back(decode_u32(column.data));
+        buffer.reset();
+    }
+    second_spool.close(second_context);
+
+    REQUIRE(observed == std::vector<std::uint32_t>{5U, 6U, 7U, 8U});
+    CHECK(second_child_ptr->open_count() == 0U);
+}

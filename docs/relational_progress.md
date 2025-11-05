@@ -59,17 +59,18 @@ Latest validation: `ctest --output-on-failure` (445/445) on 2025-11-05 covering 
    - [x] Executor: Implement uniqueness checks (indexes + deferred validation) and referential integrity probes with transactional awareness.
    - [x] Shell: Apply constraint enforcement to INSERT/UPDATE pipelines using planner metadata and simulated index probes.
 
-4. **CTE Enablement (In progress, ~65% complete)**
+4. **CTE Enablement (In progress, ~75% complete)**
     - Parser/AST: ✅ `WITH`/`WITH RECURSIVE` grammar and AST nodes emit anchor plus recursive members.
     - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases, validates recursive members for column count/type compatibility, and exposes recursive references during binding.
     - Lowering: ✅ Inlines non-recursive producers and now preserves recursive-reference metadata on `LogicalCteScan` nodes so planner alternatives know when a worktable cursor is required.
-   - Planner: ✅ Memo deduplicates non-recursive producers, injects materialize/spool alternatives, preserves the `requires_recursive_cursor` flag on materialize candidates, and search now refuses inline alternatives when recursive metadata is present; new rule coverage in `tests/planner_rule_tests.cpp` exercises both memo reuse and recursive selection paths.
+   - Planner: ✅ Memo deduplicates non-recursive producers, injects materialize/spool alternatives, preserves the `requires_recursive_cursor` flag on materialize candidates, and search now refuses inline alternatives when recursive metadata is present; memo search now explicitly prefers recursive spool alternatives when available with coverage in `tests/planner_rule_tests.cpp` and end-to-end validation in `tests/planner_integration_tests.cpp`.
     - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines wrap planner materialize nodes with spool-backed iterators; worktable registry remains crash-safe with coverage in `tests/wal_replay_tests.cpp` and spool telemetry.
     - Remaining tasks:
-       - [ ] Teach planner search to select recursive spool alternatives emitted by lowering so recursive WITH clauses schedule worktable cursors and delta propagation alongside memo reuse.
-       - [ ] Extend integration coverage for recursive spool consumers (multi-reader registry reuse, delta draining across statements) once recursive planner wiring lands.
-    - Source files to update next: src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp, docs/spool_operator_guide.md
-    - Next work item: Wire planner memo alternatives to recognize recursive spool requirements during plan selection, then add integration tests exercising recursive spool cursors end-to-end.
+       - [x] Teach planner search to select recursive spool alternatives emitted by lowering so recursive WITH clauses schedule worktable cursors and delta propagation alongside memo reuse. (`src/planner/planner.cpp`, `tests/planner_rule_tests.cpp`)
+       - [x] Extend integration coverage for recursive spool consumers (multi-reader registry reuse, delta draining across statements) once recursive planner wiring lands. (`tests/executor_spool_tests.cpp`)
+       - [ ] Document recursive spool cursor state in shell explain output and storage docs. (`docs/spool_operator_guide.md`, `tests/shell_backend_tests.cpp`)
+       - [ ] Add multi-statement recursive workload integration tests covering delta propagation across statements. (`tests/executor_integration_tests.cpp`, `tests/shell_integration_tests.cpp`)
+    - Source files to update next: src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, docs/spool_operator_guide.md
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.
