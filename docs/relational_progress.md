@@ -65,7 +65,7 @@ Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning ov
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
    - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines now wrap planner materialize nodes with spool-backed iterators; shell diagnostics surface executor pipeline chains, spool telemetry tests account for terminal reads, the worktable registry exposes snapshot-aware reuse, and crash/restart drills in `tests/wal_replay_tests.cpp` now verify worktables rehydrate across recovery.
    - Remaining tasks:
-      - [ ] Wire recursive spool support into planner/executor so recursive WITH clauses schedule cursors and deltas alongside memo reuse.
+   - [ ] Wire recursive spool support into planner/executor so recursive WITH clauses schedule cursors and deltas alongside memo reuse (integration checklist drafted; code changes starting).
       - [ ] Extend integration coverage for recursive spool consumers (multi-reader registry reuse, delta draining across statements) once planner wiring lands.
    - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp, docs/spool_operator_guide.md
    - Next work item: Begin planner/executor wiring for recursive CTE support, using the refreshed operator playbook and benchmark baselines to monitor regressions.
