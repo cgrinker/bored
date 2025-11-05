@@ -413,8 +413,58 @@ public:
             Scope cte_scope{};
             bind_query(*cte->query, cte_scope, cte_bindings, result);
             binding.columns = derive_cte_columns(*cte, result);
-            const auto diagnostic_count_after = result.diagnostics.size();
-            binding.valid = (diagnostic_count_after == diagnostic_count_before) && !binding.columns.empty();
+            const auto diagnostic_count_after_anchor = result.diagnostics.size();
+            const bool anchor_success = (diagnostic_count_after_anchor == diagnostic_count_before) &&
+                                        !binding.columns.empty();
+
+            bool recursive_success = true;
+            const bool has_recursive_term = (cte->recursive_query != nullptr);
+
+            if (has_recursive_term) {
+                if (!clause.recursive) {
+                    ParserDiagnostic diagnostic{};
+                    diagnostic.severity = ParserSeverity::Error;
+                    diagnostic.message = "Recursive CTE '" + cte->name.value +
+                                         "' requires WITH RECURSIVE";
+                    diagnostic.remediation_hints = {
+                        "Add the RECURSIVE keyword to the WITH clause for recursive definitions."};
+                    result.diagnostics.push_back(std::move(diagnostic));
+                    recursive_success = false;
+                }
+
+                if (cte->recursion_mode != CteRecursionMode::UnionAll) {
+                    ParserDiagnostic diagnostic{};
+                    diagnostic.severity = ParserSeverity::Error;
+                    diagnostic.message = "Recursive CTE '" + cte->name.value +
+                                         "' must use UNION ALL";
+                    diagnostic.remediation_hints = {
+                        "Rewrite the recursive term to use UNION ALL."};
+                    result.diagnostics.push_back(std::move(diagnostic));
+                    recursive_success = false;
+                }
+
+                if (anchor_success && recursive_success) {
+                    CteBinding placeholder = binding;
+                    placeholder.valid = anchor_success;
+
+                    CteBindingMap recursive_bindings = cte_bindings;
+                    recursive_bindings.emplace(key, std::move(placeholder));
+
+                    const auto diagnostic_count_before_recursive = result.diagnostics.size();
+                    Scope recursive_scope{};
+                    bind_query(*cte->recursive_query, recursive_scope, recursive_bindings, result);
+                    const auto diagnostic_count_after_recursive = result.diagnostics.size();
+                    recursive_success = (diagnostic_count_after_recursive == diagnostic_count_before_recursive);
+
+                    if (recursive_success) {
+                        recursive_success = validate_recursive_term(*cte, binding.columns, result);
+                    }
+                } else {
+                    recursive_success = false;
+                }
+            }
+
+            binding.valid = anchor_success && recursive_success;
             cte_bindings.emplace(key, std::move(binding));
         }
     }
@@ -512,6 +562,84 @@ public:
         }
 
         return columns;
+    }
+
+    bool validate_recursive_term(const CommonTableExpression& cte,
+                                 std::vector<CteColumn>& columns,
+                                 BindingResult& result) const
+    {
+        if (cte.recursive_query == nullptr) {
+            return true;
+        }
+
+        const auto anchor_count = columns.size();
+        const auto& recursive_items = cte.recursive_query->select_items;
+
+        if (recursive_items.size() != anchor_count) {
+            ParserDiagnostic diagnostic{};
+            diagnostic.severity = ParserSeverity::Error;
+            diagnostic.message = "Recursive member of CTE '" + cte.name.value +
+                                 "' returns " + std::to_string(recursive_items.size()) +
+                                 " columns but anchor returns " + std::to_string(anchor_count);
+            diagnostic.remediation_hints = {
+                "Ensure the recursive term projects the same number of columns as the anchor."};
+            result.diagnostics.push_back(std::move(diagnostic));
+            return false;
+        }
+
+        bool success = true;
+        for (std::size_t index = 0U; index < recursive_items.size(); ++index) {
+            const auto* item = recursive_items[index];
+            if (item == nullptr || item->expression == nullptr) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Recursive term of CTE '" + cte.name.value +
+                                     "' has an empty select item";
+                diagnostic.remediation_hints = {
+                    "Provide an expression for each select item in the recursive term."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                success = false;
+                continue;
+            }
+
+            if (item->expression->kind == NodeKind::StarExpression) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Recursive term of CTE '" + cte.name.value +
+                                     "' does not support '*' in the select list";
+                diagnostic.remediation_hints = {
+                    "Replace '*' with explicit column expressions."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                success = false;
+                continue;
+            }
+
+            auto& column = columns[index];
+            if (item->expression->inferred_type.has_value()) {
+                const auto recursive_type = item->expression->inferred_type->type;
+                const auto recursive_nullable = item->expression->inferred_type->nullable;
+
+                if (column.type == ScalarType::Unknown) {
+                    column.type = recursive_type;
+                } else if (recursive_type != ScalarType::Unknown && recursive_type != column.type) {
+                    ParserDiagnostic diagnostic{};
+                    diagnostic.severity = ParserSeverity::Error;
+                    diagnostic.message = "Recursive term of CTE '" + cte.name.value +
+                                         "' projects column " + std::to_string(index + 1U) +
+                                         " with incompatible type (anchor=" +
+                                         scalar_type_name(column.type) + ", recursive=" +
+                                         scalar_type_name(recursive_type) + ")";
+                    diagnostic.remediation_hints = {
+                        "Align the data types between the anchor and recursive members."};
+                    result.diagnostics.push_back(std::move(diagnostic));
+                    success = false;
+                }
+
+                column.nullable = column.nullable || recursive_nullable;
+            }
+        }
+
+        return success;
     }
 
     BindingResult bind(InsertStatement& statement) const

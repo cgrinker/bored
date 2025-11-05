@@ -261,6 +261,10 @@ std::string describe(const SelectStatement& statement)
             stream << " AS (";
             if (cte->query) {
                 stream << describe_query(*cte->query);
+                if (cte->recursion_mode == CteRecursionMode::UnionAll && cte->recursive_query) {
+                    stream << " UNION ALL ";
+                    stream << describe_query(*cte->recursive_query);
+                }
             } else {
                 stream << "<invalid>";
             }

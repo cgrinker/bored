@@ -592,3 +592,138 @@ TEST_CASE("binder reports unknown qualified identifiers", "[parser][binder]")
     REQUIRE(binding_result.diagnostics.size() == 1U);
     CHECK(binding_result.diagnostics.front().message == "Column 'id' not found on table 'missing'");
 }
+
+TEST_CASE("binder binds recursive CTE", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "WITH RECURSIVE base AS (\n"
+        "    SELECT inventory.id FROM sales.inventory AS inventory\n"
+        "    UNION ALL\n"
+        "    SELECT base.id FROM base\n"
+        ")\n"
+        "SELECT base.id FROM base;";
+
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE(binding_result.success());
+    REQUIRE(binding_result.diagnostics.empty());
+
+    auto* with_clause = parse_result.statement->with;
+    REQUIRE(with_clause != nullptr);
+    CHECK(with_clause->recursive);
+    REQUIRE(with_clause->expressions.size() == 1U);
+
+    auto* cte = with_clause->expressions.front();
+    REQUIRE(cte != nullptr);
+    REQUIRE(cte->query != nullptr);
+    REQUIRE(cte->recursive_query != nullptr);
+    CHECK(cte->recursion_mode == relational::CteRecursionMode::UnionAll);
+
+    REQUIRE(cte->recursive_query->from_tables.size() == 1U);
+    auto* recursive_table = cte->recursive_query->from_tables.front();
+    REQUIRE(recursive_table != nullptr);
+    REQUIRE(recursive_table->binding.has_value());
+    CHECK(recursive_table->binding->table_name == "base");
+
+    REQUIRE(cte->recursive_query->select_items.size() == 1U);
+    auto* recursive_item = cte->recursive_query->select_items.front();
+    REQUIRE(recursive_item != nullptr);
+    REQUIRE(recursive_item->expression != nullptr);
+    auto& recursive_identifier = static_cast<relational::IdentifierExpression&>(*recursive_item->expression);
+    REQUIRE(recursive_identifier.binding.has_value());
+    CHECK(recursive_identifier.binding->column_name == "id");
+    CHECK(recursive_identifier.binding->table_name == "base");
+}
+
+TEST_CASE("binder requires WITH RECURSIVE for recursive members", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "WITH base AS (\n"
+        "    SELECT inventory.id FROM sales.inventory AS inventory\n"
+        "    UNION ALL\n"
+        "    SELECT base.id FROM base\n"
+        ")\n"
+        "SELECT base.id FROM base;";
+
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE_FALSE(binding_result.diagnostics.empty());
+    CHECK(binding_result.diagnostics.front().message == "Recursive CTE 'base' requires WITH RECURSIVE");
+}
+
+TEST_CASE("binder validates recursive CTE column count", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "WITH RECURSIVE base AS (\n"
+        "    SELECT inventory.id FROM sales.inventory AS inventory\n"
+        "    UNION ALL\n"
+        "    SELECT base.id, base.id FROM base\n"
+        ")\n"
+        "SELECT base.id FROM base;";
+
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE_FALSE(binding_result.diagnostics.empty());
+    CHECK(binding_result.diagnostics.front().message ==
+          "Recursive member of CTE 'base' returns 2 columns but anchor returns 1");
+}
+
+TEST_CASE("binder validates recursive CTE column types", "[parser][binder]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_inventory_metadata());
+
+    relational::BinderConfig config{};
+    config.catalog = &catalog_adapter;
+    config.default_schema = std::string{"sales"};
+
+    const std::string sql =
+        "WITH RECURSIVE base AS (\n"
+        "    SELECT inventory.id FROM sales.inventory AS inventory\n"
+        "    UNION ALL\n"
+        "    SELECT 'x' FROM base\n"
+        ")\n"
+        "SELECT base.id FROM base;";
+
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    auto binding_result = relational::bind_select(config, *parse_result.statement);
+    REQUIRE_FALSE(binding_result.success());
+    REQUIRE_FALSE(binding_result.diagnostics.empty());
+    CHECK(binding_result.diagnostics.front().message ==
+          "Recursive term of CTE 'base' projects column 1 with incompatible type (anchor=INT64, recursive=UTF8)");
+}

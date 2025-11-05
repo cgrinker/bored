@@ -166,6 +166,52 @@ TEST_CASE("describe renders with clause", "[parser][relational_ast]")
     REQUIRE(rendered == "WITH items(item_id) AS (SELECT * FROM inventory) SELECT items.item_id FROM items");
 }
 
+TEST_CASE("describe renders recursive CTE", "[parser][relational_ast]")
+{
+    relational::AstArena arena;
+
+    auto& statement = arena.make<relational::SelectStatement>();
+    auto& with_clause = arena.make<relational::WithClause>();
+    with_clause.recursive = true;
+    statement.with = &with_clause;
+
+    auto& cte = arena.make<relational::CommonTableExpression>();
+    cte.name = bored::parser::Identifier{.value = "numbers"};
+
+    auto& anchor_query = arena.make<relational::QuerySpecification>();
+    auto& anchor_item = arena.make<relational::SelectItem>();
+    auto& anchor_literal = arena.make<relational::LiteralExpression>();
+    anchor_literal.tag = relational::LiteralTag::Integer;
+    anchor_literal.text = "1";
+    anchor_item.expression = &anchor_literal;
+    anchor_query.select_items.push_back(&anchor_item);
+    cte.query = &anchor_query;
+
+    auto& recursive_query = arena.make<relational::QuerySpecification>();
+    auto& recursive_item = arena.make<relational::SelectItem>();
+    auto& recursive_identifier = arena.make<relational::IdentifierExpression>();
+    recursive_identifier.name.parts.push_back(bored::parser::Identifier{.value = "numbers"});
+    recursive_identifier.name.parts.push_back(bored::parser::Identifier{.value = "value"});
+    recursive_item.expression = &recursive_identifier;
+    recursive_query.select_items.push_back(&recursive_item);
+    cte.recursion_mode = relational::CteRecursionMode::UnionAll;
+    cte.recursive_query = &recursive_query;
+
+    with_clause.expressions.push_back(&cte);
+
+    auto& main_query = arena.make<relational::QuerySpecification>();
+    auto& main_item = arena.make<relational::SelectItem>();
+    auto& main_identifier = arena.make<relational::IdentifierExpression>();
+    main_identifier.name.parts.push_back(bored::parser::Identifier{.value = "numbers"});
+    main_identifier.name.parts.push_back(bored::parser::Identifier{.value = "value"});
+    main_item.expression = &main_identifier;
+    main_query.select_items.push_back(&main_item);
+    statement.query = &main_query;
+
+    const auto rendered = relational::describe(statement);
+    REQUIRE(rendered == "WITH RECURSIVE numbers AS (SELECT 1 UNION ALL SELECT numbers.value) SELECT numbers.value");
+}
+
 TEST_CASE("expression visitor traverses tree", "[parser][relational_ast]")
 {
     relational::AstArena arena;

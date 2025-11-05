@@ -267,6 +267,11 @@ struct WithClause : Node {
     std::vector<CommonTableExpression*> expressions{};
 };
 
+enum class CteRecursionMode : std::uint8_t {
+    None = 0,
+    UnionAll
+};
+
 struct QuerySpecification : Node {
     QuerySpecification() noexcept : Node(NodeKind::QuerySpecification) {}
 
@@ -287,6 +292,8 @@ struct CommonTableExpression : Node {
     Identifier name{};
     std::vector<Identifier> column_names{};
     QuerySpecification* query = nullptr;
+    QuerySpecification* recursive_query = nullptr;
+    CteRecursionMode recursion_mode = CteRecursionMode::None;
 };
 
 struct SelectStatement : Node {

@@ -116,6 +116,12 @@ struct kw_order : keyword<'O', 'R', 'D', 'E', 'R'> {
 struct kw_by : keyword<'B', 'Y'> {
 };
 
+struct kw_union : keyword<'U', 'N', 'I', 'O', 'N'> {
+};
+
+struct kw_all : keyword<'A', 'L', 'L'> {
+};
+
 struct kw_limit : keyword<'L', 'I', 'M', 'I', 'T'> {
 };
 
@@ -1205,6 +1211,7 @@ struct SelectParseState final {
     relational::BinaryOperator pending_operator = relational::BinaryOperator::Equal;
     bool has_pending_operator = false;
     relational::QualifiedName star_qualifier{};
+    bool parsing_recursive_term = false;
     struct QueryContextSnapshot final {
         relational::QuerySpecification* query = nullptr;
         relational::SelectItem* current_select_item = nullptr;
@@ -1223,6 +1230,7 @@ struct SelectParseState final {
         relational::BinaryOperator pending_operator = relational::BinaryOperator::Equal;
         bool has_pending_operator = false;
         relational::QualifiedName star_qualifier{};
+        bool parsing_recursive_term = false;
     };
     std::vector<QueryContextSnapshot> context_stack{};
     relational::WithClause* with_clause = nullptr;
@@ -1270,10 +1278,12 @@ void push_query_context(SelectParseState& state)
     snapshot.pending_operator = state.pending_operator;
     snapshot.has_pending_operator = state.has_pending_operator;
     snapshot.star_qualifier = std::move(state.star_qualifier);
+    snapshot.parsing_recursive_term = state.parsing_recursive_term;
     state.context_stack.push_back(std::move(snapshot));
 
     state.expression_stack.clear();
     state.star_qualifier.parts.clear();
+    state.parsing_recursive_term = false;
 }
 
 void pop_query_context(SelectParseState& state)
@@ -1304,6 +1314,7 @@ void pop_query_context(SelectParseState& state)
     state.pending_operator = snapshot.pending_operator;
     state.has_pending_operator = snapshot.has_pending_operator;
     state.star_qualifier = std::move(snapshot.star_qualifier);
+    state.parsing_recursive_term = snapshot.parsing_recursive_term;
 }
 
 Identifier make_identifier(std::string_view text)
@@ -1662,6 +1673,13 @@ struct with_cte_body_lparen : pegtl::one<'('> {
 struct with_cte_body_rparen : pegtl::one<')'> {
 };
 
+struct select_union_operator_rule : pegtl::seq<kw_union, required_space, kw_all> {
+};
+
+struct with_cte_recursive_tail_rule
+    : pegtl::seq<select_union_operator_rule, required_space, select_statement_body_rule> {
+};
+
 struct with_cte_name_rule : identifier_rule {
 };
 
@@ -1669,6 +1687,7 @@ struct with_cte_body_rule
     : pegtl::seq<with_cte_body_lparen,
                  optional_space,
                  select_statement_body_rule,
+                 pegtl::opt<optional_space, with_cte_recursive_tail_rule>,
                  optional_space,
                  with_cte_body_rparen> {
 };
@@ -1805,6 +1824,27 @@ struct select_action<with_cte_column_list_rparen> {
 };
 
 template <>
+struct select_action<select_union_operator_rule> {
+    template <typename Input>
+    static void apply(const Input&, SelectParseState& state)
+    {
+        if (state.arena == nullptr || state.current_cte == nullptr) {
+            return;
+        }
+
+        if (state.current_cte->recursive_query == nullptr) {
+            auto& recursive_query = state.arena->make<relational::QuerySpecification>();
+            state.current_cte->recursive_query = &recursive_query;
+        }
+
+        state.current_cte->recursion_mode = relational::CteRecursionMode::UnionAll;
+        state.query = state.current_cte->recursive_query;
+        reset_query_context(state);
+        state.parsing_recursive_term = true;
+    }
+};
+
+template <>
 struct select_action<with_cte_body_lparen> {
     template <typename Input>
     static void apply(const Input&, SelectParseState& state)
@@ -1815,9 +1855,12 @@ struct select_action<with_cte_body_lparen> {
 
         auto& query = state.arena->make<relational::QuerySpecification>();
         state.current_cte->query = &query;
+        state.current_cte->recursive_query = nullptr;
+        state.current_cte->recursion_mode = relational::CteRecursionMode::None;
         push_query_context(state);
         state.query = &query;
         reset_query_context(state);
+        state.parsing_recursive_term = false;
     }
 };
 
@@ -1829,6 +1872,7 @@ struct select_action<with_cte_body_rparen> {
         pop_query_context(state);
         state.current_cte = nullptr;
         state.in_cte_column_list = false;
+        state.parsing_recursive_term = false;
     }
 };
 

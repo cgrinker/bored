@@ -12,7 +12,7 @@ Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning ov
 - **Catalog & DDL**: Persistent catalog with fully wired DDL handlers (create/alter/drop) for schemas, tables, and indexes, including restart-safe catalog bootstrap.
 - **Sequence Allocation (foundation)**: Transactional sequence allocator stages `next_value` updates via catalog mutator hooks, dispatcher now wires allocators into DDL handlers, and Catch2 regression coverage remains; planner/executor wiring is still pending.
 - **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell now supports BEGIN/COMMIT/ROLLBACK so INSERT/UPDATE/DELETE/SELECT flows can share session-scoped transactions with executor snapshots; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard now propagates oldest reader LSNs while cross-session isolation and deadlock handling remain on the roadmap.
-- **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs (now including non-recursive `WITH` clause parsing and AST nodes); binder resolves identifiers, non-recursive CTE scopes, and types; lowering now inlines CTE definitions into the logical tree, and normalization stages generate logical plans for select/join queries.
+- **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs (including `WITH RECURSIVE` anchor and recursive members); binder resolves identifiers, enforces CTE column/type compatibility, and scopes recursive references; lowering currently inlines non-recursive CTE definitions into the logical tree, and normalization stages generate logical plans for select/join queries.
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators.
 - **Constraint Enforcement**: Planner lowers unique/foreign key operators and executor now performs index-backed uniqueness checks plus referential integrity probes with MVCC-aware visibility.
 - **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up.
@@ -26,7 +26,7 @@ Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning ov
 | Key/foreign constraints | **Available (shell integration)** | Catalog metadata, planner & executor enforcement, and bored_shell INSERT/UPDATE pipelines enforcing PRIMARY KEY/UNIQUE/FOREIGN KEY checks. |
 | Auto-incrementing primary keys | **In progress** | Sequence allocator now stages transactional `next_value` updates with tests; planner/executor integration remains. |
 | Join execution | **Available** | Logical lowering, planner, and executor support nested-loop and hash joins with tests covering join predicates and pipelines. |
-| Common table expressions (CTEs) | **In progress** | Parser/AST and binder accept non-recursive WITH clauses; lowering now inlines CTE producers with regression coverage for nested projections; planner memo deduplicates reusable producers and injects materialize/spool alternatives while executor worktable integration remains. |
+| Common table expressions (CTEs) | **In progress** | Parser/AST and binder now understand `WITH RECURSIVE`, enforcing anchor/recursive column and type compatibility; lowering continues to inline non-recursive producers with regression coverage; planner memo deduplicates reusable producers and injects materialize/spool alternatives. Recursive spools now surface worktable ids and cursors through planner → shell, leaving logical lowering/planner wiring and end-to-end tests for recursive execution as the remaining work. |
 
 ## Gaps to Close
 
@@ -60,15 +60,15 @@ Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning ov
    - [x] Shell: Apply constraint enforcement to INSERT/UPDATE pipelines using planner metadata and simulated index probes.
 
 4. **CTE Enablement (In progress)**
-   - Parser/AST: ✅ Non-recursive WITH clause grammar and nodes merged; recursive support remains future work.
+   - Parser/AST: ✅ `WITH`/`WITH RECURSIVE` grammar and AST nodes emit anchor plus recursive members.
    - Planner: ✅ Memo deduplicates non-recursive CTE producers, tracks reusable groups, and injects materialize/spool alternatives so the cost model can compare inline versus reuse plans.
-   - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
+   - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases, and now validates recursive members for column count/type compatibility while exposing recursive references during binding.
    - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines now wrap planner materialize nodes with spool-backed iterators; shell diagnostics surface executor pipeline chains, spool telemetry tests account for terminal reads, the worktable registry exposes snapshot-aware reuse, and crash/restart drills in `tests/wal_replay_tests.cpp` now verify worktables rehydrate across recovery.
    - Remaining tasks:
-   - [ ] Wire recursive spool support into planner/executor so recursive WITH clauses schedule cursors and deltas alongside memo reuse (integration checklist drafted; code changes starting).
-      - [ ] Extend integration coverage for recursive spool consumers (multi-reader registry reuse, delta draining across statements) once planner wiring lands.
+     - [ ] Teach logical lowering/planner to emit recursive spool-capable plans so recursive WITH clauses schedule cursors and delta propagation alongside memo reuse.
+     - [ ] Extend integration coverage for recursive spool consumers (multi-reader registry reuse, delta draining across statements) once planner wiring lands.
    - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp, docs/spool_operator_guide.md
-   - Next work item: Begin planner/executor wiring for recursive CTE support, using the refreshed operator playbook and benchmark baselines to monitor regressions.
+   - Next work item: Extend lowering to build recursive spool-ready trees so planner/executor wiring can consume them, then add integration tests exercising recursive spool cursors end-to-end.
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.
