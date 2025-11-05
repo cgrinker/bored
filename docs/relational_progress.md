@@ -4,7 +4,7 @@ This ticket-level report summarizes the relational engine roadmap, capturing wha
 
 _Last updated: 2025-11-05_
 
-Latest validation: `ctest --output-on-failure` (453/453) on 2025-11-05 covering recursive spool selection, multi-statement worktable reuse, and planner memo regression updates; `build/bored_benchmarks --samples=10 --json` captured updated baselines (including `spool_worktable_recovery`) on 2025-11-04.
+Latest validation: `ctest --output-on-failure` (453/453) on 2025-11-05 covering recursive spool selection, multi-statement worktable reuse, and advanced index catalog metadata propagation; `build/bored_benchmarks --samples=10 --json` captured updated baselines (including `spool_worktable_recovery`) on 2025-11-04.
 
 ## Current Capabilities
 
@@ -15,7 +15,7 @@ Latest validation: `ctest --output-on-failure` (453/453) on 2025-11-05 covering 
 - **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs (including `WITH RECURSIVE` anchor and recursive members); binder resolves identifiers, enforces CTE column/type compatibility, and scopes recursive references; lowering continues to inline non-recursive CTE definitions and now preserves recursive-reference metadata on `LogicalCteScan`, while normalization stages generate logical plans for select/join queries.
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators.
 - **Constraint Enforcement**: Planner lowers unique/foreign key operators and executor now performs index-backed uniqueness checks plus referential integrity probes with MVCC-aware visibility.
-- **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up.
+- **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up; catalog metadata now records uniqueness flags, covering column lists, and partial predicates ahead of planner/executor integration.
 - **Observability & Tooling**: Storage diagnostics, WAL/retention telemetry, checkpoint metrics, and shell integration for disk-backed catalogs and WAL configuration.
 
 ## Feature Checklist
@@ -35,7 +35,7 @@ Latest validation: `ctest --output-on-failure` (453/453) on 2025-11-05 covering 
 3. **CTE Parsing & Execution**: Planner memo now deduplicates non-recursive CTE producers; spool executor is available but needs worktable integration with snapshot-aware iterators and shell wiring.
 4. **Transaction Visibility**: Finish Transaction & Concurrency Milestone 1 to provide consistent snapshots across planner/executor and integrate with retention manager for snapshot retirement.
 5. **Optimizer Enhancements**: Broaden rule set, add cost-based join order selection, and integrate catalog statistics for selectivity estimates.
-6. **Index DDL Integration**: Surface index creation options (unique, covering, partial) and ensure planner/executor leverage indexes for predicates and joins.
+6. **Index DDL Integration**: Catalog now persists uniqueness flags, covering column lists, and partial predicates; next steps are parser/shell wiring plus planner/executor adoption so predicates and joins pick the new indexes.
 
 ## Roadmap to Full Relational Coverage
 
@@ -67,11 +67,12 @@ Latest validation: `ctest --output-on-failure` (453/453) on 2025-11-05 covering 
    - Executor & Shell: ✅ Spool executor and bored_shell DML/SELECT pipelines honour recursive cursors, sharing worktable registries across statements with delta propagation covered by `tests/executor_spool_tests.cpp`, `tests/executor_integration_tests.cpp`, and `tests/shell_integration_tests.cpp`.
    - Validation: ✅ Documentation now highlights recursive spool explain output (`docs/spool_operator_guide.md`, `docs/storage.md`), and the full Catch2 suite (`ctest --output-on-failure`, 2025-11-05) passes post-integration.
 
-5. **Advanced Indexing & Optimization (Planned)**
-   - Support unique indexes tied to constraint metadata; expose covering/partial index options.
+5. **Advanced Indexing & Optimization (In progress)**
+   - Catalog metadata, serialization, and accessor caches now persist index uniqueness flags, covering column lists, and partial predicate text; DDL stage/planner hooks expose the new fields for upcoming planner/executor work.
+   - Parser, shell command builder, and planner/executor rule updates remain to surface covering/partial options to users and cost index scans with the richer metadata.
    - Enhance optimizer to choose index scans based on statistics and predicates; add cost model refinements.
    - Expand join optimization (multi-join reordering, bushy plans) once statistics available.
-   - Source files to update: src/storage/index_btree_manager.cpp, src/storage/index_retention.cpp, src/planner/cost_model.cpp, src/planner/statistics_catalog.cpp, src/planner/rules/, src/planner/rule.cpp, tests/index_btree_manager_tests.cpp, tests/planner_cost_model_tests.cpp, tests/planner_rule_tests.cpp
+   - Source files to update: src/parser/ddl_command_builder.cpp, src/parser/grammar.cpp, src/storage/index_btree_manager.cpp, src/storage/index_retention.cpp, src/planner/cost_model.cpp, src/planner/statistics_catalog.cpp, src/planner/rules/, src/planner/rule.cpp, tests/index_btree_manager_tests.cpp, tests/planner_cost_model_tests.cpp, tests/planner_rule_tests.cpp, tests/ddl_handlers_tests.cpp, tests/catalog_ddl_tests.cpp
 
 6. **Comprehensive Transactions & Isolation Levels (Planned)**
    - Implement lock manager integration for key-range locking where needed for uniqueness.
