@@ -34,6 +34,7 @@ public:
     void reset() noexcept;
 
     [[nodiscard]] std::optional<WorkTableRegistry::SnapshotIterator> snapshot_iterator() const;
+    [[nodiscard]] std::optional<WorkTableRegistry::RecursiveCursor> recursive_cursor() const;
 
 private:
     void ensure_materialized(ExecutorContext& context);

@@ -465,3 +465,102 @@ TEST_CASE("SpoolExecutor snapshot iterator exposes cached registry view")
     REQUIRE(mismatch_iterator.has_value());
     CHECK_FALSE(mismatch_iterator->matches(mismatch));
 }
+
+TEST_CASE("WorkTableRegistry recursive cursor manages seeds and deltas")
+{
+    std::vector<std::vector<std::byte>> seed_rows;
+    seed_rows.push_back(encode_u32(11U));
+    seed_rows.push_back(encode_u32(22U));
+
+    bored::executor::WorkTableRegistry registry;
+
+    auto child = std::make_unique<MockChildExecutor>(seed_rows);
+
+    SpoolExecutor::Config config{};
+    config.worktable_registry = &registry;
+    config.worktable_id = 0xFEEDU;
+
+    SpoolExecutor spool{std::move(child), config};
+
+    ExecutorContext context{};
+    Snapshot snapshot{};
+    snapshot.read_lsn = 4096U;
+    snapshot.xmin = 5U;
+    snapshot.xmax = 9001U;
+    context.set_snapshot(snapshot);
+
+    TupleBuffer buffer{};
+    spool.open(context);
+    while (spool.next(context, buffer)) {
+        buffer.reset();
+    }
+    spool.close(context);
+
+    auto cursor_opt = spool.recursive_cursor();
+    REQUIRE(cursor_opt.has_value());
+    auto cursor = std::move(*cursor_opt);
+    CHECK(cursor.valid());
+    CHECK(cursor.snapshot().read_lsn == snapshot.read_lsn);
+    CHECK(cursor.seed_count() == seed_rows.size());
+
+    const TupleBuffer* tuple_ptr = nullptr;
+    std::vector<std::uint32_t> decoded_seeds;
+    cursor.reset_seed();
+    while (cursor.next_seed(tuple_ptr)) {
+        REQUIRE(tuple_ptr != nullptr);
+        auto view = bored::executor::TupleView::from_buffer(*tuple_ptr);
+        REQUIRE(view.valid());
+        REQUIRE(view.column_count() == 1U);
+        const auto column = view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        decoded_seeds.push_back(decode_u32(column.data));
+    }
+    REQUIRE(decoded_seeds == std::vector<std::uint32_t>{11U, 22U});
+
+    const TupleBuffer* delta_ptr = nullptr;
+    CHECK_FALSE(cursor.next_delta(delta_ptr));
+
+    TupleBuffer delta_buffer{};
+    bored::executor::TupleWriter delta_writer{delta_buffer};
+    delta_writer.reset();
+    auto delta_bytes = encode_u32(33U);
+    delta_writer.append_column(std::span<const std::byte>(delta_bytes.data(), delta_bytes.size()), false);
+    delta_writer.finalize();
+    cursor.append_delta(std::move(delta_buffer));
+
+    cursor.reset_delta();
+    REQUIRE(cursor.delta_count() == 1U);
+    REQUIRE(cursor.next_delta(delta_ptr));
+    REQUIRE(delta_ptr != nullptr);
+    auto delta_view = bored::executor::TupleView::from_buffer(*delta_ptr);
+    REQUIRE(delta_view.valid());
+    REQUIRE(delta_view.column_count() == 1U);
+    auto delta_column = delta_view.column(0U);
+    REQUIRE_FALSE(delta_column.is_null);
+    CHECK(decode_u32(delta_column.data) == 33U);
+    CHECK_FALSE(cursor.next_delta(delta_ptr));
+    cursor.mark_delta_processed();
+    CHECK(cursor.delta_count() == 0U);
+
+    TupleBuffer second_delta{};
+    bored::executor::TupleWriter second_writer{second_delta};
+    second_writer.reset();
+    auto second_bytes = encode_u32(44U);
+    second_writer.append_column(std::span<const std::byte>(second_bytes.data(), second_bytes.size()), false);
+    second_writer.finalize();
+    cursor.append_delta(std::move(second_delta));
+
+    CHECK(cursor.delta_count() == 1U);
+    cursor.reset_delta();
+    REQUIRE(cursor.next_delta(delta_ptr));
+    REQUIRE(delta_ptr != nullptr);
+    auto second_view = bored::executor::TupleView::from_buffer(*delta_ptr);
+    REQUIRE(second_view.valid());
+    REQUIRE(second_view.column_count() == 1U);
+    auto second_column = second_view.column(0U);
+    REQUIRE_FALSE(second_column.is_null);
+    CHECK(decode_u32(second_column.data) == 44U);
+    CHECK_FALSE(cursor.next_delta(delta_ptr));
+    cursor.mark_delta_processed();
+    CHECK(cursor.delta_count() == 0U);
+}

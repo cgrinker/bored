@@ -4,7 +4,7 @@ This ticket-level report summarizes the relational engine roadmap, capturing wha
 
 _Last updated: 2025-11-04_
 
-Latest validation: `build/bored_tests` (437/437) on 2025-11-04 after aligning overflow WAL ownership so crash drills collapse to single undo spans and confirming spool crash/restart coverage.
+Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning overflow WAL ownership so crash drills collapse to single undo spans and landing recursive cursor coverage for spool crash/restart workflows.
 
 ## Current Capabilities
 
@@ -65,9 +65,10 @@ Latest validation: `build/bored_tests` (437/437) on 2025-11-04 after aligning ov
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
    - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines now wrap planner materialize nodes with spool-backed iterators; shell diagnostics surface executor pipeline chains, spool telemetry tests account for terminal reads, the worktable registry exposes snapshot-aware reuse, and crash/restart drills in `tests/wal_replay_tests.cpp` now verify worktables rehydrate across recovery.
    - Remaining tasks:
-      1. Prototype snapshot-aware iterators for recursive CTE seeds and schedule targeted benchmarks for worktable recovery paths.
+      - [x] Prototype snapshot-aware iterators for recursive CTE seeds so recursive WITH consumers can reuse staged worktables without snapshot drift (`tests/executor_spool_tests.cpp` now validates seed/delta reuse via `WorkTableRegistry::RecursiveCursor`).
+      - [ ] Schedule and automate worktable recovery benchmarks to capture baseline timings and regressions for spool-heavy crash/restart workflows.
    - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp, docs/spool_operator_guide.md
-   - Next work item: Begin recursive CTE iterator prototyping alongside recovery benchmarking and use the spool operator guide to seed operator training.
+   - Next work item: Kick off worktable recovery benchmarking and use the spool operator guide to seed operator training ahead of planner/executor integration.
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.

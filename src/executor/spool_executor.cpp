@@ -140,4 +140,15 @@ std::optional<WorkTableRegistry::SnapshotIterator> SpoolExecutor::snapshot_itera
     return config_.worktable_registry->snapshot_iterator(*config_.worktable_id, materialized_snapshot_);
 }
 
+std::optional<WorkTableRegistry::RecursiveCursor> SpoolExecutor::recursive_cursor() const
+{
+    if (!materialized_) {
+        return std::nullopt;
+    }
+    if (config_.worktable_registry == nullptr || !config_.worktable_id.has_value()) {
+        return std::nullopt;
+    }
+    return config_.worktable_registry->recursive_cursor(*config_.worktable_id, materialized_snapshot_);
+}
+
 }  // namespace bored::executor
