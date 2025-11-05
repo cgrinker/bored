@@ -545,6 +545,7 @@ private:
                 if (binding.table_alias.has_value()) {
                     scan->table_alias = binding.table_alias;
                 }
+                scan->recursive_reference = binding.is_recursive_reference;
                 if (!it_state->second.schema.empty()) {
                     scan->output_schema = it_state->second.schema;
                 }

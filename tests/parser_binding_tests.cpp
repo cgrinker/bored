@@ -634,6 +634,9 @@ TEST_CASE("binder binds recursive CTE", "[parser][binder]")
     REQUIRE(recursive_table != nullptr);
     REQUIRE(recursive_table->binding.has_value());
     CHECK(recursive_table->binding->table_name == "base");
+    CHECK(recursive_table->binding->is_common_table_expression);
+    CHECK(recursive_table->binding->is_recursive_reference);
+    CHECK(recursive_table->binding->cte_name == "base");
 
     REQUIRE(cte->recursive_query->select_items.size() == 1U);
     auto* recursive_item = cte->recursive_query->select_items.front();

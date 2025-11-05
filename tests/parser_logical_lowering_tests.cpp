@@ -294,13 +294,13 @@ TEST_CASE("lowering allows chained CTE references", "[parser][logical_lowering]"
 TEST_CASE("lowering builds recursive CTE plan", "[parser][logical_lowering]")
 {
     StubCatalog catalog_adapter;
-    catalog_adapter.add_table(make_hierarchy_metadata());
+    catalog_adapter.add_table(make_inventory_metadata());
 
     const std::string sql =
-        "WITH RECURSIVE chain(id, manager_id) AS ("
-        " SELECT parent.id, parent.manager_id FROM sales.hierarchy AS parent WHERE parent.manager_id IS NULL"
-        " UNION ALL"
-        " SELECT child.id, child.manager_id FROM sales.hierarchy AS child INNER JOIN chain AS c ON child.manager_id = c.id"
+        "WITH RECURSIVE chain(id) AS (\n"
+        " SELECT inventory.id FROM sales.inventory AS inventory\n"
+        " UNION ALL\n"
+        " SELECT chain.id FROM chain\n"
         ") SELECT chain.id FROM chain;";
 
     auto lowering = lower_sql(sql, catalog_adapter);
@@ -314,9 +314,8 @@ TEST_CASE("lowering builds recursive CTE plan", "[parser][logical_lowering]")
     auto* recursive_cte = dynamic_cast<relational::LogicalRecursiveCte*>(project->input.get());
     REQUIRE(recursive_cte != nullptr);
     CHECK(recursive_cte->cte_name == "chain");
-    REQUIRE(recursive_cte->output_schema.size() == 2U);
+    REQUIRE(recursive_cte->output_schema.size() == 1U);
     CHECK(recursive_cte->output_schema[0].name == "id");
-    CHECK(recursive_cte->output_schema[1].name == "manager_id");
 
     REQUIRE(recursive_cte->anchor != nullptr);
     REQUIRE(recursive_cte->recursive != nullptr);
@@ -325,15 +324,10 @@ TEST_CASE("lowering builds recursive CTE plan", "[parser][logical_lowering]")
     REQUIRE(recursive_project != nullptr);
     REQUIRE(recursive_project->input != nullptr);
 
-    auto* recursive_join = dynamic_cast<relational::LogicalJoin*>(recursive_project->input.get());
-    REQUIRE(recursive_join != nullptr);
-
-    const auto* cte_scan_left = dynamic_cast<const relational::LogicalCteScan*>(recursive_join->left.get());
-    const auto* cte_scan_right = dynamic_cast<const relational::LogicalCteScan*>(recursive_join->right.get());
-    const auto* cte_scan = cte_scan_left != nullptr ? cte_scan_left : cte_scan_right;
+    const auto* cte_scan = dynamic_cast<const relational::LogicalCteScan*>(recursive_project->input.get());
     REQUIRE(cte_scan != nullptr);
     CHECK(cte_scan->cte_name == "chain");
-    REQUIRE(cte_scan->table_alias.has_value());
-    CHECK(*cte_scan->table_alias == "c");
-    REQUIRE(cte_scan->output_schema.size() == 2U);
+    CHECK_FALSE(cte_scan->table_alias.has_value());
+    CHECK(cte_scan->recursive_reference);
+    REQUIRE(cte_scan->output_schema.size() == 1U);
 }

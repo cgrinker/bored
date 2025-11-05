@@ -171,6 +171,9 @@ struct TableBinding final {
     std::string schema_name{};
     std::string table_name{};
     std::optional<std::string> table_alias{};
+    bool is_common_table_expression = false;
+    bool is_recursive_reference = false;
+    std::string cte_name{};
 };
 
 struct ColumnBinding final {

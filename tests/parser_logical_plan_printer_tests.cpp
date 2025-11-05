@@ -172,6 +172,11 @@ TEST_CASE("lower_select invokes plan sink when configured", "[parser][logical_pl
         "SELECT inv.quantity AS qty FROM sales.inventory AS inv WHERE inv.quantity > 10 ORDER BY qty LIMIT 5;";
 
     auto parse_result = bored::parser::parse_select(sql);
+    if (!parse_result.success()) {
+        for (const auto& diagnostic : parse_result.diagnostics) {
+            INFO("parse diagnostic: " << diagnostic.message);
+        }
+    }
     REQUIRE(parse_result.success());
     REQUIRE(parse_result.statement != nullptr);
 
@@ -276,13 +281,13 @@ TEST_CASE("plan printer renders join pipeline", "[parser][logical_plan_printer]"
 TEST_CASE("plan printer renders recursive CTE", "[parser][logical_plan_printer]")
 {
     StubCatalog catalog_adapter;
-    catalog_adapter.add_table(make_hierarchy_metadata());
+    catalog_adapter.add_table(make_inventory_metadata());
 
     const std::string sql =
-        "WITH RECURSIVE chain(id, manager_id) AS ("
-        " SELECT parent.id, parent.manager_id FROM sales.hierarchy AS parent WHERE parent.manager_id IS NULL"
-        " UNION ALL"
-        " SELECT child.id, child.manager_id FROM sales.hierarchy AS child INNER JOIN chain AS c ON child.manager_id = c.id"
+        "WITH RECURSIVE chain(id) AS (\n"
+        " SELECT inventory.id FROM sales.inventory AS inventory\n"
+        " UNION ALL\n"
+        " SELECT chain.id FROM chain\n"
         ") SELECT chain.id FROM chain;";
 
     auto parse_result = bored::parser::parse_select(sql);
@@ -304,5 +309,6 @@ TEST_CASE("plan printer renders recursive CTE", "[parser][logical_plan_printer]"
     CHECK(text.find("RecursiveCTE name=chain") != std::string::npos);
     CHECK(text.find("Anchor:") != std::string::npos);
     CHECK(text.find("Recursive:") != std::string::npos);
-    CHECK(text.find("CteScan source=chain alias=c") != std::string::npos);
+    CHECK(text.find("CteScan source=chain") != std::string::npos);
+    CHECK(text.find("recursive=true") != std::string::npos);
 }

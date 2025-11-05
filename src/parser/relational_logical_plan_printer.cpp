@@ -280,6 +280,9 @@ void describe_plan(const LogicalOperator& node, std::size_t depth, std::ostrings
         if (cte_scan.table_alias.has_value()) {
             stream << " alias=" << *cte_scan.table_alias;
         }
+        if (cte_scan.recursive_reference) {
+            stream << " recursive=true";
+        }
         if (!cte_scan.output_schema.empty()) {
             stream << " columns=[";
             bool first = true;

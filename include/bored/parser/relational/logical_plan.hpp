@@ -142,6 +142,7 @@ struct LogicalCteScan final : LogicalOperator {
 
     std::string cte_name{};
     std::optional<std::string> table_alias{};
+    bool recursive_reference = false;
 };
 
 struct LogicalRecursiveCte final : LogicalOperator {

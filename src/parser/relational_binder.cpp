@@ -452,7 +452,9 @@ public:
 
                     const auto diagnostic_count_before_recursive = result.diagnostics.size();
                     Scope recursive_scope{};
+                    recursive_cte_stack_.push_back(key);
                     bind_query(*cte->recursive_query, recursive_scope, recursive_bindings, result);
+                    recursive_cte_stack_.pop_back();
                     const auto diagnostic_count_after_recursive = result.diagnostics.size();
                     recursive_success = (diagnostic_count_after_recursive == diagnostic_count_before_recursive);
 
@@ -993,6 +995,11 @@ private:
                 if (table.alias) {
                     binding.table_alias = table.alias->value;
                 }
+                binding.is_common_table_expression = true;
+                binding.cte_name = cte_binding.node->name.value;
+                binding.is_recursive_reference = std::find(recursive_cte_stack_.begin(),
+                                                         recursive_cte_stack_.end(),
+                                                         cte_key) != recursive_cte_stack_.end();
 
                 table.binding = binding;
 
@@ -1395,6 +1402,7 @@ private:
         expression.required_coercion = requirement;
     }
 
+    mutable std::vector<std::string> recursive_cte_stack_{};
     BinderConfig config_;
 };
 
