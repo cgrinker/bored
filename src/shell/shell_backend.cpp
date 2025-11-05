@@ -3035,6 +3035,7 @@ void ShellBackend::mark_session_transaction_failed()
 void ShellBackend::clear_session_transaction()
 {
     session_transaction_.reset();
+    worktable_registry_.clear();
 }
 
 ddl::DdlCommandResponse ShellBackend::handle_create_database(ddl::DdlCommandContext&,
@@ -4012,6 +4013,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
         bored::executor::SpoolExecutor::Config spool_config{};
         spool_config.telemetry = &update_telemetry;
         spool_config.telemetry_identifier = "shell.update.materialize";
+        spool_config.worktable_registry = &worktable_registry_;
         spool_config.worktable_id = plan_details.materialize_worktable_id;
         spool_config.enable_recursive_cursor = plan_details.materialize_requires_recursive_cursor;
         update_input = std::make_unique<bored::executor::SpoolExecutor>(std::move(update_input), std::move(spool_config));
@@ -4276,6 +4278,7 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
         bored::executor::SpoolExecutor::Config spool_config{};
         spool_config.telemetry = &delete_telemetry;
         spool_config.telemetry_identifier = "shell.delete.materialize";
+        spool_config.worktable_registry = &worktable_registry_;
         spool_config.worktable_id = plan_details.materialize_worktable_id;
         spool_config.enable_recursive_cursor = plan_details.materialize_requires_recursive_cursor;
         delete_input = std::make_unique<bored::executor::SpoolExecutor>(std::move(delete_input), std::move(spool_config));
@@ -4481,6 +4484,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         bored::executor::SpoolExecutor::Config spool_config{};
         spool_config.telemetry = &select_telemetry;
         spool_config.telemetry_identifier = "shell.select.materialize";
+        spool_config.worktable_registry = &worktable_registry_;
         spool_config.worktable_id = plan_details.materialize_worktable_id;
         spool_config.enable_recursive_cursor = plan_details.materialize_requires_recursive_cursor;
         select_pipeline = std::make_unique<bored::executor::SpoolExecutor>(std::move(select_pipeline), std::move(spool_config));

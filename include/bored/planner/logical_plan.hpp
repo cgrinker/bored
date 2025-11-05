@@ -29,6 +29,7 @@ enum class LogicalOperatorType {
 struct LogicalProperties final {
     std::size_t estimated_cardinality = 0U;
     bool preserves_order = false;
+    bool requires_recursive_cursor = false;
     std::string relation_name{};
     catalog::RelationId relation_id{};
     std::vector<std::string> output_columns{};

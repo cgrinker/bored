@@ -315,6 +315,7 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
         }
         MaterializeProperties materialize_props{};
         materialize_props.worktable_id = context.allocate_worktable_id();
+        materialize_props.enable_recursive_cursor = logical->properties().requires_recursive_cursor;
         properties.materialize = materialize_props;
     }
 

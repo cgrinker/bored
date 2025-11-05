@@ -729,6 +729,7 @@ BenchmarkResult benchmark_spool_recovery(const BenchmarkOptions& options)
         spool_config.reserve_rows = replay_rows.size();
         spool_config.worktable_registry = &registry;
         spool_config.worktable_id = 0xC0DEC0DEU;
+    spool_config.enable_recursive_cursor = true;
 
         bored::txn::Snapshot replay_snapshot{};
         const std::uint64_t replay_lsn = commit_result.lsn != 0U ? commit_result.lsn : commit_header.commit_lsn;

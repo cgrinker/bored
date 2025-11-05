@@ -8,6 +8,7 @@
 #include "bored/planner/physical_plan.hpp"
 #include "bored/shell/shell_engine.hpp"
 #include "bored/executor/executor_node.hpp"
+#include "bored/executor/worktable_registry.hpp"
 #include "bored/executor/unique_enforce_executor.hpp"
 #include "bored/ddl/ddl_command.hpp"
 #include "bored/storage/async_io.hpp"
@@ -271,6 +272,7 @@ private:
     std::unique_ptr<ddl::DdlCommandDispatcher> dispatcher_{};
     storage::StorageTelemetryRegistry storage_registry_{};
     storage::WalTelemetryRegistry wal_registry_{};
+    bored::executor::WorkTableRegistry worktable_registry_{};
     std::unique_ptr<CatalogStorage> storage_{};
     std::unique_ptr<parser::DdlScriptExecutor> ddl_executor_{};
     catalog::SchemaId default_schema_id_{};

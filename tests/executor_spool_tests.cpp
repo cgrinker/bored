@@ -286,6 +286,7 @@ TEST_CASE("SpoolExecutor uses worktable cache when snapshot matches")
     config.telemetry = &telemetry;
     config.worktable_registry = &registry;
     config.worktable_id = 42U;
+    config.enable_recursive_cursor = true;
 
     SpoolExecutor spool{std::move(child), config};
 
@@ -325,6 +326,7 @@ TEST_CASE("SpoolExecutor uses worktable cache when snapshot matches")
     cached_config.telemetry = &telemetry;
     cached_config.worktable_registry = &registry;
     cached_config.worktable_id = 42U;
+    cached_config.enable_recursive_cursor = true;
 
     SpoolExecutor cached_spool{std::move(second_child), cached_config};
     ExecutorContext cached_context{};
@@ -361,6 +363,7 @@ TEST_CASE("WorkTableRegistry snapshot iterator preserves cached rows")
     SpoolExecutor::Config config{};
     config.worktable_registry = &registry;
     config.worktable_id = 0xABCDU;
+    config.enable_recursive_cursor = true;
 
     SpoolExecutor spool{std::move(child), config};
 
@@ -479,6 +482,7 @@ TEST_CASE("WorkTableRegistry recursive cursor manages seeds and deltas")
     SpoolExecutor::Config config{};
     config.worktable_registry = &registry;
     config.worktable_id = 0xFEEDU;
+    config.enable_recursive_cursor = true;
 
     SpoolExecutor spool{std::move(child), config};
 
