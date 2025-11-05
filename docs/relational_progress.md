@@ -65,10 +65,10 @@ Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning ov
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases, and now validates recursive members for column count/type compatibility while exposing recursive references during binding.
    - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines now wrap planner materialize nodes with spool-backed iterators; shell diagnostics surface executor pipeline chains, spool telemetry tests account for terminal reads, the worktable registry exposes snapshot-aware reuse, and crash/restart drills in `tests/wal_replay_tests.cpp` now verify worktables rehydrate across recovery.
    - Remaining tasks:
-     - [ ] Teach logical lowering/planner to emit recursive spool-capable plans so recursive WITH clauses schedule cursors and delta propagation alongside memo reuse.
+    - [ ] Teach logical lowering/planner to emit recursive spool-capable plans so recursive WITH clauses schedule cursors and delta propagation alongside memo reuse. _(Lowering now produces recursive spool-ready logical trees; planner memo/executor wiring remains.)_
      - [ ] Extend integration coverage for recursive spool consumers (multi-reader registry reuse, delta draining across statements) once planner wiring lands.
    - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp, docs/spool_operator_guide.md
-   - Next work item: Extend lowering to build recursive spool-ready trees so planner/executor wiring can consume them, then add integration tests exercising recursive spool cursors end-to-end.
+   - Next work item: Wire planner memo alternatives to recognise recursive spool requirements emitted by lowering, then add integration tests exercising recursive spool cursors end-to-end.
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.

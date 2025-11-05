@@ -274,6 +274,55 @@ void describe_plan(const LogicalOperator& node, std::size_t depth, std::ostrings
         }
         break;
     }
+    case LogicalOperatorKind::CteScan: {
+        const auto& cte_scan = static_cast<const LogicalCteScan&>(node);
+        stream << "CteScan source=" << cte_scan.cte_name;
+        if (cte_scan.table_alias.has_value()) {
+            stream << " alias=" << *cte_scan.table_alias;
+        }
+        if (!cte_scan.output_schema.empty()) {
+            stream << " columns=[";
+            bool first = true;
+            for (const auto& column : cte_scan.output_schema) {
+                if (!first) {
+                    stream << ", ";
+                }
+                stream << column.name << ':' << scalar_type_name(column.type);
+                stream << (column.nullable ? "?" : "");
+                first = false;
+            }
+            stream << ']';
+        }
+        stream << '\n';
+        break;
+    }
+    case LogicalOperatorKind::RecursiveCte: {
+        const auto& recursive = static_cast<const LogicalRecursiveCte&>(node);
+        stream << "RecursiveCTE name=" << recursive.cte_name;
+        if (!recursive.output_schema.empty()) {
+            stream << " columns=[";
+            bool first = true;
+            for (const auto& column : recursive.output_schema) {
+                if (!first) {
+                    stream << ", ";
+                }
+                stream << column.name << ':' << scalar_type_name(column.type);
+                stream << (column.nullable ? "?" : "");
+                first = false;
+            }
+            stream << ']';
+        }
+        stream << '\n';
+        if (recursive.anchor != nullptr) {
+            stream << indent(depth + 1U) << "Anchor:\n";
+            describe_plan(*recursive.anchor, depth + 2U, stream);
+        }
+        if (recursive.recursive != nullptr) {
+            stream << indent(depth + 1U) << "Recursive:\n";
+            describe_plan(*recursive.recursive, depth + 2U, stream);
+        }
+        break;
+    }
     default:
         stream << "<operator>\n";
         break;

@@ -93,6 +93,19 @@ void normalize_node(const LogicalOperator& node, NormalizationResult& result)
         }
         break;
     }
+    case LogicalOperatorKind::CteScan: {
+        break;
+    }
+    case LogicalOperatorKind::RecursiveCte: {
+        const auto& recursive = static_cast<const LogicalRecursiveCte&>(node);
+        if (recursive.anchor != nullptr) {
+            normalize_node(*recursive.anchor, result);
+        }
+        if (recursive.recursive != nullptr) {
+            normalize_node(*recursive.recursive, result);
+        }
+        break;
+    }
     case LogicalOperatorKind::Scan: {
         break;
     }

@@ -87,6 +87,19 @@ relational::TableMetadata make_shipments_metadata()
     return metadata;
 }
 
+relational::TableMetadata make_hierarchy_metadata()
+{
+    relational::TableMetadata metadata{};
+    metadata.database_id = catalog::DatabaseId{1U};
+    metadata.schema_id = catalog::SchemaId{12U};
+    metadata.relation_id = catalog::RelationId{300U};
+    metadata.schema_name = "sales";
+    metadata.table_name = "hierarchy";
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{1U}, catalog::CatalogColumnType::Int64, "id"});
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{2U}, catalog::CatalogColumnType::Int64, "manager_id"});
+    return metadata;
+}
+
 struct PlanFixture final {
     std::shared_ptr<bored::parser::SelectParseResult> parse;
     relational::LogicalOperatorPtr plan;
@@ -258,4 +271,38 @@ TEST_CASE("plan printer renders join pipeline", "[parser][logical_plan_printer]"
         "    Scan table=sales.shipments alias=shp\n";
 
     CHECK(text == expected);
+}
+
+TEST_CASE("plan printer renders recursive CTE", "[parser][logical_plan_printer]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_hierarchy_metadata());
+
+    const std::string sql =
+        "WITH RECURSIVE chain(id, manager_id) AS ("
+        " SELECT parent.id, parent.manager_id FROM sales.hierarchy AS parent WHERE parent.manager_id IS NULL"
+        " UNION ALL"
+        " SELECT child.id, child.manager_id FROM sales.hierarchy AS child INNER JOIN chain AS c ON child.manager_id = c.id"
+        ") SELECT chain.id FROM chain;";
+
+    auto parse_result = bored::parser::parse_select(sql);
+    REQUIRE(parse_result.success());
+    REQUIRE(parse_result.statement != nullptr);
+
+    relational::BinderConfig binder_config{};
+    binder_config.catalog = &catalog_adapter;
+    binder_config.default_schema = std::string{"sales"};
+
+    auto binding = relational::bind_select(binder_config, *parse_result.statement);
+    REQUIRE(binding.success());
+
+    auto lowering = relational::lower_select(*parse_result.statement);
+    REQUIRE(lowering.success());
+    REQUIRE(lowering.plan != nullptr);
+
+    const auto text = relational::describe_plan(*lowering.plan);
+    CHECK(text.find("RecursiveCTE name=chain") != std::string::npos);
+    CHECK(text.find("Anchor:") != std::string::npos);
+    CHECK(text.find("Recursive:") != std::string::npos);
+    CHECK(text.find("CteScan source=chain alias=c") != std::string::npos);
 }

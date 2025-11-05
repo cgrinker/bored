@@ -53,6 +53,157 @@ std::vector<LogicalColumn> merge_schemas(const LogicalOperatorPtr& left, const L
     return schema;
 }
 
+LogicalOperatorPtr clone_plan(const LogicalOperator& node);
+
+LogicalOperatorPtr clone_optional(const LogicalOperatorPtr& node)
+{
+    if (node == nullptr) {
+        return nullptr;
+    }
+    return clone_plan(*node);
+}
+
+std::vector<LogicalColumn> derive_cte_schema(const CommonTableExpression& cte)
+{
+    std::vector<LogicalColumn> schema;
+    if (cte.query == nullptr) {
+        return schema;
+    }
+
+    const auto& anchor_items = cte.query->select_items;
+    if (anchor_items.empty()) {
+        return schema;
+    }
+
+    schema.reserve(anchor_items.size());
+    for (std::size_t index = 0U; index < anchor_items.size(); ++index) {
+        const auto* item = anchor_items[index];
+        if (item == nullptr) {
+            schema.emplace_back();
+            continue;
+        }
+
+        LogicalColumn column{};
+        if (!cte.column_names.empty() && index < cte.column_names.size()) {
+            column.name = cte.column_names[index].value;
+        } else {
+            column.name = projection_label(*item, index);
+        }
+
+        if (item->expression != nullptr && item->expression->inferred_type.has_value()) {
+            column.type = item->expression->inferred_type->type;
+            column.nullable = item->expression->inferred_type->nullable;
+        }
+
+        if (cte.recursive_query != nullptr) {
+            const auto& recursive_items = cte.recursive_query->select_items;
+            if (index < recursive_items.size()) {
+                const auto* recursive_item = recursive_items[index];
+                if (recursive_item != nullptr &&
+                    recursive_item->expression != nullptr &&
+                    recursive_item->expression->inferred_type.has_value()) {
+                    const auto& info = *recursive_item->expression->inferred_type;
+                    if (column.type == ScalarType::Unknown && info.type != ScalarType::Unknown) {
+                        column.type = info.type;
+                    }
+                    column.nullable = column.nullable || info.nullable;
+                }
+            }
+        }
+
+        schema.push_back(std::move(column));
+    }
+
+    return schema;
+}
+
+LogicalOperatorPtr clone_plan(const LogicalOperator& node)
+{
+    switch (node.kind) {
+    case LogicalOperatorKind::Scan: {
+        const auto& scan = static_cast<const LogicalScan&>(node);
+        auto copy = std::make_unique<LogicalScan>();
+        copy->table = scan.table;
+        copy->columns = scan.columns;
+        copy->output_schema = scan.output_schema;
+        return copy;
+    }
+    case LogicalOperatorKind::Project: {
+        const auto& project = static_cast<const LogicalProject&>(node);
+        auto copy = std::make_unique<LogicalProject>();
+        copy->projections = project.projections;
+        copy->output_schema = project.output_schema;
+        copy->input = clone_optional(project.input);
+        return copy;
+    }
+    case LogicalOperatorKind::Filter: {
+        const auto& filter = static_cast<const LogicalFilter&>(node);
+        auto copy = std::make_unique<LogicalFilter>();
+        copy->predicate = filter.predicate;
+        copy->output_schema = filter.output_schema;
+        copy->input = clone_optional(filter.input);
+        return copy;
+    }
+    case LogicalOperatorKind::Join: {
+        const auto& join = static_cast<const LogicalJoin&>(node);
+        auto copy = std::make_unique<LogicalJoin>();
+        copy->join_type = join.join_type;
+        copy->predicate = join.predicate;
+        copy->output_schema = join.output_schema;
+        copy->left = clone_optional(join.left);
+        copy->right = clone_optional(join.right);
+        return copy;
+    }
+    case LogicalOperatorKind::Aggregate: {
+        const auto& aggregate = static_cast<const LogicalAggregate&>(node);
+        auto copy = std::make_unique<LogicalAggregate>();
+        copy->group_keys = aggregate.group_keys;
+        copy->aggregates = aggregate.aggregates;
+        copy->output_schema = aggregate.output_schema;
+        copy->input = clone_optional(aggregate.input);
+        return copy;
+    }
+    case LogicalOperatorKind::Sort: {
+        const auto& sort = static_cast<const LogicalSort&>(node);
+        auto copy = std::make_unique<LogicalSort>();
+        copy->keys = sort.keys;
+        copy->output_schema = sort.output_schema;
+        copy->input = clone_optional(sort.input);
+        return copy;
+    }
+    case LogicalOperatorKind::Limit: {
+        const auto& limit = static_cast<const LogicalLimit&>(node);
+        auto copy = std::make_unique<LogicalLimit>();
+        copy->row_count = limit.row_count;
+        copy->offset = limit.offset;
+        copy->output_schema = limit.output_schema;
+        copy->input = clone_optional(limit.input);
+        return copy;
+    }
+    case LogicalOperatorKind::CteScan: {
+        const auto& scan = static_cast<const LogicalCteScan&>(node);
+        auto copy = std::make_unique<LogicalCteScan>();
+        copy->cte_name = scan.cte_name;
+        copy->table_alias = scan.table_alias;
+        copy->output_schema = scan.output_schema;
+        return copy;
+    }
+    case LogicalOperatorKind::RecursiveCte: {
+        const auto& recursive = static_cast<const LogicalRecursiveCte&>(node);
+        auto copy = std::make_unique<LogicalRecursiveCte>();
+        copy->cte_name = recursive.cte_name;
+        copy->output_schema = recursive.output_schema;
+        copy->anchor = clone_optional(recursive.anchor);
+        copy->recursive = clone_optional(recursive.recursive);
+        return copy;
+    }
+    default:
+        break;
+    }
+
+    return nullptr;
+}
+
 class LoweringContext final {
 public:
     LoweringContext(const SelectStatement& statement, const LoweringConfig& config)
@@ -101,6 +252,13 @@ public:
     }
 
 private:
+    struct CtePlanInfo final {
+        std::vector<LogicalColumn> schema{};
+        LogicalOperatorPtr blueprint{};
+        bool building_anchor = false;
+        bool building_recursive = false;
+    };
+
     LogicalOperatorPtr lower_query(const QuerySpecification& query, LoweringResult& result)
     {
         auto current = lower_from(query, result);
@@ -352,6 +510,7 @@ private:
     const LoweringConfig& config_;
     std::unordered_map<std::string, const CommonTableExpression*> cte_definitions_{};
     std::unordered_set<std::string> active_ctes_{};
+    std::unordered_map<std::string, CtePlanInfo> cte_plans_{};
 
     LogicalOperatorPtr lower_cte_reference(const TableReference& table, LoweringResult& result)
     {
@@ -379,6 +538,19 @@ private:
         }
 
         if (active_ctes_.count(key) != 0U) {
+            auto it_state = cte_plans_.find(key);
+            if (it_state != cte_plans_.end() && it_state->second.building_recursive) {
+                auto scan = std::make_unique<LogicalCteScan>();
+                scan->cte_name = binding.table_name;
+                if (binding.table_alias.has_value()) {
+                    scan->table_alias = binding.table_alias;
+                }
+                if (!it_state->second.schema.empty()) {
+                    scan->output_schema = it_state->second.schema;
+                }
+                return scan;
+            }
+
             ParserDiagnostic diagnostic{};
             diagnostic.severity = ParserSeverity::Error;
             diagnostic.message = "Recursive CTE reference '" + binding.table_name + "' is not supported";
@@ -399,9 +571,79 @@ private:
             return nullptr;
         }
 
+        auto& state = cte_plans_[key];
+
+        const bool is_recursive = (cte->recursive_query != nullptr);
+
+        if (is_recursive) {
+            if (state.blueprint != nullptr) {
+                auto clone = clone_plan(*state.blueprint);
+                if (clone != nullptr) {
+                    return clone;
+                }
+            }
+
+            if (state.schema.empty()) {
+                state.schema = derive_cte_schema(*cte);
+            }
+
+            const auto inserted = active_ctes_.insert(key).second;
+            if (!inserted && !state.building_recursive) {
+                ParserDiagnostic diagnostic{};
+                diagnostic.severity = ParserSeverity::Error;
+                diagnostic.message = "Recursive CTE '" + binding.table_name + "' has circular references";
+                diagnostic.remediation_hints = {
+                    "Ensure the recursive member only references the CTE from within its own definition."};
+                result.diagnostics.push_back(std::move(diagnostic));
+                return nullptr;
+            }
+
+            state.building_anchor = true;
+            auto anchor_plan = lower_query(*cte->query, result);
+            state.building_anchor = false;
+            if (anchor_plan == nullptr) {
+                active_ctes_.erase(key);
+                return nullptr;
+            }
+
+            state.building_recursive = true;
+            auto recursive_plan = lower_query(*cte->recursive_query, result);
+            state.building_recursive = false;
+            active_ctes_.erase(key);
+            if (recursive_plan == nullptr) {
+                return nullptr;
+            }
+
+            if (state.schema.empty()) {
+                state.schema = propagate_schema(anchor_plan);
+            }
+            if (state.schema.empty()) {
+                state.schema = propagate_schema(recursive_plan);
+            }
+
+            auto recursive_cte = std::make_unique<LogicalRecursiveCte>();
+            recursive_cte->cte_name = binding.table_name;
+            recursive_cte->output_schema = state.schema;
+            recursive_cte->anchor = std::move(anchor_plan);
+            recursive_cte->recursive = std::move(recursive_plan);
+
+            state.blueprint = clone_plan(*recursive_cte);
+            return recursive_cte;
+        }
+
+        if (state.blueprint != nullptr) {
+            auto clone = clone_plan(*state.blueprint);
+            if (clone != nullptr) {
+                return clone;
+            }
+        }
+
         active_ctes_.insert(key);
         auto plan = lower_query(*cte->query, result);
         active_ctes_.erase(key);
+        if (plan != nullptr) {
+            state.blueprint = clone_plan(*plan);
+        }
         return plan;
     }
 };

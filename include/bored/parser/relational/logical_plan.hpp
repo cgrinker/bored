@@ -23,7 +23,9 @@ enum class LogicalOperatorKind : std::uint8_t {
     Join,
     Aggregate,
     Sort,
-    Limit
+    Limit,
+    CteScan,
+    RecursiveCte
 };
 
 struct LogicalOperator;
@@ -34,6 +36,8 @@ struct LogicalJoin;
 struct LogicalAggregate;
 struct LogicalSort;
 struct LogicalLimit;
+struct LogicalCteScan;
+struct LogicalRecursiveCte;
 
 class LogicalOperatorVisitor {
 public:
@@ -45,6 +49,8 @@ public:
     virtual void visit(const LogicalAggregate& op) = 0;
     virtual void visit(const LogicalSort& op) = 0;
     virtual void visit(const LogicalLimit& op) = 0;
+    virtual void visit(const LogicalCteScan& op) = 0;
+    virtual void visit(const LogicalRecursiveCte& op) = 0;
 };
 
 struct LogicalOperator {
@@ -131,6 +137,21 @@ struct LogicalLimit final : LogicalOperator {
     LogicalOperatorPtr input{};
 };
 
+struct LogicalCteScan final : LogicalOperator {
+    LogicalCteScan() noexcept : LogicalOperator(LogicalOperatorKind::CteScan) {}
+
+    std::string cte_name{};
+    std::optional<std::string> table_alias{};
+};
+
+struct LogicalRecursiveCte final : LogicalOperator {
+    LogicalRecursiveCte() noexcept : LogicalOperator(LogicalOperatorKind::RecursiveCte) {}
+
+    std::string cte_name{};
+    LogicalOperatorPtr anchor{};
+    LogicalOperatorPtr recursive{};
+};
+
 inline void LogicalOperator::accept(LogicalOperatorVisitor& visitor) const
 {
     switch (kind) {
@@ -154,6 +175,12 @@ inline void LogicalOperator::accept(LogicalOperatorVisitor& visitor) const
         break;
     case LogicalOperatorKind::Limit:
         visitor.visit(static_cast<const LogicalLimit&>(*this));
+        break;
+    case LogicalOperatorKind::CteScan:
+        visitor.visit(static_cast<const LogicalCteScan&>(*this));
+        break;
+    case LogicalOperatorKind::RecursiveCte:
+        visitor.visit(static_cast<const LogicalRecursiveCte&>(*this));
         break;
     default:
         break;

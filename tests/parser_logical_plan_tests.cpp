@@ -45,6 +45,16 @@ public:
         kinds.push_back(relational::LogicalOperatorKind::Limit);
     }
 
+    void visit(const relational::LogicalCteScan&) override
+    {
+        kinds.push_back(relational::LogicalOperatorKind::CteScan);
+    }
+
+    void visit(const relational::LogicalRecursiveCte&) override
+    {
+        kinds.push_back(relational::LogicalOperatorKind::RecursiveCte);
+    }
+
     std::vector<relational::LogicalOperatorKind> kinds{};
 };
 
@@ -84,6 +94,12 @@ TEST_CASE("logical operator visitor dispatches by kind", "[parser][logical_plan]
     auto scan = std::make_unique<relational::LogicalScan>();
     scan->kind = relational::LogicalOperatorKind::Scan;
 
+    auto cte_scan = std::make_unique<relational::LogicalCteScan>();
+    cte_scan->kind = relational::LogicalOperatorKind::CteScan;
+
+    auto recursive_cte = std::make_unique<relational::LogicalRecursiveCte>();
+    recursive_cte->kind = relational::LogicalOperatorKind::RecursiveCte;
+
     RecordingVisitor visitor{};
     scan->accept(visitor);
     project->accept(visitor);
@@ -92,8 +108,10 @@ TEST_CASE("logical operator visitor dispatches by kind", "[parser][logical_plan]
     aggregate->accept(visitor);
     sort->accept(visitor);
     limit.accept(visitor);
+    cte_scan->accept(visitor);
+    recursive_cte->accept(visitor);
 
-    REQUIRE(visitor.kinds.size() == 7U);
+    REQUIRE(visitor.kinds.size() == 9U);
     CHECK(visitor.kinds[0] == relational::LogicalOperatorKind::Scan);
     CHECK(visitor.kinds[1] == relational::LogicalOperatorKind::Project);
     CHECK(visitor.kinds[2] == relational::LogicalOperatorKind::Filter);
@@ -101,4 +119,6 @@ TEST_CASE("logical operator visitor dispatches by kind", "[parser][logical_plan]
     CHECK(visitor.kinds[4] == relational::LogicalOperatorKind::Aggregate);
     CHECK(visitor.kinds[5] == relational::LogicalOperatorKind::Sort);
     CHECK(visitor.kinds[6] == relational::LogicalOperatorKind::Limit);
+    CHECK(visitor.kinds[7] == relational::LogicalOperatorKind::CteScan);
+    CHECK(visitor.kinds[8] == relational::LogicalOperatorKind::RecursiveCte);
 }

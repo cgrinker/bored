@@ -746,6 +746,10 @@ std::string_view logical_operator_kind_name(parser::relational::LogicalOperatorK
         return "Sort";
     case LogicalOperatorKind::Limit:
         return "Limit";
+    case LogicalOperatorKind::CteScan:
+        return "CteScan";
+    case LogicalOperatorKind::RecursiveCte:
+        return "RecursiveCte";
     default:
         return "Unknown";
     }

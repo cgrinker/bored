@@ -83,6 +83,19 @@ relational::TableMetadata make_shipments_metadata()
     return metadata;
 }
 
+relational::TableMetadata make_hierarchy_metadata()
+{
+    relational::TableMetadata metadata{};
+    metadata.database_id = catalog::DatabaseId{1U};
+    metadata.schema_id = catalog::SchemaId{12U};
+    metadata.relation_id = catalog::RelationId{300U};
+    metadata.schema_name = "sales";
+    metadata.table_name = "hierarchy";
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{1U}, catalog::CatalogColumnType::Int64, "id"});
+    metadata.columns.push_back(relational::ColumnMetadata{catalog::ColumnId{2U}, catalog::CatalogColumnType::Int64, "manager_id"});
+    return metadata;
+}
+
 struct LoweringFixture final {
     relational::LoweringResult lowering{};
     relational::LogicalOperatorPtr& plan;
@@ -276,4 +289,51 @@ TEST_CASE("lowering allows chained CTE references", "[parser][logical_lowering]"
     auto* scan = dynamic_cast<relational::LogicalScan*>(filter->input.get());
     REQUIRE(scan != nullptr);
     CHECK(scan->table.table_name == "inventory");
+}
+
+TEST_CASE("lowering builds recursive CTE plan", "[parser][logical_lowering]")
+{
+    StubCatalog catalog_adapter;
+    catalog_adapter.add_table(make_hierarchy_metadata());
+
+    const std::string sql =
+        "WITH RECURSIVE chain(id, manager_id) AS ("
+        " SELECT parent.id, parent.manager_id FROM sales.hierarchy AS parent WHERE parent.manager_id IS NULL"
+        " UNION ALL"
+        " SELECT child.id, child.manager_id FROM sales.hierarchy AS child INNER JOIN chain AS c ON child.manager_id = c.id"
+        ") SELECT chain.id FROM chain;";
+
+    auto lowering = lower_sql(sql, catalog_adapter);
+    REQUIRE(lowering.success());
+    REQUIRE(lowering.plan != nullptr);
+
+    auto* project = dynamic_cast<relational::LogicalProject*>(lowering.plan.get());
+    REQUIRE(project != nullptr);
+    REQUIRE(project->input != nullptr);
+
+    auto* recursive_cte = dynamic_cast<relational::LogicalRecursiveCte*>(project->input.get());
+    REQUIRE(recursive_cte != nullptr);
+    CHECK(recursive_cte->cte_name == "chain");
+    REQUIRE(recursive_cte->output_schema.size() == 2U);
+    CHECK(recursive_cte->output_schema[0].name == "id");
+    CHECK(recursive_cte->output_schema[1].name == "manager_id");
+
+    REQUIRE(recursive_cte->anchor != nullptr);
+    REQUIRE(recursive_cte->recursive != nullptr);
+
+    auto* recursive_project = dynamic_cast<relational::LogicalProject*>(recursive_cte->recursive.get());
+    REQUIRE(recursive_project != nullptr);
+    REQUIRE(recursive_project->input != nullptr);
+
+    auto* recursive_join = dynamic_cast<relational::LogicalJoin*>(recursive_project->input.get());
+    REQUIRE(recursive_join != nullptr);
+
+    const auto* cte_scan_left = dynamic_cast<const relational::LogicalCteScan*>(recursive_join->left.get());
+    const auto* cte_scan_right = dynamic_cast<const relational::LogicalCteScan*>(recursive_join->right.get());
+    const auto* cte_scan = cte_scan_left != nullptr ? cte_scan_left : cte_scan_right;
+    REQUIRE(cte_scan != nullptr);
+    CHECK(cte_scan->cte_name == "chain");
+    REQUIRE(cte_scan->table_alias.has_value());
+    CHECK(*cte_scan->table_alias == "c");
+    REQUIRE(cte_scan->output_schema.size() == 2U);
 }
