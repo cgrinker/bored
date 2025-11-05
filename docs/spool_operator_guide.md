@@ -30,4 +30,15 @@ _Last updated: 2025-11-04_
 - Run the spool crash drills (`ctest -R "Wal crash drill rehydrates spool"`) after changes to recovery code to confirm worktables survive restart scenarios.
 - When custom registries are supplied, make sure each logical worktable uses a stable `worktable_id` so cached rows can be located across executor instances.
 
+## Recursive Spool Playbook
+- `WorkTableRegistry::RecursiveCursor` exposes seed rows and delta staging for recursive CTE consumers. After a spool materialises its child, call `SpoolExecutor::recursive_cursor()` to obtain the cursor, iterate seeds via `next_seed`, and append delta tuples between rounds with `append_delta`/`mark_delta_processed`.
+- The storage benchmark harness now exercises this flow. Run `./build/bored_benchmarks --samples=10 --json` to capture the `spool_worktable_recovery` timings; the run replays 64 seed rows, appends one delta per round, and confirms the cursor clears processed deltas before the next iteration.
+- Use the recorded metrics in `benchmarks/baseline_results.json` to flag regressions. The baseline currently tracks mean and p95 timings for the recursive spool drill alongside FSM refresh and WAL retention/replay workloads.
+- Training checklist for operators exploring recursive workloads:
+  1. Inspect shell plans for `RecursiveMaterialize`/`Spool` pairs and confirm worktable IDs remain stable across statements.
+  2. Verify registry snapshots using the shell telemetry surface (`storage diagnostics spoolLatency`), checking that delta invocations align with expected recursion depth.
+  3. Re-run the benchmark command above after tuning spool heuristics or WAL retention knobs, comparing results to the baseline JSON and capturing deviations in release notes.
+
+Keeping the playbook handy ensures teams validate recursive spool behaviour (seed reuse, delta drains, and latency budgets) before enabling recursive CTE plans in production pipelines.
+
 Spool instrumentation now makes it straightforward to confirm when materialised worktables are reused, how much time is spent buffering, and whether crash recovery continues to honour cached intermediate results.
