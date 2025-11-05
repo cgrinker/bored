@@ -668,7 +668,7 @@ BenchmarkResult benchmark_spool_recovery(const BenchmarkOptions& options)
     result.name = "spool_worktable_recovery";
     const std::size_t row_count = std::max<std::size_t>(options.spool_row_count, 1U);
     const std::size_t iterations = std::max<std::size_t>(options.spool_iterations, 1U);
-    result.work_units = row_count * iterations;
+    result.work_units = row_count * iterations + iterations;
 
     for (std::size_t sample = 0; sample < options.samples; ++sample) {
         auto wal_dir_holder = make_temp_directory("bored_bench_spool_recovery_");
@@ -767,6 +767,61 @@ BenchmarkResult benchmark_spool_recovery(const BenchmarkOptions& options)
 
         if (iterations > 0U && child_reads != row_count) {
             throw std::runtime_error("Spool recovery benchmark expected single materialisation pass");
+        }
+
+        auto cursor_opt = registry.recursive_cursor(*spool_config.worktable_id, replay_snapshot);
+        if (!cursor_opt || !cursor_opt->valid()) {
+            throw std::runtime_error("Spool recovery benchmark expected recursive cursor availability");
+        }
+
+        auto cursor = std::move(*cursor_opt);
+        if (cursor.seed_count() != row_count) {
+            throw std::runtime_error("Spool recovery benchmark seed count mismatch");
+        }
+
+        const bored::executor::TupleBuffer* seed_ptr = nullptr;
+        cursor.reset_seed();
+        std::size_t observed_seeds = 0U;
+        while (cursor.next_seed(seed_ptr)) {
+            if (seed_ptr == nullptr) {
+                throw std::runtime_error("Recursive cursor emitted null seed pointer");
+            }
+            ++observed_seeds;
+        }
+        if (observed_seeds != row_count) {
+            throw std::runtime_error("Recursive cursor iteration over seeds produced unexpected count");
+        }
+
+        std::size_t total_delta_reads = 0U;
+        for (std::size_t round = 0U; round < iterations; ++round) {
+            bored::executor::TupleBuffer delta_buffer{};
+            const auto& source_row = replay_rows[round % replay_rows.size()];
+            delta_buffer.write(std::span<const std::byte>(source_row.data(), source_row.size()));
+            cursor.append_delta(std::move(delta_buffer));
+            cursor.reset_delta();
+
+            const bored::executor::TupleBuffer* delta_ptr = nullptr;
+            std::size_t round_reads = 0U;
+            while (cursor.next_delta(delta_ptr)) {
+                if (delta_ptr == nullptr) {
+                    throw std::runtime_error("Recursive cursor emitted null delta pointer");
+                }
+                ++round_reads;
+            }
+
+            if (round_reads != 1U) {
+                throw std::runtime_error("Recursive cursor delta iteration mismatch");
+            }
+
+            cursor.mark_delta_processed();
+            if (cursor.delta_count() != 0U) {
+                throw std::runtime_error("Recursive cursor retained processed deltas");
+            }
+            total_delta_reads += round_reads;
+        }
+
+        if (total_delta_reads != iterations) {
+            throw std::runtime_error("Recursive cursor delta accounting mismatch");
         }
 
         const auto end = std::chrono::steady_clock::now();

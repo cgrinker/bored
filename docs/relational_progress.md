@@ -65,10 +65,10 @@ Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning ov
    - Binder: ✅ Binding layer registers CTE definitions, scopes, and column aliases; regression coverage now exercises CTE consumption.
    - Executor: ✅ Spool executor in place and bored_shell SELECT/UPDATE/DELETE pipelines now wrap planner materialize nodes with spool-backed iterators; shell diagnostics surface executor pipeline chains, spool telemetry tests account for terminal reads, the worktable registry exposes snapshot-aware reuse, and crash/restart drills in `tests/wal_replay_tests.cpp` now verify worktables rehydrate across recovery.
    - Remaining tasks:
-      - [x] Prototype snapshot-aware iterators for recursive CTE seeds so recursive WITH consumers can reuse staged worktables without snapshot drift (`tests/executor_spool_tests.cpp` now validates seed/delta reuse via `WorkTableRegistry::RecursiveCursor`).
-      - [ ] Schedule and automate worktable recovery benchmarks to capture baseline timings and regressions for spool-heavy crash/restart workflows.
+   - [x] Prototype snapshot-aware iterators for recursive CTE seeds so recursive WITH consumers can reuse staged worktables without snapshot drift (`tests/executor_spool_tests.cpp` now validates seed/delta reuse via `WorkTableRegistry::RecursiveCursor`).
+   - [x] Schedule and automate worktable recovery benchmarks to capture baseline timings and regressions for spool-heavy crash/restart workflows (`benchmarks/storage_benchmarks.cpp` now measures recursive cursor seed/delta passes during spool recovery).
    - Source files to update next: src/planner/memo.cpp, src/planner/planner.cpp, src/planner/rules/, src/executor/spool_executor.cpp, src/executor/executor_node.cpp, tests/planner_integration_tests.cpp, tests/planner_rule_tests.cpp, tests/executor_integration_tests.cpp, tests/shell_backend_tests.cpp, docs/spool_operator_guide.md
-   - Next work item: Kick off worktable recovery benchmarking and use the spool operator guide to seed operator training ahead of planner/executor integration.
+   - Next work item: Draft operator training material for the spool/recursive workflow before wiring planner/executor integration and capture benchmark baselines for documentation.
 
 5. **Advanced Indexing & Optimization (Planned)**
    - Support unique indexes tied to constraint metadata; expose covering/partial index options.
