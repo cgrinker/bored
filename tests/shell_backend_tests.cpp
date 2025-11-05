@@ -5,30 +5,134 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <algorithm>
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <random>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <stdexcept>
+#include <variant>
+#include <vector>
 
 using bored::shell::ShellBackend;
 using bored::shell::ShellEngine;
+using bored::shell::ShellBackendTestAccess;
 using Catch::Matchers::ContainsSubstring;
+
+namespace bored::shell {
+
+struct ShellBackendTestAccess final {
+    static bored::executor::WorkTableRegistry& worktable_registry(ShellBackend& backend)
+    {
+        return backend.worktable_registry_;
+    }
+
+    static ShellBackend::TableData* find_table_or_default_schema(ShellBackend& backend, std::string_view name)
+    {
+        return backend.find_table_or_default_schema(name);
+    }
+
+    static std::optional<ShellBackend::ConstraintIndexPredicate> parse_index_predicate(
+        const ShellBackend::TableData& table,
+        std::string_view predicate,
+        std::string& error)
+    {
+        return ShellBackend::parse_constraint_predicate(table, predicate, error);
+    }
+
+    static bool evaluate_index_predicate(const ShellBackend::ConstraintIndexPredicate& predicate,
+                                         const std::vector<ShellBackend::ScalarValue>& values)
+    {
+        return ShellBackend::evaluate_constraint_predicate(predicate, values);
+    }
+};
+
+}  // namespace bored::shell
 
 namespace {
 
 struct ShellBackendHarness final {
     ShellBackendHarness()
-        : backend{}
+        : storage_root{make_storage_root()}
+        , cleanup{storage_root}
+        , backend{make_backend_config(storage_root)}
         , engine{backend.make_config()}
     {
         auto create = engine.execute_sql("CREATE TABLE metrics (id BIGINT, counter BIGINT, name TEXT);");
+        INFO(create.summary);
+        if (!create.success) {
+            for (const auto& diagnostic : create.diagnostics) {
+                INFO(diagnostic.message);
+                for (const auto& hint : diagnostic.remediation_hints) {
+                    INFO(hint);
+                }
+            }
+        }
         REQUIRE(create.success);
 
-    auto insert = engine.execute_sql("INSERT INTO metrics (id, counter, name) VALUES (1, 7, 'alpha');");
-    REQUIRE(insert.success);
-    CHECK(insert.rows_touched == 1U);
-    CHECK(insert.wal_bytes > 0U);
+        auto insert = engine.execute_sql("INSERT INTO metrics (id, counter, name) VALUES (1, 7, 'alpha');");
+        INFO(insert.summary);
+        if (!insert.success) {
+            for (const auto& diagnostic : insert.diagnostics) {
+                INFO(diagnostic.message);
+                for (const auto& hint : diagnostic.remediation_hints) {
+                    INFO(hint);
+                }
+            }
+        }
+        REQUIRE(insert.success);
+        CHECK(insert.rows_touched == 1U);
+        CHECK(insert.wal_bytes > 0U);
     }
 
-    ShellBackend backend{};
+    static ShellBackend::Config make_backend_config(const std::filesystem::path& root)
+    {
+        ShellBackend::Config config{};
+        config.storage_directory = root;
+        config.wal_directory = root / "wal";
+        config.io_use_full_fsync = false;
+        return config;
+    }
+
+    static std::filesystem::path make_storage_root()
+    {
+        const auto base = std::filesystem::temp_directory_path();
+        std::random_device rd;
+        for (int attempt = 0; attempt < 32; ++attempt) {
+            const auto candidate = base / ("bored_shell_backend_" + std::to_string(static_cast<unsigned long long>(rd())));
+            std::error_code ec;
+            std::filesystem::remove_all(candidate, ec);
+            ec = {};
+            if (std::filesystem::create_directories(candidate, ec) && !ec) {
+                return candidate;
+            }
+        }
+        throw std::runtime_error("Failed to create shell backend storage directory");
+    }
+
+    struct StorageCleanup final {
+        explicit StorageCleanup(std::filesystem::path root) noexcept
+            : path{std::move(root)}
+        {
+        }
+
+        ~StorageCleanup()
+        {
+            if (path.empty()) {
+                return;
+            }
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec);
+        }
+
+        std::filesystem::path path{};
+    };
+
+    std::filesystem::path storage_root{};
+    StorageCleanup cleanup;
+    ShellBackend backend;
     ShellEngine engine;
 };
 
@@ -80,6 +184,67 @@ TEST_CASE("ShellBackend emits executor pipeline diagnostics for SELECT")
           std::distance(metrics.detail_lines.begin(), pipeline_it));
     CHECK(std::distance(metrics.detail_lines.begin(), logical_root_it) <
           std::distance(metrics.detail_lines.begin(), root_it));
+}
+
+TEST_CASE("ShellBackend parses and evaluates numeric constraint predicates")
+{
+    ShellBackendHarness harness;
+    auto* table = ShellBackendTestAccess::find_table_or_default_schema(harness.backend, "metrics");
+    REQUIRE(table != nullptr);
+
+    std::string error;
+    auto predicate = ShellBackendTestAccess::parse_index_predicate(
+        *table,
+        "counter >= 5",
+        error);
+    REQUIRE(predicate.has_value());
+    CHECK(error.empty());
+    CHECK(predicate->column_index == 1U);
+    CHECK(predicate->comparison == ShellBackend::ConstraintIndexPredicate::Comparison::GreaterEqual);
+
+    std::vector<ShellBackend::ScalarValue> row_values{std::int64_t{1}, std::int64_t{6}, std::string{"alpha"}};
+    CHECK(ShellBackendTestAccess::evaluate_index_predicate(*predicate, row_values));
+
+    row_values[1] = std::int64_t{3};
+    CHECK_FALSE(ShellBackendTestAccess::evaluate_index_predicate(*predicate, row_values));
+}
+
+TEST_CASE("ShellBackend parses and evaluates string constraint predicates")
+{
+    ShellBackendHarness harness;
+    auto* table = ShellBackendTestAccess::find_table_or_default_schema(harness.backend, "metrics");
+    REQUIRE(table != nullptr);
+
+    std::string error;
+    auto predicate = ShellBackendTestAccess::parse_index_predicate(
+        *table,
+        "name = 'alpha'",
+        error);
+    REQUIRE(predicate.has_value());
+    CHECK(error.empty());
+    CHECK(predicate->column_index == 2U);
+    CHECK(predicate->comparison == ShellBackend::ConstraintIndexPredicate::Comparison::Equal);
+
+    std::vector<ShellBackend::ScalarValue> row_values{std::int64_t{1}, std::int64_t{6}, std::string{"alpha"}};
+    CHECK(ShellBackendTestAccess::evaluate_index_predicate(*predicate, row_values));
+
+    row_values[2] = std::string{"beta"};
+    CHECK_FALSE(ShellBackendTestAccess::evaluate_index_predicate(*predicate, row_values));
+}
+
+TEST_CASE("ShellBackend predicate parsing surfaces errors for unknown columns")
+{
+    ShellBackendHarness harness;
+    auto* table = ShellBackendTestAccess::find_table_or_default_schema(harness.backend, "metrics");
+    REQUIRE(table != nullptr);
+
+    std::string error;
+    auto predicate = ShellBackendTestAccess::parse_index_predicate(
+        *table,
+        "missing = 42",
+        error);
+    CHECK_FALSE(predicate.has_value());
+    CHECK_FALSE(error.empty());
 }
 
 TEST_CASE("ShellBackend emits executor pipeline diagnostics for INSERT")

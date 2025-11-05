@@ -45,6 +45,20 @@ struct ShellBackendTestAccess final {
     {
         return backend.worktable_registry_;
     }
+
+    static std::optional<ShellBackend::ConstraintIndexPredicate> parse_index_predicate(
+        const ShellBackend::TableData& table,
+        std::string_view predicate,
+        std::string& error)
+    {
+        return ShellBackend::parse_constraint_predicate(table, predicate, error);
+    }
+
+    static bool evaluate_index_predicate(const ShellBackend::ConstraintIndexPredicate& predicate,
+                                         const std::vector<ShellBackend::ScalarValue>& values)
+    {
+        return ShellBackend::evaluate_constraint_predicate(predicate, values);
+    }
 };
 
 }  // namespace bored::shell

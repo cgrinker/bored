@@ -1583,19 +1583,52 @@ std::vector<std::string> split_column_list(std::string_view text)
     return columns;
 }
 
+bool constraint_predicate_applies(const ShellBackend::ConstraintIndexPredicate& predicate,
+                                  const std::vector<ScalarValue>& values)
+{
+    if (predicate.column_index >= values.size()) {
+        return false;
+    }
+
+    const auto& actual = values[predicate.column_index];
+    if (actual.index() != predicate.literal.index()) {
+        return false;
+    }
+
+    const auto comparison_result = compare_values(actual, predicate.literal);
+    switch (predicate.comparison) {
+    case ShellBackend::ConstraintIndexPredicate::Comparison::Equal:
+        return comparison_result == 0;
+    case ShellBackend::ConstraintIndexPredicate::Comparison::NotEqual:
+        return comparison_result != 0;
+    case ShellBackend::ConstraintIndexPredicate::Comparison::Less:
+        return comparison_result < 0;
+    case ShellBackend::ConstraintIndexPredicate::Comparison::LessEqual:
+        return comparison_result <= 0;
+    case ShellBackend::ConstraintIndexPredicate::Comparison::Greater:
+        return comparison_result > 0;
+    case ShellBackend::ConstraintIndexPredicate::Comparison::GreaterEqual:
+        return comparison_result >= 0;
+    }
+
+    return false;
+}
+
 template <typename KeyExtractor>
 KeyExtractor make_payload_key_extractor(const ShellBackend::TableData* table,
                                         std::vector<std::size_t> column_indexes,
-                                        std::size_t payload_column)
+                                        std::size_t payload_column,
+                                        std::optional<ShellBackend::ConstraintIndexPredicate> predicate = std::nullopt)
 {
     auto lambda = [table,
                    payload_column,
                    column_indexes = std::move(column_indexes),
                    decoded = std::vector<ScalarValue>{},
-                   encoded = std::vector<std::byte>{}](const bored::executor::TupleView& view,
-                                                       bored::executor::ExecutorContext&,
-                                                       std::vector<std::byte>& out_key,
-                                                       bool& has_null) mutable -> bool {
+                   encoded = std::vector<std::byte>{},
+                   predicate = std::move(predicate)](const bored::executor::TupleView& view,
+                                                     bored::executor::ExecutorContext&,
+                                                     std::vector<std::byte>& out_key,
+                                                     bool& has_null) mutable -> bool {
         if (payload_column >= view.column_count()) {
             return false;
         }
@@ -1609,6 +1642,12 @@ KeyExtractor make_payload_key_extractor(const ShellBackend::TableData* table,
 
         if (!decode_values_payload(*table, payload_column_view.data, decoded)) {
             return false;
+        }
+
+        if (predicate.has_value() &&
+            !constraint_predicate_applies(*predicate, decoded)) {
+            out_key.clear();
+            return true;
         }
 
         encode_key_from_values(*table, column_indexes, decoded, encoded);
@@ -1650,6 +1689,125 @@ bored::executor::UniqueEnforceExecutor::IgnoreMatchPredicate make_row_id_ignore_
 
 constexpr std::size_t kNumericWidth = sizeof(std::int64_t);
 constexpr std::size_t kLengthFieldWidth = sizeof(std::uint32_t);
+
+bool ShellBackend::evaluate_constraint_predicate(const ConstraintIndexPredicate& predicate,
+                                                 const std::vector<ScalarValue>& values)
+{
+    return constraint_predicate_applies(predicate, values);
+}
+
+std::optional<ShellBackend::ConstraintIndexPredicate> ShellBackend::parse_constraint_predicate(
+    const TableData& table,
+    std::string_view predicate_text,
+    std::string& error)
+{
+    error.clear();
+    auto trimmed = trim_copy(predicate_text);
+    if (trimmed.empty()) {
+        return std::nullopt;
+    }
+
+    struct OperatorSpec final {
+        std::string_view token;
+        ConstraintIndexPredicate::Comparison comparison;
+    };
+
+    constexpr std::array<OperatorSpec, 7> kOperators{{
+        OperatorSpec{"<=", ConstraintIndexPredicate::Comparison::LessEqual},
+        OperatorSpec{">=", ConstraintIndexPredicate::Comparison::GreaterEqual},
+        OperatorSpec{"!=", ConstraintIndexPredicate::Comparison::NotEqual},
+        OperatorSpec{"<>", ConstraintIndexPredicate::Comparison::NotEqual},
+        OperatorSpec{"=", ConstraintIndexPredicate::Comparison::Equal},
+        OperatorSpec{"<", ConstraintIndexPredicate::Comparison::Less},
+        OperatorSpec{">", ConstraintIndexPredicate::Comparison::Greater}
+    }};
+
+    std::size_t position = std::string_view::npos;
+    std::string_view matched_token{};
+    auto comparison = ConstraintIndexPredicate::Comparison::Equal;
+    for (const auto& spec : kOperators) {
+        const auto found = trimmed.find(spec.token);
+        if (found != std::string_view::npos) {
+            position = found;
+            matched_token = spec.token;
+            comparison = spec.comparison;
+            break;
+        }
+    }
+
+    if (position == std::string_view::npos) {
+        error = "Unsupported predicate operator.";
+        return std::nullopt;
+    }
+
+    auto lhs = trim_copy(trimmed.substr(0U, position));
+    auto rhs = trim_copy(trimmed.substr(position + matched_token.size()));
+    if (lhs.empty() || rhs.empty()) {
+        error = "Predicate must compare a column to a literal.";
+        return std::nullopt;
+    }
+
+    const auto column_key = normalize_identifier(lhs);
+    auto column_it = table.column_index.find(column_key);
+    if (column_it == table.column_index.end()) {
+        error = "Predicate references unknown column '" + std::string(lhs) + "'.";
+        return std::nullopt;
+    }
+
+    const auto column_index = column_it->second;
+    if (column_index >= table.columns.size()) {
+        error = "Predicate column index is out of bounds.";
+        return std::nullopt;
+    }
+
+    const auto& column = table.columns[column_index];
+    ConstraintIndexPredicate predicate{};
+    predicate.column_index = column_index;
+    predicate.comparison = comparison;
+
+    switch (column.type) {
+    case catalog::CatalogColumnType::Utf8: {
+        if (rhs.size() < 2 || rhs.front() != '\'' || rhs.back() != '\'') {
+            error = "String predicates require single-quoted literals for column '" + column.name + "'.";
+            return std::nullopt;
+        }
+        std::string value;
+        value.reserve(rhs.size() - 2U);
+        for (std::size_t index = 1U; index + 1U < rhs.size(); ++index) {
+            const char ch = rhs[index];
+            if (ch == '\'') {
+                if (index + 1U < rhs.size() - 1U && rhs[index + 1U] == '\'') {
+                    value.push_back('\'');
+                    ++index;
+                    continue;
+                }
+                error = "Unterminated string literal in predicate.";
+                return std::nullopt;
+            }
+            value.push_back(ch);
+        }
+        predicate.literal = std::move(value);
+        break;
+    }
+    case catalog::CatalogColumnType::Int64:
+    case catalog::CatalogColumnType::UInt16:
+    case catalog::CatalogColumnType::UInt32: {
+        std::int64_t numeric = 0;
+        if (!parse_int64(rhs, numeric)) {
+            error = "Predicate literal must be an integer for column '" + column.name + "'.";
+            return std::nullopt;
+        }
+        predicate.literal = numeric;
+        break;
+    }
+    case catalog::CatalogColumnType::Unknown:
+    default:
+        error = "Unsupported column type in predicate for column '" + column.name + "'.";
+        return std::nullopt;
+    }
+
+    return predicate;
+}
 
 void append_bytes(std::vector<std::byte>& buffer, const void* data, std::size_t size)
 {
@@ -1898,6 +2056,7 @@ public:
     struct IndexDefinition final {
         const ShellBackend::TableData* table = nullptr;
         std::vector<std::size_t> column_indexes{};
+        std::optional<ShellBackend::ConstraintIndexPredicate> predicate{};
     };
 
     ShellStorageReader(const ShellBackend::TableData* table,
@@ -1943,6 +2102,11 @@ public:
             if (!decode_values_payload(*definition.table,
                                        std::span<const std::byte>(payload.data(), payload.size()),
                                        decode_buffer_)) {
+                continue;
+            }
+
+            if (definition.predicate.has_value() &&
+                !ShellBackend::evaluate_constraint_predicate(*definition.predicate, decode_buffer_)) {
                 continue;
             }
 
@@ -2048,12 +2212,41 @@ ShellBackend::build_constraint_enforcement_plan(ShellBackend::TableData& table,
             unique.column_indexes = std::move(*indexes);
             unique.telemetry_identifier = unique.name;
 
+            std::optional<ConstraintIndexPredicate> parsed_predicate;
+            if (auto index_descriptor = accessor.index(unique.index_id); index_descriptor &&
+                                                     !index_descriptor->predicate.empty()) {
+                std::string predicate_error;
+                parsed_predicate = parse_constraint_predicate(table, index_descriptor->predicate, predicate_error);
+                if (!parsed_predicate) {
+                    std::vector<std::string> hints{
+                        "Supported predicate forms: column <op> literal with op in (=, !=, <, <=, >, >=)."
+                    };
+                    if (!predicate_error.empty()) {
+                        hints.push_back(std::move(predicate_error));
+                    }
+                    return ConstraintPlanError{
+                        "Constraint '" + unique.name + "' uses unsupported predicate '" +
+                            std::string(index_descriptor->predicate) + "'.",
+                        std::move(hints)
+                    };
+                }
+            }
+
+            if (parsed_predicate) {
+                unique.predicate = *parsed_predicate;
+            }
+
             ConstraintIndexDefinition definition{};
             definition.table = &table;
             definition.column_indexes = unique.column_indexes;
+            if (parsed_predicate) {
+                definition.predicate = *parsed_predicate;
+            }
             auto [it, inserted] = plan.index_definitions.emplace(unique.index_id.value, definition);
             if (!inserted) {
-                if (it->second.table != definition.table || it->second.column_indexes != definition.column_indexes) {
+                if (it->second.table != definition.table ||
+                    it->second.column_indexes != definition.column_indexes ||
+                    it->second.predicate != definition.predicate) {
                     return ConstraintPlanError{
                         "Conflicting index definition for constraint '" + unique.name + "'.",
                         {}
@@ -2188,7 +2381,8 @@ bored::executor::ExecutorNodePtr ShellBackend::apply_constraint_enforcers(
         config.key_extractor = make_payload_key_extractor<bored::executor::UniqueEnforceExecutor::KeyExtractor>(
             table,
             unique.column_indexes,
-            payload_column);
+            payload_column,
+            unique.predicate);
         if (row_id_column.has_value()) {
             config.ignore_match = make_row_id_ignore_predicate(*row_id_column);
         }
@@ -3548,6 +3742,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
             ShellStorageReader::IndexDefinition reader_definition{};
             reader_definition.table = definition.table;
             reader_definition.column_indexes = std::move(definition.column_indexes);
+            reader_definition.predicate = definition.predicate;
             reader_definitions.emplace(index_value, std::move(reader_definition));
         }
         constraint_reader = std::make_unique<ShellStorageReader>(nullptr, storage_.get(), std::move(reader_definitions));
@@ -3898,6 +4093,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
             ShellStorageReader::IndexDefinition reader_definition{};
             reader_definition.table = definition.table;
             reader_definition.column_indexes = std::move(definition.column_indexes);
+            reader_definition.predicate = definition.predicate;
             reader_definitions.emplace(index_value, std::move(reader_definition));
         }
         constraint_reader = std::make_unique<ShellStorageReader>(nullptr, storage_.get(), std::move(reader_definitions));

@@ -91,6 +91,23 @@ public:
 
     using ScalarValue = std::variant<std::int64_t, std::string>;
 
+    struct ConstraintIndexPredicate final {
+        enum class Comparison : std::uint8_t {
+            Equal,
+            NotEqual,
+            Less,
+            LessEqual,
+            Greater,
+            GreaterEqual
+        };
+
+        std::size_t column_index = 0U;
+        ScalarValue literal{};
+        Comparison comparison = Comparison::Equal;
+
+        bool operator==(const ConstraintIndexPredicate& other) const = default;
+    };
+
     struct ColumnInfo final {
         std::string name;
         catalog::CatalogColumnType type = catalog::CatalogColumnType::Unknown;
@@ -160,6 +177,7 @@ private:
         bool allow_null_keys = true;
         std::vector<std::size_t> column_indexes{};
         std::string telemetry_identifier{};
+        std::optional<ConstraintIndexPredicate> predicate{};
     };
 
     struct ForeignKeyConstraintPlan final {
@@ -176,6 +194,7 @@ private:
     struct ConstraintIndexDefinition final {
         const TableData* table = nullptr;
         std::vector<std::size_t> column_indexes{};
+        std::optional<ConstraintIndexPredicate> predicate{};
     };
 
     struct ConstraintEnforcementPlan final {
@@ -236,6 +255,13 @@ private:
         bored::executor::ExecutorTelemetry& telemetry,
         std::size_t payload_column,
         std::optional<std::size_t> row_id_column);
+    [[nodiscard]] static std::optional<ConstraintIndexPredicate> parse_constraint_predicate(
+        const TableData& table,
+        std::string_view predicate_text,
+        std::string& error);
+    [[nodiscard]] static bool evaluate_constraint_predicate(
+        const ConstraintIndexPredicate& predicate,
+        const std::vector<ScalarValue>& values);
 
     CommandMetrics execute_dml(const std::string& sql);
     CommandMetrics execute_insert(const std::string& sql);

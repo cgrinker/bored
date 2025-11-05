@@ -264,6 +264,7 @@ if(BORED_ENABLE_TESTS)
     tests/transaction_manager_tests.cpp
     tests/wal_commit_pipeline_tests.cpp
             tests/shell_engine_tests.cpp
+        tests/shell_backend_tests.cpp
             tests/shell_log_tests.cpp
             tests/shell_persistence_tests.cpp
         tests/executor_scaffolding_tests.cpp
