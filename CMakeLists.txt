@@ -88,6 +88,7 @@ add_library(${PROJECT_NAME}_lib
     src/executor/filter_executor.cpp
     src/executor/projection_executor.cpp
     src/executor/spool_executor.cpp
+    src/executor/worktable_registry.cpp
     src/executor/nested_loop_join_executor.cpp
     src/executor/hash_join_executor.cpp
     src/executor/aggregation_executor.cpp

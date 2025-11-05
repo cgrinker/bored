@@ -67,6 +67,17 @@ constexpr WalRecordType update_record_type(const PageHeader& header) noexcept
     return is_catalog_page(header) ? WalRecordType::CatalogUpdate : WalRecordType::TupleUpdate;
 }
 
+std::uint32_t wal_owner_id(std::uint32_t fallback_page_id, txn::TransactionContext* txn) noexcept
+{
+    if (txn != nullptr) {
+        const auto txn_id = txn->id();
+        if (txn_id != 0U && txn_id <= std::numeric_limits<std::uint32_t>::max()) {
+            return static_cast<std::uint32_t>(txn_id);
+        }
+    }
+    return fallback_page_id;
+}
+
 bool payload_starts_with_overflow_stub(std::span<const std::byte> payload) noexcept
 {
     if (payload.size() < overflow_tuple_header_size()) {
@@ -320,7 +331,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
 
     WalRecordDescriptor descriptor{};
     descriptor.type = insert_record_type(header);
-        descriptor.page_id = header.page_id;
+        descriptor.page_id = wal_owner_id(header.page_id, txn);
         descriptor.flags = WalRecordFlag::None;
         descriptor.payload = std::span<const std::byte>(wal_buffer_span.data(), wal_buffer_span.size());
 
@@ -458,7 +469,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
 
     WalRecordDescriptor descriptor{};
     descriptor.type = insert_record_type(header);
-    descriptor.page_id = header.page_id;
+    descriptor.page_id = wal_owner_id(header.page_id, txn);
     descriptor.flags = WalRecordFlag::None;
     descriptor.payload = std::span<const std::byte>(wal_buffer_span.data(), wal_buffer_span.size());
 
@@ -511,9 +522,9 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
         overflow_cache_[chunk_meta.overflow_page_id] = OverflowChunkCacheEntry{chunk_meta,
                                                                                std::vector<std::byte>(chunk_payload.begin(), chunk_payload.end())};
 
-        WalRecordDescriptor chunk_descriptor{};
-        chunk_descriptor.type = WalRecordType::TupleOverflowChunk;
-        chunk_descriptor.page_id = chunk_meta.overflow_page_id;
+    WalRecordDescriptor chunk_descriptor{};
+    chunk_descriptor.type = WalRecordType::TupleOverflowChunk;
+    chunk_descriptor.page_id = wal_owner_id(meta.page_id, txn);
         chunk_descriptor.flags = WalRecordFlag::None;
         chunk_descriptor.payload = std::span<const std::byte>(chunk_span.data(), chunk_span.size());
 
@@ -558,7 +569,7 @@ std::error_code PageManager::insert_tuple(std::span<std::byte> page,
 
     WalRecordDescriptor before_descriptor{};
     before_descriptor.type = WalRecordType::TupleBeforeImage;
-    before_descriptor.page_id = header.page_id;
+    before_descriptor.page_id = wal_owner_id(header.page_id, txn);
     before_descriptor.flags = WalRecordFlag::None;
     before_descriptor.payload = std::span<const std::byte>(before_span.data(), before_span.size());
 
@@ -708,7 +719,7 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
 
     WalRecordDescriptor before_descriptor{};
     before_descriptor.type = WalRecordType::TupleBeforeImage;
-    before_descriptor.page_id = header.page_id;
+    before_descriptor.page_id = wal_owner_id(header.page_id, txn);
     before_descriptor.flags = WalRecordFlag::None;
     before_descriptor.payload = std::span<const std::byte>(before_span.data(), before_span.size());
 
@@ -724,9 +735,9 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
             return std::make_error_code(std::errc::invalid_argument);
         }
 
-        WalRecordDescriptor truncate_descriptor{};
-        truncate_descriptor.type = WalRecordType::TupleOverflowTruncate;
-        truncate_descriptor.page_id = truncate_meta.first_overflow_page_id;
+    WalRecordDescriptor truncate_descriptor{};
+    truncate_descriptor.type = WalRecordType::TupleOverflowTruncate;
+    truncate_descriptor.page_id = wal_owner_id(before_meta.page_id, txn);
         truncate_descriptor.flags = WalRecordFlag::None;
         truncate_descriptor.payload = std::span<const std::byte>(truncate_span.data(), truncate_span.size());
 
@@ -755,7 +766,7 @@ std::error_code PageManager::delete_tuple(std::span<std::byte> page,
 
     WalRecordDescriptor descriptor{};
     descriptor.type = delete_record_type(header);
-    descriptor.page_id = header.page_id;
+    descriptor.page_id = wal_owner_id(header.page_id, txn);
     descriptor.flags = WalRecordFlag::None;
     descriptor.payload = std::span<const std::byte>(wal_buffer_span.data(), wal_buffer_span.size());
 
@@ -940,7 +951,7 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
 
     WalRecordDescriptor before_descriptor{};
     before_descriptor.type = WalRecordType::TupleBeforeImage;
-    before_descriptor.page_id = header.page_id;
+    before_descriptor.page_id = wal_owner_id(header.page_id, txn);
     before_descriptor.flags = WalRecordFlag::None;
     before_descriptor.payload = std::span<const std::byte>(before_span.data(), before_span.size());
 
@@ -958,9 +969,9 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
             return std::make_error_code(std::errc::invalid_argument);
         }
 
-        WalRecordDescriptor truncate_descriptor{};
-        truncate_descriptor.type = WalRecordType::TupleOverflowTruncate;
-        truncate_descriptor.page_id = truncate_meta.first_overflow_page_id;
+    WalRecordDescriptor truncate_descriptor{};
+    truncate_descriptor.type = WalRecordType::TupleOverflowTruncate;
+    truncate_descriptor.page_id = wal_owner_id(before_meta.page_id, txn);
         truncate_descriptor.flags = WalRecordFlag::None;
         truncate_descriptor.payload = std::span<const std::byte>(truncate_span.data(), truncate_span.size());
 
@@ -1001,7 +1012,7 @@ std::error_code PageManager::update_tuple(std::span<std::byte> page,
 
     WalRecordDescriptor descriptor{};
     descriptor.type = update_record_type(header);
-    descriptor.page_id = header.page_id;
+    descriptor.page_id = wal_owner_id(header.page_id, txn);
     descriptor.flags = WalRecordFlag::None;
     descriptor.payload = std::span<const std::byte>(wal_buffer_span.data(), wal_buffer_span.size());
 

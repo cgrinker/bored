@@ -1,5 +1,6 @@
 #include "bored/executor/executor_context.hpp"
 #include "bored/executor/spool_executor.hpp"
+#include "bored/executor/worktable_registry.hpp"
 #include "bored/executor/tuple_buffer.hpp"
 #include "bored/executor/tuple_format.hpp"
 #include "bored/txn/transaction_types.hpp"
@@ -267,4 +268,200 @@ TEST_CASE("SpoolExecutor rematerialises when snapshot changes")
     REQUIRE(observed == std::vector<std::uint32_t>{21U, 28U});
     CHECK(child_ptr->open_count() == 2U);
     CHECK(child_ptr->close_count() == 2U);
+}
+
+TEST_CASE("SpoolExecutor uses worktable cache when snapshot matches")
+{
+    std::vector<std::vector<std::byte>> rows;
+    rows.push_back(encode_u32(101U));
+    rows.push_back(encode_u32(202U));
+
+    bored::executor::WorkTableRegistry registry;
+
+    auto child = std::make_unique<MockChildExecutor>(rows);
+    auto* child_ptr = child.get();
+
+    bored::executor::ExecutorTelemetry telemetry;
+    SpoolExecutor::Config config{};
+    config.telemetry = &telemetry;
+    config.worktable_registry = &registry;
+    config.worktable_id = 42U;
+
+    SpoolExecutor spool{std::move(child), config};
+
+    ExecutorContext context{};
+    Snapshot snapshot{};
+    snapshot.read_lsn = 99U;
+    snapshot.xmin = 10U;
+    snapshot.xmax = 200U;
+    context.set_snapshot(snapshot);
+
+    TupleBuffer buffer{};
+    std::vector<std::uint32_t> observed;
+
+    spool.open(context);
+    while (spool.next(context, buffer)) {
+        auto tuple_view = bored::executor::TupleView::from_buffer(buffer);
+        REQUIRE(tuple_view.valid());
+        const auto column = tuple_view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        observed.push_back(decode_u32(column.data));
+        buffer.reset();
+    }
+    spool.close(context);
+
+    REQUIRE(observed == std::vector<std::uint32_t>{101U, 202U});
+    CHECK(child_ptr->open_count() == 1U);
+    CHECK(child_ptr->close_count() == 1U);
+    CHECK(child_ptr->produced_count() == rows.size());
+
+    // Second spool should reuse the cached worktable and avoid touching its child.
+    std::vector<std::vector<std::byte>> unused_rows;
+    unused_rows.push_back(encode_u32(303U));
+    auto second_child = std::make_unique<MockChildExecutor>(unused_rows);
+    auto* second_child_ptr = second_child.get();
+
+    SpoolExecutor::Config cached_config{};
+    cached_config.telemetry = &telemetry;
+    cached_config.worktable_registry = &registry;
+    cached_config.worktable_id = 42U;
+
+    SpoolExecutor cached_spool{std::move(second_child), cached_config};
+    ExecutorContext cached_context{};
+    cached_context.set_snapshot(snapshot);
+
+    observed.clear();
+    cached_spool.open(cached_context);
+    while (cached_spool.next(cached_context, buffer)) {
+        auto tuple_view = bored::executor::TupleView::from_buffer(buffer);
+        REQUIRE(tuple_view.valid());
+        const auto column = tuple_view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        observed.push_back(decode_u32(column.data));
+        buffer.reset();
+    }
+    cached_spool.close(cached_context);
+
+    REQUIRE(observed == std::vector<std::uint32_t>{101U, 202U});
+    CHECK(second_child_ptr->open_count() == 0U);
+    CHECK(second_child_ptr->produced_count() == 0U);
+}
+
+TEST_CASE("WorkTableRegistry snapshot iterator preserves cached rows")
+{
+    std::vector<std::vector<std::byte>> rows;
+    rows.push_back(encode_u32(1U));
+    rows.push_back(encode_u32(2U));
+    rows.push_back(encode_u32(3U));
+
+    bored::executor::WorkTableRegistry registry;
+
+    auto child = std::make_unique<MockChildExecutor>(rows);
+
+    SpoolExecutor::Config config{};
+    config.worktable_registry = &registry;
+    config.worktable_id = 0xABCDU;
+
+    SpoolExecutor spool{std::move(child), config};
+
+    ExecutorContext context{};
+    Snapshot snapshot{};
+    snapshot.read_lsn = 777U;
+    snapshot.xmin = 12U;
+    snapshot.xmax = 1024U;
+    context.set_snapshot(snapshot);
+
+    TupleBuffer buffer{};
+    spool.open(context);
+    while (spool.next(context, buffer)) {
+        buffer.reset();
+    }
+    spool.close(context);
+
+    auto iterator_opt = registry.snapshot_iterator(*config.worktable_id, snapshot);
+    REQUIRE(iterator_opt.has_value());
+    auto iterator = std::move(*iterator_opt);
+    CHECK(iterator.valid());
+    CHECK(iterator.matches(snapshot));
+    CHECK(iterator.size() == rows.size());
+
+    const TupleBuffer* tuple_ptr = nullptr;
+    std::vector<std::uint32_t> decoded;
+    while (iterator.next(tuple_ptr)) {
+        REQUIRE(tuple_ptr != nullptr);
+        auto view = bored::executor::TupleView::from_buffer(*tuple_ptr);
+        REQUIRE(view.valid());
+        REQUIRE(view.column_count() == 1U);
+        const auto column = view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        decoded.push_back(decode_u32(column.data));
+    }
+    REQUIRE(decoded == std::vector<std::uint32_t>{1U, 2U, 3U});
+
+    iterator.reset();
+    std::size_t replay_count = 0U;
+    while (iterator.next(tuple_ptr)) {
+        ++replay_count;
+    }
+    CHECK(replay_count == rows.size());
+
+    Snapshot mismatched = snapshot;
+    mismatched.read_lsn += 1U;
+    CHECK_FALSE(iterator.matches(mismatched));
+}
+
+TEST_CASE("SpoolExecutor snapshot iterator exposes cached registry view")
+{
+    std::vector<std::vector<std::byte>> rows;
+    rows.push_back(encode_u32(11U));
+    rows.push_back(encode_u32(22U));
+
+    bored::executor::WorkTableRegistry registry;
+
+    auto child = std::make_unique<MockChildExecutor>(rows);
+
+    SpoolExecutor::Config config{};
+    config.worktable_registry = &registry;
+    config.worktable_id = 0x4242U;
+
+    SpoolExecutor spool{std::move(child), config};
+
+    ExecutorContext context{};
+    Snapshot snapshot{};
+    snapshot.read_lsn = 1234U;
+    snapshot.xmin = 8U;
+    snapshot.xmax = 2048U;
+    context.set_snapshot(snapshot);
+
+    TupleBuffer buffer{};
+    spool.open(context);
+    while (spool.next(context, buffer)) {
+        buffer.reset();
+    }
+    spool.close(context);
+
+    auto iterator_opt = spool.snapshot_iterator();
+    REQUIRE(iterator_opt.has_value());
+    auto iterator = std::move(*iterator_opt);
+    CHECK(iterator.matches(snapshot));
+    CHECK(iterator.size() == rows.size());
+
+    const TupleBuffer* tuple_ptr = nullptr;
+    std::vector<std::uint32_t> decoded;
+    while (iterator.next(tuple_ptr)) {
+        REQUIRE(tuple_ptr != nullptr);
+        auto view = bored::executor::TupleView::from_buffer(*tuple_ptr);
+        REQUIRE(view.valid());
+        REQUIRE(view.column_count() == 1U);
+        const auto column = view.column(0U);
+        REQUIRE_FALSE(column.is_null);
+        decoded.push_back(decode_u32(column.data));
+    }
+    REQUIRE(decoded == std::vector<std::uint32_t>{11U, 22U});
+
+    Snapshot mismatch = snapshot;
+    mismatch.xmax += 1U;
+    auto mismatch_iterator = spool.snapshot_iterator();
+    REQUIRE(mismatch_iterator.has_value());
+    CHECK_FALSE(mismatch_iterator->matches(mismatch));
 }

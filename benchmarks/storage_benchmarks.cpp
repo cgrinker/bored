@@ -1,3 +1,7 @@
+#include "bored/executor/executor_context.hpp"
+#include "bored/executor/spool_executor.hpp"
+#include "bored/executor/tuple_buffer.hpp"
+#include "bored/executor/worktable_registry.hpp"
 #include "bored/storage/async_io.hpp"
 #include "bored/storage/free_space_map.hpp"
 #include "bored/storage/page_manager.hpp"
@@ -7,6 +11,7 @@
 #include "bored/storage/wal_retention.hpp"
 #include "bored/storage/wal_replayer.hpp"
 #include "bored/storage/wal_writer.hpp"
+#include "bored/txn/snapshot_utils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -51,6 +56,66 @@ std::vector<std::byte> tuple_payload_vector(std::span<const std::byte> storage)
     return std::vector<std::byte>(payload.begin(), payload.end());
 }
 
+bs::WalCommitHeader make_commit_header(const std::shared_ptr<bs::WalWriter>& wal_writer,
+                                       std::uint64_t transaction_id,
+                                       std::uint64_t next_transaction_id = 0U,
+                                       std::uint64_t oldest_active_txn = 0U,
+                                       std::uint64_t oldest_active_commit_lsn = 0U)
+{
+    bs::WalCommitHeader header{};
+    header.transaction_id = transaction_id;
+    header.commit_lsn = wal_writer ? wal_writer->next_lsn() : 0U;
+    header.next_transaction_id = next_transaction_id != 0U ? next_transaction_id : (transaction_id + 1U);
+    header.oldest_active_transaction_id = oldest_active_txn;
+    header.oldest_active_commit_lsn = oldest_active_commit_lsn != 0U ? oldest_active_commit_lsn : header.commit_lsn;
+    return header;
+}
+
+std::vector<std::vector<std::byte>> collect_page_rows(std::span<const std::byte> page,
+                                                      const std::vector<std::uint16_t>& slots)
+{
+    std::vector<std::vector<std::byte>> rows;
+    rows.reserve(slots.size());
+    for (auto slot : slots) {
+        auto tuple = bs::read_tuple(page, slot);
+        rows.emplace_back(tuple.begin(), tuple.end());
+    }
+    return rows;
+}
+
+class SpoolBenchmarkChild final : public bored::executor::ExecutorNode {
+public:
+    SpoolBenchmarkChild(const std::vector<std::vector<std::byte>>* rows, std::size_t* iterations) noexcept
+        : rows_{rows}
+        , iterations_{iterations}
+    {
+    }
+
+    void open(bored::executor::ExecutorContext&) override { index_ = 0U; }
+
+    bool next(bored::executor::ExecutorContext&, bored::executor::TupleBuffer& buffer) override
+    {
+        if (rows_ == nullptr || index_ >= rows_->size()) {
+            return false;
+        }
+
+        buffer.reset();
+        const auto& row = (*rows_)[index_++];
+        buffer.write(std::span<const std::byte>(row.data(), row.size()));
+        if (iterations_ != nullptr) {
+            ++(*iterations_);
+        }
+        return true;
+    }
+
+    void close(bored::executor::ExecutorContext&) override {}
+
+private:
+    const std::vector<std::vector<std::byte>>* rows_ = nullptr;
+    std::size_t* iterations_ = nullptr;
+    std::size_t index_ = 0U;
+};
+
 struct BenchmarkOptions final {
     std::size_t samples = 5U;
     std::size_t fsm_page_count = 2048U;
@@ -60,6 +125,8 @@ struct BenchmarkOptions final {
     std::size_t retention_records_per_segment = 6U;
     std::size_t overflow_page_count = 64U;
     std::size_t overflow_payload_bytes = 16384U;
+    std::size_t spool_row_count = 256U;
+    std::size_t spool_iterations = 4U;
     bool json_output = false;
     std::optional<std::filesystem::path> baseline_path{};
     double tolerance = 0.15;  // 15% default budget
@@ -128,7 +195,9 @@ private:
               << "  --retention-keep=N          Segments to retain after pruning (default 4)\n"
               << "  --overflow-pages=N          Overflow tuples to generate for replay (default 64)\n"
               << "  --overflow-bytes=N          Payload bytes per overflow tuple (default 16384)\n"
-              << "  --baseline=PATH            Load baseline JSON to enforce regression thresholds\n"
+              << "  --spool-rows=N              Rows to materialise per spool recovery sample (default 256)\n"
+              << "  --spool-iterations=N        Spool executions per sample (default 4; include cached reuse)\n"
+              << "  --baseline=PATH             Load baseline JSON to enforce regression thresholds\n"
               << "  --tolerance=FRACTION       Allowable fractional regression over baseline (default 0.15)\n"
               << "  --json                      Emit JSON summary instead of table output\n"
               << "  --help                      Show this message\n";
@@ -593,6 +662,120 @@ BenchmarkResult benchmark_overflow_replay(const BenchmarkOptions& options)
     return result;
 }
 
+BenchmarkResult benchmark_spool_recovery(const BenchmarkOptions& options)
+{
+    BenchmarkResult result{};
+    result.name = "spool_worktable_recovery";
+    const std::size_t row_count = std::max<std::size_t>(options.spool_row_count, 1U);
+    const std::size_t iterations = std::max<std::size_t>(options.spool_iterations, 1U);
+    result.work_units = row_count * iterations;
+
+    for (std::size_t sample = 0; sample < options.samples; ++sample) {
+        auto wal_dir_holder = make_temp_directory("bored_bench_spool_recovery_");
+        const auto& wal_dir = wal_dir_holder.path();
+
+        auto io = make_async_io();
+
+        bs::WalWriterConfig writer_config{};
+        writer_config.directory = wal_dir;
+        writer_config.segment_size = 4U * bs::kWalBlockSize;
+        writer_config.buffer_size = 2U * bs::kWalBlockSize;
+        writer_config.start_lsn = bs::kWalBlockSize;
+
+        auto wal_writer = std::make_shared<bs::WalWriter>(io, writer_config);
+        bs::FreeSpaceMap fsm;
+        bs::PageManager manager{&fsm, wal_writer};
+
+        const std::uint32_t page_id = static_cast<std::uint32_t>(61000U + sample);
+        alignas(8) std::array<std::byte, bs::kPageSize> page_buffer{};
+        auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
+        throw_if_error(manager.initialize_page(page_span, bs::PageType::Table, page_id), "initialize_page");
+
+        std::vector<std::uint16_t> slot_order;
+        slot_order.reserve(row_count);
+
+        for (std::size_t index = 0; index < row_count; ++index) {
+            std::vector<std::byte> payload(48U + static_cast<std::size_t>((index % 7U) * 8U));
+            for (std::size_t pos = 0; pos < payload.size(); ++pos) {
+                payload[pos] = static_cast<std::byte>(((index + 3U) * (pos + 5U)) & 0xFFU);
+            }
+
+            bs::PageManager::TupleInsertResult insert_result{};
+            throw_if_error(manager.insert_tuple(page_span,
+                                                std::span<const std::byte>(payload.data(), payload.size()),
+                                                0xBEE000ULL + index,
+                                                insert_result),
+                           "insert_tuple");
+            slot_order.push_back(insert_result.slot.index);
+        }
+
+        auto baseline_rows = collect_page_rows(std::span<const std::byte>(page_span.data(), page_span.size()), slot_order);
+
+        auto commit_header = make_commit_header(wal_writer, 9000U + sample, 9001U + sample, 9000U + sample);
+        bs::WalAppendResult commit_result{};
+        throw_if_error(wal_writer->append_commit_record(commit_header, commit_result), "append_commit_record");
+        throw_if_error(wal_writer->flush(), "wal_writer::flush");
+        throw_if_error(manager.flush_wal(), "PageManager::flush_wal");
+        throw_if_error(manager.close_wal(), "PageManager::close_wal");
+        throw_if_error(wal_writer->close(), "wal_writer::close");
+        io->shutdown();
+
+        const auto start = std::chrono::steady_clock::now();
+
+        bs::WalRecoveryDriver driver{wal_dir, writer_config.file_prefix, writer_config.file_extension, nullptr, wal_dir / "checkpoints"};
+        bs::WalRecoveryPlan plan{};
+        throw_if_error(driver.build_plan(plan), "WalRecoveryDriver::build_plan");
+
+        bs::WalReplayContext replay_context{bs::PageType::Table, nullptr};
+        bs::WalReplayer replayer{replay_context};
+        throw_if_error(replayer.apply_redo(plan), "WalReplayer::apply_redo");
+        throw_if_error(replayer.apply_undo(plan), "WalReplayer::apply_undo");
+
+        auto replay_page = replay_context.get_page(page_id);
+        auto replay_rows = collect_page_rows(std::span<const std::byte>(replay_page.data(), replay_page.size()), slot_order);
+        if (replay_rows != baseline_rows) {
+            throw std::runtime_error("Spool recovery benchmark detected mismatched replay rows");
+        }
+
+        bored::executor::WorkTableRegistry registry;
+        bored::executor::SpoolExecutor::Config spool_config{};
+        spool_config.reserve_rows = replay_rows.size();
+        spool_config.worktable_registry = &registry;
+        spool_config.worktable_id = 0xC0DEC0DEU;
+
+        bored::txn::Snapshot replay_snapshot{};
+        const std::uint64_t replay_lsn = commit_result.lsn != 0U ? commit_result.lsn : commit_header.commit_lsn;
+        replay_snapshot.read_lsn = replay_lsn;
+        replay_snapshot.xmin = commit_header.transaction_id;
+        replay_snapshot.xmax = commit_header.next_transaction_id;
+
+        bored::executor::ExecutorContext executor_context{};
+        executor_context.set_snapshot(replay_snapshot);
+
+        std::size_t child_reads = 0U;
+        bored::executor::TupleBuffer tuple_buffer{};
+
+        for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+            auto child = std::make_unique<SpoolBenchmarkChild>(&replay_rows, &child_reads);
+            bored::executor::SpoolExecutor spool{std::move(child), spool_config};
+            spool.open(executor_context);
+            while (spool.next(executor_context, tuple_buffer)) {
+                tuple_buffer.reset();
+            }
+            spool.close(executor_context);
+        }
+
+        if (iterations > 0U && child_reads != row_count) {
+            throw std::runtime_error("Spool recovery benchmark expected single materialisation pass");
+        }
+
+        const auto end = std::chrono::steady_clock::now();
+        result.samples_ms.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+    }
+
+    return result;
+}
+
 void print_json(const std::vector<BenchmarkResult>& results)
 {
     std::cout << "{\"benchmarks\":[";
@@ -660,6 +843,10 @@ BenchmarkOptions parse_options(int argc, char** argv)
             options.overflow_page_count = parse_size(argument.substr(17), "--overflow-pages");
         } else if (argument.rfind("--overflow-bytes=", 0) == 0) {
             options.overflow_payload_bytes = parse_size(argument.substr(17), "--overflow-bytes");
+        } else if (argument.rfind("--spool-rows=", 0) == 0) {
+            options.spool_row_count = parse_size(argument.substr(13), "--spool-rows");
+        } else if (argument.rfind("--spool-iterations=", 0) == 0) {
+            options.spool_iterations = parse_size(argument.substr(18), "--spool-iterations");
         } else if (argument.rfind("--baseline=", 0) == 0) {
             auto path_value = argument.substr(11);
             if (path_value.empty()) {
@@ -685,11 +872,12 @@ int main(int argc, char** argv)
     try {
         const auto options = parse_options(argc, argv);
 
-        std::vector<BenchmarkResult> results;
-        results.reserve(3U);
+    std::vector<BenchmarkResult> results;
+    results.reserve(4U);
         results.push_back(benchmark_fsm_refresh(options));
         results.push_back(benchmark_retention_pruning(options));
         results.push_back(benchmark_overflow_replay(options));
+    results.push_back(benchmark_spool_recovery(options));
 
         if (options.json_output) {
             print_json(results);

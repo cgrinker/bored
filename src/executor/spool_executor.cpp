@@ -1,21 +1,11 @@
 #include "bored/executor/spool_executor.hpp"
 
 #include "bored/executor/executor_context.hpp"
+#include "bored/executor/worktable_registry.hpp"
+#include "bored/txn/snapshot_utils.hpp"
 
 #include <stdexcept>
 #include <utility>
-
-namespace {
-
-bool snapshots_equal(const bored::txn::Snapshot& lhs, const bored::txn::Snapshot& rhs)
-{
-    if (lhs.read_lsn != rhs.read_lsn || lhs.xmin != rhs.xmin || lhs.xmax != rhs.xmax) {
-        return false;
-    }
-    return lhs.in_progress == rhs.in_progress;
-}
-
-}  // namespace
 
 namespace bored::executor {
 
@@ -42,12 +32,13 @@ bool SpoolExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
     ExecutorTelemetry::LatencyScope latency_scope{config_.telemetry, ExecutorTelemetry::Operator::Spool};
     ensure_materialized(context);
 
-    if (position_ >= materialized_rows_.size()) {
+    const auto* rows = shared_rows_ ? shared_rows_.get() : &materialized_rows_;
+    if (position_ >= rows->size()) {
         return false;
     }
 
     buffer.reset();
-    const auto& stored = materialized_rows_[position_++];
+    const auto& stored = (*rows)[position_++];
     buffer.write(stored.span());
     return true;
 }
@@ -55,7 +46,8 @@ bool SpoolExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
 void SpoolExecutor::close(ExecutorContext& context)
 {
     (void)context;
-    position_ = materialized_rows_.size();
+    const auto* rows = shared_rows_ ? shared_rows_.get() : &materialized_rows_;
+    position_ = rows->size();
     child_buffer_.reset();
 }
 
@@ -66,13 +58,14 @@ void SpoolExecutor::reset() noexcept
     position_ = 0U;
     child_buffer_.reset();
     materialized_snapshot_ = {};
+    shared_rows_.reset();
 }
 
 void SpoolExecutor::ensure_materialized(ExecutorContext& context)
 {
     const auto& current_snapshot = context.snapshot();
     if (materialized_) {
-        if (snapshots_equal(materialized_snapshot_, current_snapshot)) {
+        if (txn::snapshots_equal(materialized_snapshot_, current_snapshot)) {
             return;
         }
 
@@ -80,6 +73,25 @@ void SpoolExecutor::ensure_materialized(ExecutorContext& context)
         child_buffer_.reset();
         materialized_ = false;
         position_ = 0U;
+        shared_rows_.reset();
+        if (config_.reserve_rows != 0U && materialized_rows_.capacity() < config_.reserve_rows) {
+            materialized_rows_.reserve(config_.reserve_rows);
+        }
+    }
+
+    if (config_.worktable_registry != nullptr && config_.worktable_id.has_value()) {
+        if (auto cached_rows = config_.worktable_registry->find(*config_.worktable_id, current_snapshot)) {
+            shared_rows_ = cached_rows;
+            materialized_rows_.clear();
+            child_buffer_.reset();
+            materialized_snapshot_ = current_snapshot;
+            materialized_ = true;
+            position_ = 0U;
+            if (config_.reserve_rows != 0U && materialized_rows_.capacity() < config_.reserve_rows) {
+                materialized_rows_.reserve(config_.reserve_rows);
+            }
+            return;
+        }
     }
 
     if (child_count() != 1U) {
@@ -99,9 +111,33 @@ void SpoolExecutor::ensure_materialized(ExecutorContext& context)
     }
     input->close(context);
 
+    shared_rows_.reset();
+    if (config_.worktable_registry != nullptr && config_.worktable_id.has_value()) {
+        txn::Snapshot snapshot_copy = current_snapshot;
+        auto cached_rows = config_.worktable_registry->publish(*config_.worktable_id,
+                                                               std::move(snapshot_copy),
+                                                               std::move(materialized_rows_));
+        shared_rows_ = cached_rows;
+        materialized_rows_.clear();
+        if (config_.reserve_rows != 0U && materialized_rows_.capacity() < config_.reserve_rows) {
+            materialized_rows_.reserve(config_.reserve_rows);
+        }
+    }
+
     materialized_snapshot_ = current_snapshot;
     materialized_ = true;
     position_ = 0U;
+}
+
+std::optional<WorkTableRegistry::SnapshotIterator> SpoolExecutor::snapshot_iterator() const
+{
+    if (!materialized_) {
+        return std::nullopt;
+    }
+    if (config_.worktable_registry == nullptr || !config_.worktable_id.has_value()) {
+        return std::nullopt;
+    }
+    return config_.worktable_registry->snapshot_iterator(*config_.worktable_id, materialized_snapshot_);
 }
 
 }  // namespace bored::executor

@@ -22,6 +22,7 @@
 #include "bored/storage/wal_undo_walker.hpp"
 #include "bored/storage/wal_writer.hpp"
 #include "bored/txn/snapshot_utils.hpp"
+#include "bored/txn/transaction_manager.hpp"
 #include "bored/txn/transaction_types.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -235,11 +236,13 @@ public:
     PageUpdateTarget(bored::storage::PageManager* manager,
                      std::span<std::byte> page,
                      std::unordered_map<std::uint64_t, std::uint16_t>* slot_map,
-                     std::unordered_map<std::uint64_t, std::vector<std::byte>>* expected_payloads)
+                     std::unordered_map<std::uint64_t, std::vector<std::byte>>* expected_payloads,
+                     bored::txn::TransactionContext* txn = nullptr)
         : manager_{manager}
         , page_{page}
         , slot_map_{slot_map}
         , expected_payloads_{expected_payloads}
+        , txn_{txn}
     {
     }
 
@@ -265,7 +268,7 @@ public:
         }
 
         bored::storage::PageManager::TupleUpdateResult result{};
-        auto ec = manager_->update_tuple(page_, slot_it->second, new_payload_view.data, row_id, result);
+    auto ec = manager_->update_tuple(page_, slot_it->second, new_payload_view.data, row_id, result, txn_);
         if (ec) {
             return ec;
         }
@@ -299,6 +302,7 @@ private:
     std::span<std::byte> page_{};
     std::unordered_map<std::uint64_t, std::uint16_t>* slot_map_ = nullptr;
     std::unordered_map<std::uint64_t, std::vector<std::byte>>* expected_payloads_ = nullptr;
+    bored::txn::TransactionContext* txn_ = nullptr;
     std::size_t updated_ = 0U;
 };
 
@@ -306,10 +310,12 @@ class PageDeleteTarget final : public bored::executor::DeleteExecutor::Target {
 public:
     PageDeleteTarget(bored::storage::PageManager* manager,
                      std::span<std::byte> page,
-                     std::unordered_map<std::uint64_t, std::uint16_t>* slot_map)
+                     std::unordered_map<std::uint64_t, std::uint16_t>* slot_map,
+                     bored::txn::TransactionContext* txn = nullptr)
         : manager_{manager}
         , page_{page}
         , slot_map_{slot_map}
+        , txn_{txn}
     {
     }
 
@@ -338,7 +344,7 @@ public:
         const auto reclaimed = tuple_span.size();
 
         bored::storage::PageManager::TupleDeleteResult result{};
-        auto ec = manager_->delete_tuple(page_, slot_it->second, row_id, result);
+    auto ec = manager_->delete_tuple(page_, slot_it->second, row_id, result, txn_);
         if (ec) {
             return ec;
         }
@@ -364,6 +370,7 @@ private:
     bored::storage::PageManager* manager_ = nullptr;
     std::span<std::byte> page_{};
     std::unordered_map<std::uint64_t, std::uint16_t>* slot_map_ = nullptr;
+    bored::txn::TransactionContext* txn_ = nullptr;
     std::size_t deleted_ = 0U;
 };
 
@@ -1239,7 +1246,9 @@ TEST_CASE("WalReplayer undoes overflow delete using before-image chunks")
     REQUIRE_FALSE(manager.delete_tuple(page_span, insert_result.slot.index, 8080U, delete_result));
 
     REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(wal_writer->flush());
     REQUIRE_FALSE(manager.close_wal());
+    REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
 
     auto baseline_page = page_buffer;
@@ -1377,7 +1386,9 @@ TEST_CASE("WalReplayer undo overflow insert removes stub")
     const auto crash_snapshot = page_buffer;
 
     REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(wal_writer->flush());
     REQUIRE_FALSE(manager.close_wal());
+    REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
 
     WalRecoveryDriver driver{wal_dir, "wal", ".seg", nullptr, wal_dir / "checkpoints"};
@@ -3683,6 +3694,10 @@ TEST_CASE("Wal crash drill rehydrates spool SELECT worktables")
     FreeSpaceMap fsm;
     PageManager manager{&fsm, wal_writer};
 
+    bored::txn::TransactionIdAllocatorStub allocator{4000U};
+    bored::txn::TransactionManager txn_manager{allocator};
+    auto insert_txn = txn_manager.begin();
+
     constexpr std::uint32_t page_id = 51001U;
     alignas(8) std::array<std::byte, kPageSize> page_buffer{};
     auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
@@ -3700,11 +3715,13 @@ TEST_CASE("Wal crash drill rehydrates spool SELECT worktables")
         REQUIRE_FALSE(manager.insert_tuple(page_span,
                                            std::span<const std::byte>(payload.data(), payload.size()),
                                            row_id,
-                                           insert_result));
+                                           insert_result,
+                                           {},
+                                           &insert_txn));
         baseline_rows.push_back(SpoolTestRow{row_id, insert_result.slot.index, std::move(payload)});
     }
 
-    auto insert_commit = make_commit_header(wal_writer, 4000U, 4001U, 4000U);
+    auto insert_commit = make_commit_header(wal_writer, insert_txn.id(), insert_txn.id() + 1U, insert_txn.id());
     WalAppendResult insert_commit_result{};
     REQUIRE_FALSE(wal_writer->append_commit_record(insert_commit, insert_commit_result));
     REQUIRE_FALSE(wal_writer->flush());
@@ -3747,12 +3764,15 @@ TEST_CASE("Wal crash drill rehydrates spool SELECT worktables")
     REQUIRE(materialized_rows == baseline_tuple_rows);
 
     REQUIRE_FALSE(manager.flush_wal());
+    REQUIRE_FALSE(wal_writer->flush());
     REQUIRE_FALSE(manager.close_wal());
+    REQUIRE_FALSE(wal_writer->close());
     io->shutdown();
 
     WalRecoveryDriver driver{wal_dir, config.file_prefix, config.file_extension, nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
+    REQUIRE(plan.redo.size() > 0U);
 
     WalReplayContext replay_context{PageType::Table, nullptr};
     WalReplayer replayer{replay_context};
@@ -3828,6 +3848,10 @@ TEST_CASE("Wal crash drill rehydrates spool UPDATE worktables")
     FreeSpaceMap fsm;
     PageManager manager{&fsm, wal_writer};
 
+    bored::txn::TransactionIdAllocatorStub allocator{5000U};
+    bored::txn::TransactionManager txn_manager{allocator};
+    auto insert_txn = txn_manager.begin();
+
     constexpr std::uint32_t page_id = 52001U;
     alignas(8) std::array<std::byte, kPageSize> page_buffer{};
     auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
@@ -3848,13 +3872,15 @@ TEST_CASE("Wal crash drill rehydrates spool UPDATE worktables")
         REQUIRE_FALSE(manager.insert_tuple(page_span,
                                            std::span<const std::byte>(payload.data(), payload.size()),
                                            row_id,
-                                           insert_result));
+                                           insert_result,
+                                           {},
+                                           &insert_txn));
         rows.push_back(SpoolTestRow{row_id, insert_result.slot.index, payload});
         slot_map[row_id] = insert_result.slot.index;
         expected_payloads[row_id] = rows.back().payload;
     }
 
-    auto insert_commit = make_commit_header(wal_writer, 5000U, 5001U, 5000U);
+    auto insert_commit = make_commit_header(wal_writer, insert_txn.id(), insert_txn.id() + 1U, insert_txn.id());
     WalAppendResult insert_commit_result{};
     REQUIRE_FALSE(wal_writer->append_commit_record(insert_commit, insert_commit_result));
 
@@ -3863,7 +3889,9 @@ TEST_CASE("Wal crash drill rehydrates spool UPDATE worktables")
     for (std::size_t idx = 0U; idx < rows.size(); ++idx) {
         auto payload = rows[idx].payload;
         for (std::size_t pos = 0; pos < payload.size(); ++pos) {
-            payload[pos] = static_cast<std::byte>((payload[pos] ^ std::byte{0x5A}) + static_cast<std::byte>(idx + 1U));
+            auto value = static_cast<std::uint8_t>(std::to_integer<unsigned int>(payload[pos]) ^ 0x5AU);
+            value = static_cast<std::uint8_t>(value + static_cast<std::uint8_t>((idx + 1U) & 0xFFU));
+            payload[pos] = static_cast<std::byte>(value);
         }
         expected_payloads[rows[idx].row_id] = payload;
         update_payloads.push_back(std::move(payload));
@@ -3887,7 +3915,8 @@ TEST_CASE("Wal crash drill rehydrates spool UPDATE worktables")
     auto child = std::make_unique<VectorChild>(&update_rows, &child_reads);
     auto spool_node = std::make_unique<bored::executor::SpoolExecutor>(std::move(child), spool_config);
 
-    PageUpdateTarget update_target{&manager, page_span, &slot_map, &expected_payloads};
+    auto update_txn = txn_manager.begin();
+    PageUpdateTarget update_target{&manager, page_span, &slot_map, &expected_payloads, &update_txn};
     bored::executor::UpdateExecutor::Config update_config{};
     update_config.target = &update_target;
 
@@ -3908,7 +3937,7 @@ TEST_CASE("Wal crash drill rehydrates spool UPDATE worktables")
     CHECK(child_reads == update_rows.size());
     CHECK(update_target.updated_count() == update_rows.size());
 
-    auto update_commit = make_commit_header(wal_writer, 5001U, 5002U, 5001U);
+    auto update_commit = make_commit_header(wal_writer, update_txn.id(), update_txn.id() + 1U, update_txn.id());
     WalAppendResult update_commit_result{};
     REQUIRE_FALSE(wal_writer->append_commit_record(update_commit, update_commit_result));
     REQUIRE_FALSE(manager.flush_wal());
@@ -3918,6 +3947,23 @@ TEST_CASE("Wal crash drill rehydrates spool UPDATE worktables")
     WalRecoveryDriver driver{wal_dir, config.file_prefix, config.file_extension, nullptr, wal_dir / "checkpoints"};
     WalRecoveryPlan plan{};
     REQUIRE_FALSE(driver.build_plan(plan));
+    CAPTURE(plan.redo.size());
+    CAPTURE(plan.undo.size());
+    CAPTURE(plan.transactions.size());
+    for (const auto& record : plan.redo) {
+        auto type = static_cast<WalRecordType>(record.header.type);
+        if (type == WalRecordType::TupleUpdate) {
+            auto payload_span = std::span<const std::byte>(record.payload.data(), record.payload.size());
+            auto meta = bored::storage::decode_wal_tuple_update_meta(payload_span);
+            CAPTURE(record.payload.size());
+            if (meta) {
+                CAPTURE(meta->base.tuple_length);
+                auto tuple_payload = bored::storage::wal_tuple_update_payload(payload_span, *meta);
+                CAPTURE(tuple_payload.size());
+            }
+            break;
+        }
+    }
 
     WalReplayContext replay_context{PageType::Table, nullptr};
     WalReplayer replayer{replay_context};
@@ -3934,13 +3980,17 @@ TEST_CASE("Wal crash drill rehydrates spool UPDATE worktables")
         REQUIRE(it != slot_map.end());
         slot_order.push_back(it->second);
         auto tuple_span = bored::storage::read_tuple(replay_span, it->second);
-        auto payload = tuple_payload_vector(tuple_span);
+        std::vector<std::byte> payload;
+        payload.assign(tuple_span.begin(), tuple_span.end());
         const auto expected_it = expected_payloads.find(row.row_id);
         REQUIRE(expected_it != expected_payloads.end());
+        CAPTURE(it->second);
+        CAPTURE(tuple_span.size());
         REQUIRE(payload == expected_it->second);
     }
 
     auto recovered_rows = collect_page_rows(replay_span, slot_order);
+    CAPTURE(recovered_rows.size());
 
     bored::executor::WorkTableRegistry recovered_registry;
     bored::executor::SpoolExecutor::Config recovered_config{};
@@ -4007,6 +4057,10 @@ TEST_CASE("Wal crash drill rehydrates spool DELETE worktables")
     FreeSpaceMap fsm;
     PageManager manager{&fsm, wal_writer};
 
+    bored::txn::TransactionIdAllocatorStub allocator{6000U};
+    bored::txn::TransactionManager txn_manager{allocator};
+    auto insert_txn = txn_manager.begin();
+
     constexpr std::uint32_t page_id = 53001U;
     alignas(8) std::array<std::byte, kPageSize> page_buffer{};
     auto page_span = std::span<std::byte>(page_buffer.data(), page_buffer.size());
@@ -4026,12 +4080,14 @@ TEST_CASE("Wal crash drill rehydrates spool DELETE worktables")
         REQUIRE_FALSE(manager.insert_tuple(page_span,
                                            std::span<const std::byte>(payload.data(), payload.size()),
                                            row_id,
-                                           insert_result));
+                                           insert_result,
+                                           {},
+                                           &insert_txn));
         rows.push_back(SpoolTestRow{row_id, insert_result.slot.index, std::move(payload)});
         slot_map[row_id] = insert_result.slot.index;
     }
 
-    auto insert_commit = make_commit_header(wal_writer, 6000U, 6001U, 6000U);
+    auto insert_commit = make_commit_header(wal_writer, insert_txn.id(), insert_txn.id() + 1U, insert_txn.id());
     WalAppendResult insert_commit_result{};
     REQUIRE_FALSE(wal_writer->append_commit_record(insert_commit, insert_commit_result));
 
@@ -4051,7 +4107,8 @@ TEST_CASE("Wal crash drill rehydrates spool DELETE worktables")
     auto child = std::make_unique<VectorChild>(&delete_rows, &child_reads);
     auto spool_node = std::make_unique<bored::executor::SpoolExecutor>(std::move(child), spool_config);
 
-    PageDeleteTarget delete_target{&manager, page_span, &slot_map};
+    auto delete_txn = txn_manager.begin();
+    PageDeleteTarget delete_target{&manager, page_span, &slot_map, &delete_txn};
     bored::executor::DeleteExecutor::Config delete_config{};
     delete_config.target = &delete_target;
 
@@ -4072,7 +4129,7 @@ TEST_CASE("Wal crash drill rehydrates spool DELETE worktables")
     CHECK(child_reads == delete_rows.size());
     CHECK(delete_target.deleted_count() == delete_rows.size());
 
-    auto delete_commit = make_commit_header(wal_writer, 6001U, 6002U, 6001U);
+    auto delete_commit = make_commit_header(wal_writer, delete_txn.id(), delete_txn.id() + 1U, delete_txn.id());
     WalAppendResult delete_commit_result{};
     REQUIRE_FALSE(wal_writer->append_commit_record(delete_commit, delete_commit_result));
     REQUIRE_FALSE(manager.flush_wal());
@@ -4089,8 +4146,20 @@ TEST_CASE("Wal crash drill rehydrates spool DELETE worktables")
     REQUIRE_FALSE(replayer.apply_undo(plan));
 
     auto replay_page = replay_context.get_page(page_id);
-    auto header = bored::storage::page_header(std::span<const std::byte>(replay_page.data(), replay_page.size()));
-    CHECK(header.tuple_count == 0U);
+    auto replay_span = std::span<const std::byte>(replay_page.data(), replay_page.size());
+    const auto& header = bored::storage::page_header(replay_span);
+    auto directory = bored::storage::slot_directory(replay_span);
+    CHECK(directory.size() == header.tuple_count);
+    for (std::size_t index = 0; index < directory.size(); ++index) {
+        CAPTURE(index);
+        CHECK(directory[index].length == 0U);
+    }
+    for (const auto& [row_id, slot_index] : slot_map) {
+        (void)row_id;
+        CAPTURE(slot_index);
+        auto tuple = bored::storage::read_tuple(replay_span, slot_index);
+        CHECK(tuple.empty());
+    }
 
     std::vector<std::vector<std::byte>> recovered_rows;
     bored::executor::WorkTableRegistry recovered_registry;

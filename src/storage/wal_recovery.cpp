@@ -82,7 +82,12 @@ void RecoveryTelemetryState::record_cleanup(std::uint64_t duration_ns, bool succ
 namespace {
 
 struct TransactionState final {
-    std::vector<WalRecoveryRecord> records{};
+    struct PreparedRecord final {
+        WalRecoveryRecord record{};
+        std::uint32_t page_id = 0U;
+    };
+
+    std::vector<PreparedRecord> records{};
     std::size_t sequence = 0U;
 };
 
@@ -103,39 +108,39 @@ std::optional<std::uint64_t> owner_identifier(const WalRecordView& view)
     case WalRecordType::TupleDelete:
     case WalRecordType::CatalogDelete: {
         auto meta = decode_wal_tuple_meta(payload);
-        if (!meta || meta->page_id == 0U || meta->page_id != view.header.page_id) {
-            return static_cast<std::uint64_t>(view.header.page_id);
+        if (meta && meta->page_id != 0U) {
+            return static_cast<std::uint64_t>(meta->page_id);
         }
-        return static_cast<std::uint64_t>(meta->page_id);
+        return static_cast<std::uint64_t>(view.header.page_id);
     }
     case WalRecordType::TupleUpdate:
     case WalRecordType::CatalogUpdate: {
         auto meta = decode_wal_tuple_update_meta(payload);
-        if (!meta || meta->base.page_id == 0U || meta->base.page_id != view.header.page_id) {
-            return static_cast<std::uint64_t>(view.header.page_id);
+        if (meta && meta->base.page_id != 0U) {
+            return static_cast<std::uint64_t>(meta->base.page_id);
         }
-        return static_cast<std::uint64_t>(meta->base.page_id);
+        return static_cast<std::uint64_t>(view.header.page_id);
     }
     case WalRecordType::TupleBeforeImage: {
         auto before_view = decode_wal_tuple_before_image(payload);
-        if (!before_view || before_view->meta.page_id == 0U || before_view->meta.page_id != view.header.page_id) {
-            return static_cast<std::uint64_t>(view.header.page_id);
+        if (before_view && before_view->meta.page_id != 0U) {
+            return static_cast<std::uint64_t>(before_view->meta.page_id);
         }
-        return static_cast<std::uint64_t>(before_view->meta.page_id);
+        return static_cast<std::uint64_t>(view.header.page_id);
     }
     case WalRecordType::TupleOverflowChunk: {
         auto meta = decode_wal_overflow_chunk_meta(payload);
-        if (!meta || meta->owner.page_id == 0U) {
-            return static_cast<std::uint64_t>(view.header.page_id);
+        if (meta && meta->owner.page_id != 0U) {
+            return static_cast<std::uint64_t>(meta->owner.page_id);
         }
-        return static_cast<std::uint64_t>(meta->owner.page_id);
+        return static_cast<std::uint64_t>(view.header.page_id);
     }
     case WalRecordType::TupleOverflowTruncate: {
         auto meta = decode_wal_overflow_truncate_meta(payload);
-        if (!meta || meta->owner.page_id == 0U) {
-            return static_cast<std::uint64_t>(view.header.page_id);
+        if (meta && meta->owner.page_id != 0U) {
+            return static_cast<std::uint64_t>(meta->owner.page_id);
         }
-        return static_cast<std::uint64_t>(meta->owner.page_id);
+        return static_cast<std::uint64_t>(view.header.page_id);
     }
     case WalRecordType::Commit: {
         auto commit = decode_wal_commit(payload);
@@ -275,7 +280,7 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
         return it->second;
     };
 
-    auto append_undo_span = [&](std::uint32_t txn_id, const std::vector<WalRecoveryRecord>& records) {
+    auto append_undo_span = [&](std::uint32_t page_id, const std::vector<WalRecoveryRecord>& records) {
         if (records.empty()) {
             return;
         }
@@ -285,7 +290,29 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
         }
         const auto count = plan.undo.size() - start;
         if (count != 0U) {
-            plan.undo_spans.push_back(WalUndoSpan{txn_id, start, count});
+            plan.undo_spans.push_back(WalUndoSpan{page_id, start, count});
+        }
+    };
+
+    auto append_transaction_undo = [&](const TransactionState& state) {
+        if (state.records.empty()) {
+            return;
+        }
+        std::vector<std::uint32_t> page_order;
+        page_order.reserve(state.records.size());
+        std::unordered_map<std::uint32_t, std::vector<WalRecoveryRecord>> per_page;
+        for (const auto& prepared : state.records) {
+            auto [it, inserted] = per_page.try_emplace(prepared.page_id);
+            if (inserted) {
+                page_order.push_back(prepared.page_id);
+            }
+            it->second.push_back(prepared.record);
+        }
+        for (auto page_id : page_order) {
+            auto map_it = per_page.find(page_id);
+            if (map_it != per_page.end()) {
+                append_undo_span(page_id, map_it->second);
+            }
         }
     };
 
@@ -389,13 +416,12 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                     const auto owner_id = static_cast<std::uint32_t>(commit->transaction_id);
                     auto it = transactions.find(owner_id);
                     if (it != transactions.end()) {
-                        auto& prepared = it->second.records;
-                        for (const auto& record : prepared) {
-                            const auto record_type = static_cast<WalRecordType>(record.header.type);
+                        for (const auto& prepared : it->second.records) {
+                            const auto record_type = static_cast<WalRecordType>(prepared.record.header.type);
                             if (record_type == WalRecordType::TupleBeforeImage) {
                                 continue;
                             }
-                            plan.redo.push_back(record);
+                            plan.redo.push_back(prepared.record);
                         }
                         transactions.erase(it);
                     }
@@ -403,22 +429,17 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 break;
             }
             case WalRecordType::Abort: {
-                auto owner = owner_identifier(record_view);
-                if (!owner) {
-                    record_plan_metrics(false);
-                    return std::make_error_code(std::errc::invalid_argument);
-                }
-                if (*owner != 0U) {
-                    record_transaction_progress(*owner, record_view.header);
-                    auto& recovered = ensure_recovered_transaction(*owner);
+                if (record_view.header.page_id != 0U) {
+                    record_transaction_progress(record_view.header.page_id, record_view.header);
+                    auto& recovered = ensure_recovered_transaction(record_view.header.page_id);
                     recovered.transaction.state = WalRecoveredTransactionState::Aborted;
                 }
 
-                if (*owner <= std::numeric_limits<std::uint32_t>::max()) {
-                    const auto owner_id = static_cast<std::uint32_t>(*owner);
-                    auto it = transactions.find(owner_id);
+                if (record_view.header.page_id != 0U && record_view.header.page_id <= std::numeric_limits<std::uint32_t>::max()) {
+                    const auto txn_id = static_cast<std::uint32_t>(record_view.header.page_id);
+                    auto it = transactions.find(txn_id);
                     if (it != transactions.end()) {
-                        append_undo_span(owner_id, it->second.records);
+                        append_transaction_undo(it->second);
                         transactions.erase(it);
                     }
                 }
@@ -468,19 +489,27 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
                 break;
             }
             default: {
-                auto owner = owner_identifier(record_view);
-                if (!owner) {
+                auto page_owner = owner_identifier(record_view);
+                if (!page_owner) {
                     record_plan_metrics(false);
                     return std::make_error_code(std::errc::invalid_argument);
                 }
-                if (*owner == 0U || *owner > std::numeric_limits<std::uint32_t>::max()) {
+                if (*page_owner == 0U || *page_owner > std::numeric_limits<std::uint32_t>::max()) {
                     record_plan_metrics(false);
                     return std::make_error_code(std::errc::invalid_argument);
                 }
-                const auto owner_id = static_cast<std::uint32_t>(*owner);
-                auto& txn = ensure_transaction(owner_id);
-                txn.records.push_back(make_recovery_record(record_view));
-                record_transaction_progress(*owner, record_view.header);
+                if (record_view.header.page_id == 0U || record_view.header.page_id > std::numeric_limits<std::uint32_t>::max()) {
+                    record_plan_metrics(false);
+                    return std::make_error_code(std::errc::invalid_argument);
+                }
+
+                const auto txn_id = static_cast<std::uint32_t>(record_view.header.page_id);
+                auto& txn = ensure_transaction(txn_id);
+                TransactionState::PreparedRecord prepared{};
+                prepared.page_id = static_cast<std::uint32_t>(*page_owner);
+                prepared.record = make_recovery_record(record_view);
+                txn.records.push_back(std::move(prepared));
+                record_transaction_progress(record_view.header.page_id, record_view.header);
                 break;
             }
             }
@@ -502,9 +531,9 @@ std::error_code WalRecoveryDriver::build_plan(WalRecoveryPlan& plan) const
     });
 
     for (const auto& [txn_id, state] : survivors) {
-        append_undo_span(txn_id, state->records);
+        append_transaction_undo(*state);
         if (!state->records.empty()) {
-            record_transaction_progress(txn_id, state->records.back().header);
+            record_transaction_progress(txn_id, state->records.back().record.header);
         }
     }
 

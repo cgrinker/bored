@@ -60,16 +60,33 @@ std::span<std::byte> ensure_page(WalReplayContext& context, std::uint32_t page_i
     return page;
 }
 
+std::uint32_t resolve_tuple_page_id(const WalTupleMeta& meta, const WalRecordHeader& header) noexcept
+{
+    return meta.page_id != 0U ? meta.page_id : header.page_id;
+}
+
+std::uint32_t resolve_tuple_page_id(const WalTupleUpdateMeta& meta, const WalRecordHeader& header) noexcept
+{
+    return meta.base.page_id != 0U ? meta.base.page_id : header.page_id;
+}
+
+std::uint32_t resolve_overflow_page_id(const WalOverflowChunkMeta& meta, const WalRecordHeader& header) noexcept
+{
+    return meta.overflow_page_id != 0U ? meta.overflow_page_id : header.page_id;
+}
+
+std::uint32_t resolve_overflow_page_id(const WalOverflowTruncateMeta& meta, const WalRecordHeader& header) noexcept
+{
+    return meta.first_overflow_page_id != 0U ? meta.first_overflow_page_id : header.page_id;
+}
+
 std::error_code apply_overflow_chunk(WalReplayContext& context,
                                      const WalRecoveryRecord& record,
                                      const WalOverflowChunkMeta& meta,
                                      std::span<const std::byte> payload)
 {
-    if (record.header.page_id != meta.overflow_page_id) {
-        return std::make_error_code(std::errc::invalid_argument);
-    }
-
-    auto page = ensure_page(context, meta.overflow_page_id, PageType::Overflow);
+    const auto page_id = resolve_overflow_page_id(meta, record.header);
+    auto page = ensure_page(context, page_id, PageType::Overflow);
     if (wal::page_already_applied(page, record.header)) {
         return {};
     }
@@ -109,11 +126,8 @@ std::error_code undo_overflow_chunk(WalReplayContext& context,
                                     const WalRecoveryRecord& record,
                                     const WalOverflowChunkMeta& meta)
 {
-    if (record.header.page_id != meta.overflow_page_id) {
-        return std::make_error_code(std::errc::invalid_argument);
-    }
-
-    auto page = ensure_page(context, meta.overflow_page_id, PageType::Overflow);
+    const auto page_id = resolve_overflow_page_id(meta, record.header);
+    auto page = ensure_page(context, page_id, PageType::Overflow);
     if (!clear_overflow_page(page, meta.overflow_page_id, record.header.lsn, context.free_space_map())) {
         return std::make_error_code(std::errc::io_error);
     }
@@ -800,7 +814,8 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (tuple_payload.size() != meta->tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
+        const auto page_id = resolve_tuple_page_id(*meta, record.header);
+    auto page = ensure_page(context_, page_id, replay_page_type(record_type));
     return wal::apply_tuple_insert(page, record.header, *meta, tuple_payload, fsm, false);
     }
     case WalRecordType::TupleDelete:
@@ -809,7 +824,8 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
+        const auto page_id = resolve_tuple_page_id(*meta, record.header);
+    auto page = ensure_page(context_, page_id, replay_page_type(record_type));
     return wal::apply_tuple_delete(page, record.header, *meta, fsm, false);
     }
     case WalRecordType::TupleUpdate:
@@ -822,7 +838,8 @@ std::error_code WalReplayer::apply_redo_record(const WalRecoveryRecord& record)
         if (tuple_payload.size() != meta->base.tuple_length) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
+        const auto page_id = resolve_tuple_page_id(*meta, record.header);
+    auto page = ensure_page(context_, page_id, replay_page_type(record_type));
     return wal::apply_tuple_update(page, record.header, *meta, tuple_payload, fsm);
     }
     case WalRecordType::TupleBeforeImage:
@@ -885,7 +902,8 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
+        const auto page_id = resolve_tuple_page_id(*meta, record.header);
+    auto page = ensure_page(context_, page_id, replay_page_type(record_type));
     return wal::apply_tuple_delete(page, record.header, *meta, fsm, true);
     }
     case WalRecordType::TupleUpdate:
@@ -894,7 +912,8 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
         if (!meta) {
             return std::make_error_code(std::errc::invalid_argument);
         }
-    auto page = ensure_page(context_, record.header.page_id, replay_page_type(record_type));
+        const auto page_id = resolve_tuple_page_id(*meta, record.header);
+    auto page = ensure_page(context_, page_id, replay_page_type(record_type));
     return wal::apply_tuple_delete(page, record.header, meta->base, fsm, false);
     }
     case WalRecordType::TupleBeforeImage: {
@@ -906,16 +925,18 @@ std::error_code WalReplayer::apply_undo_record(const WalRecoveryRecord& record)
             return std::make_error_code(std::errc::invalid_argument);
         }
 
+        const auto base_page_id = resolve_tuple_page_id(before_view->meta, record.header);
+
         PageType target_type = PageType::Table;
         {
-            auto existing_page = context_.get_page(record.header.page_id);
+            auto existing_page = context_.get_page(base_page_id);
             auto existing_header = page_header(std::span<const std::byte>(existing_page.data(), existing_page.size()));
             if (is_valid(existing_header)) {
                 target_type = static_cast<PageType>(existing_header.type);
             }
         }
 
-        auto page = ensure_page(context_, record.header.page_id, target_type);
+        auto page = ensure_page(context_, base_page_id, target_type);
         if (auto ec = wal::apply_tuple_insert(page,
                                               record.header,
                                               before_view->meta,
