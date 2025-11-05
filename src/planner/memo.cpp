@@ -167,7 +167,7 @@ void Memo::ensure_materialized_alternative(GroupId group, const LogicalOperatorP
     }
 
     LogicalProperties materialize_props = representative->properties();
-    materialize_props.requires_recursive_cursor = true;
+    materialize_props.requires_recursive_cursor = representative->properties().requires_recursive_cursor;
     auto materialize = LogicalOperator::make(
         LogicalOperatorType::Materialize,
         std::vector<LogicalOperatorPtr>{representative},

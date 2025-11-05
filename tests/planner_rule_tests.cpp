@@ -287,12 +287,39 @@ TEST_CASE("Memo reuses groups for equivalent expressions")
     CHECK(group->expressions().size() == 2U);
 
     std::size_t materialize_count = 0U;
+    bool materialize_requires_recursive_cursor = false;
     for (const auto& expression : group->expressions()) {
         if (expression->type() == LogicalOperatorType::Materialize) {
             ++materialize_count;
+            materialize_requires_recursive_cursor = expression->properties().requires_recursive_cursor;
         }
     }
     CHECK(materialize_count == 1U);
+    CHECK_FALSE(materialize_requires_recursive_cursor);
+
+    Memo recursive_memo;
+    LogicalProperties recursive_props{};
+    recursive_props.output_columns = {"id"};
+    recursive_props.requires_recursive_cursor = true;
+
+    auto recursive_first = LogicalOperator::make(LogicalOperatorType::TableScan, {}, recursive_props);
+    auto recursive_second = LogicalOperator::make(LogicalOperatorType::TableScan, {}, recursive_props);
+
+    auto recursive_group_one = recursive_memo.add_group(recursive_first);
+    auto recursive_group_two = recursive_memo.add_group(recursive_second);
+
+    REQUIRE(recursive_group_one == recursive_group_two);
+
+    const auto* recursive_group = recursive_memo.find_group(recursive_group_one);
+    REQUIRE(recursive_group != nullptr);
+    bool recursive_materialize_found = false;
+    for (const auto& expression : recursive_group->expressions()) {
+        if (expression->type() == LogicalOperatorType::Materialize) {
+            recursive_materialize_found = true;
+            CHECK(expression->properties().requires_recursive_cursor);
+        }
+    }
+    CHECK(recursive_materialize_found);
 
     LogicalProperties projection_props = scan_props;
     auto projection_one = LogicalOperator::make(
@@ -312,12 +339,15 @@ TEST_CASE("Memo reuses groups for equivalent expressions")
     CHECK(group->expressions().size() == 3U);
 
     materialize_count = 0U;
+    materialize_requires_recursive_cursor = false;
     for (const auto& expression : group->expressions()) {
         if (expression->type() == LogicalOperatorType::Materialize) {
             ++materialize_count;
+            materialize_requires_recursive_cursor = expression->properties().requires_recursive_cursor;
         }
     }
     CHECK(materialize_count == 1U);
+    CHECK_FALSE(materialize_requires_recursive_cursor);
 }
 
 TEST_CASE("Rule engine handles empty registry")

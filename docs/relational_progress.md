@@ -2,9 +2,9 @@
 
 This ticket-level report summarizes the relational engine roadmap, capturing what has shipped, what remains, and which code paths we expect to touch next so the team can quickly regain context when switching threads.
 
-_Last updated: 2025-11-04_
+_Last updated: 2025-11-05_
 
-Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning overflow WAL ownership so crash drills collapse to single undo spans and landing recursive cursor coverage for spool crash/restart workflows; `build/bored_benchmarks --samples=10 --json` captured updated baselines (including `spool_worktable_recovery`) the same day.
+Latest validation: `ctest --output-on-failure` (445/445) on 2025-11-05 covering planner memo regression updates after propagating recursive CTE metadata into logical plans and spool materialize alternatives; `build/bored_benchmarks --samples=10 --json` captured updated baselines (including `spool_worktable_recovery`) on 2025-11-04.
 
 ## Current Capabilities
 
@@ -12,7 +12,7 @@ Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning ov
 - **Catalog & DDL**: Persistent catalog with fully wired DDL handlers (create/alter/drop) for schemas, tables, and indexes, including restart-safe catalog bootstrap.
 - **Sequence Allocation (foundation)**: Transactional sequence allocator stages `next_value` updates via catalog mutator hooks, dispatcher now wires allocators into DDL handlers, and Catch2 regression coverage remains; planner/executor wiring is still pending.
 - **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell now supports BEGIN/COMMIT/ROLLBACK so INSERT/UPDATE/DELETE/SELECT flows can share session-scoped transactions with executor snapshots; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard now propagates oldest reader LSNs while cross-session isolation and deadlock handling remain on the roadmap.
-- **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs (including `WITH RECURSIVE` anchor and recursive members); binder resolves identifiers, enforces CTE column/type compatibility, and scopes recursive references; lowering currently inlines non-recursive CTE definitions into the logical tree, and normalization stages generate logical plans for select/join queries.
+- **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs (including `WITH RECURSIVE` anchor and recursive members); binder resolves identifiers, enforces CTE column/type compatibility, and scopes recursive references; lowering continues to inline non-recursive CTE definitions and now preserves recursive-reference metadata on `LogicalCteScan`, while normalization stages generate logical plans for select/join queries.
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators.
 - **Constraint Enforcement**: Planner lowers unique/foreign key operators and executor now performs index-backed uniqueness checks plus referential integrity probes with MVCC-aware visibility.
 - **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up.
@@ -26,7 +26,7 @@ Latest validation: `build/bored_tests` (438/438) on 2025-11-04 after aligning ov
 | Key/foreign constraints | **Available (shell integration)** | Catalog metadata, planner & executor enforcement, and bored_shell INSERT/UPDATE pipelines enforcing PRIMARY KEY/UNIQUE/FOREIGN KEY checks. |
 | Auto-incrementing primary keys | **In progress** | Sequence allocator now stages transactional `next_value` updates with tests; planner/executor integration remains. |
 | Join execution | **Available** | Logical lowering, planner, and executor support nested-loop and hash joins with tests covering join predicates and pipelines. |
-| Common table expressions (CTEs) | **In progress** | Parser/AST and binder now understand `WITH RECURSIVE`, enforcing anchor/recursive column and type compatibility; lowering continues to inline non-recursive producers with regression coverage; planner memo deduplicates reusable producers and injects materialize/spool alternatives. Recursive spools now surface worktable ids and cursors through planner → shell, leaving logical lowering/planner wiring and end-to-end tests for recursive execution as the remaining work. |
+| Common table expressions (CTEs) | **In progress** | Parser/AST and binder understand `WITH RECURSIVE`, enforcing anchor/recursive column and type compatibility; lowering preserves recursive-reference metadata on scans; planner memo deduplicates reusable producers, injects materialize/spool alternatives, and now preserves `requires_recursive_cursor` when recursive producers enter the memo. Recursive spools surface worktable ids and cursors through planner → shell, leaving recursive-plan selection and end-to-end execution tests as the remaining work. |
 
 ## Gaps to Close
 
