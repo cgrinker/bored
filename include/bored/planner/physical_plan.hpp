@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/catalog/catalog_ids.hpp"
+#include "bored/planner/scalar_literal.hpp"
 #include "bored/txn/transaction_types.hpp"
 
 #include <cstddef>
@@ -23,6 +24,7 @@ enum class PhysicalOperatorType {
     Projection,
     Filter,
     SeqScan,
+    IndexScan,
     NestedLoopJoin,
     HashJoin,
     Values,
@@ -58,6 +60,16 @@ struct MaterializeProperties final {
     bool enable_recursive_cursor = false;
 };
 
+struct IndexScanProperties final {
+    catalog::IndexId index_id{};
+    std::string index_name{};
+    std::vector<std::string> key_columns{};
+    std::vector<ScalarLiteralValue> key_values{};
+    bool unique = false;
+    double estimated_selectivity = 1.0;
+    bool enable_heap_fallback = true;
+};
+
 struct PhysicalProperties final {
     std::size_t expected_cardinality = 0U;
     bool preserves_order = false;
@@ -74,6 +86,7 @@ struct PhysicalProperties final {
     std::optional<UniqueEnforcementProperties> unique_enforcement{};
     std::optional<ForeignKeyEnforcementProperties> foreign_key_enforcement{};
     std::optional<MaterializeProperties> materialize{};
+    std::optional<IndexScanProperties> index_scan{};
 };
 
 class PhysicalOperator;

@@ -4,6 +4,7 @@
 #include "bored/catalog/catalog_relations.hpp"
 #include "bored/planner/cost_model.hpp"
 #include "bored/planner/memo.hpp"
+#include "bored/planner/statistics_catalog.hpp"
 #include "bored/planner/rule.hpp"
 #include "bored/planner/rules/join_rules.hpp"
 #include "bored/planner/rules/predicate_pushdown_rule.hpp"
@@ -11,8 +12,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -44,6 +47,154 @@ void append_unique(std::vector<std::string>& target, const std::vector<std::stri
             target.push_back(value);
         }
     }
+}
+
+std::string normalize_identifier(std::string_view text)
+{
+    std::string result;
+    result.reserve(text.size());
+    for (unsigned char ch : text) {
+        result.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return result;
+}
+
+double table_row_count(const PlannerContext& context, const LogicalProperties& properties)
+{
+    const auto* statistics = context.statistics();
+    if (statistics != nullptr && !properties.relation_name.empty()) {
+        if (const auto* table_stats = statistics->find_table(properties.relation_name)) {
+            if (const auto rows = table_stats->row_count(); rows > 0.0) {
+                return rows;
+            }
+        }
+    }
+    if (properties.estimated_cardinality > 0U) {
+        return static_cast<double>(properties.estimated_cardinality);
+    }
+    return 1.0;
+}
+
+double predicate_selectivity(const LogicalProperties& properties,
+                             const StatisticsCatalog* statistics,
+                             double table_rows)
+{
+    if (properties.equality_predicates.empty()) {
+        return 1.0;
+    }
+
+    const double min_selectivity = 1.0 / std::max(1.0, table_rows);
+    double selectivity = 1.0;
+
+    for (const auto& predicate : properties.equality_predicates) {
+        double column_selectivity = min_selectivity;
+        if (statistics != nullptr && !properties.relation_name.empty()) {
+            if (const auto* column_stats = statistics->find_column(properties.relation_name, predicate.column)) {
+                if (column_stats->distinct_count.has_value() && *column_stats->distinct_count > 0.0) {
+                    column_selectivity = 1.0 / std::max(1.0, *column_stats->distinct_count);
+                }
+            }
+        }
+        selectivity *= column_selectivity;
+    }
+
+    return std::clamp(selectivity, min_selectivity, 1.0);
+}
+
+struct IndexSelection final {
+    IndexScanProperties properties{};
+    std::size_t expected_cardinality = 0U;
+    std::size_t expected_batch_size = 0U;
+    std::string executor_strategy{};
+    double estimated_rows = 0.0;
+};
+
+std::optional<IndexSelection> choose_index_scan(const LogicalProperties& properties,
+                                                const StatisticsCatalog* statistics,
+                                                double table_rows)
+{
+    if (properties.equality_predicates.empty() || properties.available_indexes.empty()) {
+        return std::nullopt;
+    }
+
+    std::unordered_map<std::string, const ScalarLiteralValue*> predicate_lookup;
+    predicate_lookup.reserve(properties.equality_predicates.size());
+    for (const auto& predicate : properties.equality_predicates) {
+        predicate_lookup.emplace(normalize_identifier(predicate.column), &predicate.literal);
+    }
+
+    constexpr double kSelectivityThreshold = 0.2;
+
+    std::optional<IndexSelection> best_selection;
+    double best_rows = std::numeric_limits<double>::infinity();
+
+    for (const auto& binding : properties.available_indexes) {
+        if (!binding.index_id.is_valid() || binding.key_columns.empty()) {
+            continue;
+        }
+
+        std::vector<ScalarLiteralValue> key_literals;
+        key_literals.reserve(binding.key_columns.size());
+        bool missing_key = false;
+        for (const auto& key_column : binding.key_columns) {
+            const auto it = predicate_lookup.find(normalize_identifier(key_column));
+            if (it == predicate_lookup.end()) {
+                missing_key = true;
+                break;
+            }
+            key_literals.push_back(*it->second);
+        }
+        if (missing_key) {
+            continue;
+        }
+
+        const double min_selectivity = 1.0 / std::max(1.0, table_rows);
+        double selectivity = binding.unique ? min_selectivity : 1.0;
+        if (!binding.unique) {
+            for (const auto& key_column : binding.key_columns) {
+                double column_selectivity = min_selectivity;
+                if (statistics != nullptr && !properties.relation_name.empty()) {
+                    if (const auto* column_stats = statistics->find_column(properties.relation_name, key_column)) {
+                        if (column_stats->distinct_count.has_value() && *column_stats->distinct_count > 0.0) {
+                            column_selectivity = 1.0 / std::max(1.0, *column_stats->distinct_count);
+                        }
+                    }
+                }
+                selectivity *= column_selectivity;
+            }
+        }
+        selectivity = std::clamp(selectivity, min_selectivity, 1.0);
+        const double estimated_rows = std::max(1.0, table_rows * selectivity);
+
+        const bool prefer_index = binding.unique || estimated_rows <= table_rows * kSelectivityThreshold;
+        if (!prefer_index) {
+            continue;
+        }
+
+        IndexSelection selection{};
+        selection.properties.index_id = binding.index_id;
+        selection.properties.index_name = binding.name;
+        selection.properties.key_columns = binding.key_columns;
+        selection.properties.key_values = std::move(key_literals);
+        selection.properties.unique = binding.unique;
+        selection.properties.estimated_selectivity = selectivity;
+        selection.properties.enable_heap_fallback = !binding.unique;
+        selection.estimated_rows = estimated_rows;
+        selection.expected_cardinality = static_cast<std::size_t>(std::max(1.0, std::round(estimated_rows)));
+        selection.expected_batch_size = default_batch_size(selection.expected_cardinality);
+        if (binding.name.empty()) {
+            selection.executor_strategy = "index(probe)";
+        } else {
+            selection.executor_strategy = "index(probe=" + binding.name + ")";
+        }
+
+        if (!best_selection.has_value() || estimated_rows < best_rows) {
+            best_rows = estimated_rows;
+            best_selection = std::move(selection);
+        }
+    }
+
+    return best_selection;
 }
 
 std::string_view trim_view(std::string_view text) noexcept
@@ -247,6 +398,39 @@ PhysicalOperatorPtr lower_placeholder(const PlannerContext& context, const Logic
             properties.snapshot = context.snapshot();
         }
         append_unique(properties.partitioning_columns, properties.output_columns);
+
+        const auto* statistics = context.statistics();
+        const double table_rows = table_row_count(context, logical->properties());
+        const double selectivity_fallback = predicate_selectivity(logical->properties(), statistics, table_rows);
+        auto index_choice = choose_index_scan(logical->properties(), statistics, table_rows);
+
+        if (index_choice.has_value()) {
+            auto selection = std::move(*index_choice);
+            operator_type = PhysicalOperatorType::IndexScan;
+            properties.index_scan = std::move(selection.properties);
+            properties.executor_strategy = std::move(selection.executor_strategy);
+            properties.expected_cardinality = selection.expected_cardinality;
+            properties.expected_batch_size = selection.expected_batch_size;
+            if (properties.expected_cardinality == 0U) {
+                properties.expected_cardinality = static_cast<std::size_t>(std::max(1.0, std::round(selection.estimated_rows)));
+            }
+            if (properties.expected_batch_size == 0U) {
+                properties.expected_batch_size = default_batch_size(properties.expected_cardinality);
+            }
+        } else {
+            properties.index_scan.reset();
+            const double estimated_rows = std::max(1.0, table_rows * selectivity_fallback);
+            const auto cardinality = static_cast<std::size_t>(std::max(1.0, std::round(estimated_rows)));
+            if (properties.expected_cardinality == 0U || cardinality < properties.expected_cardinality) {
+                properties.expected_cardinality = cardinality;
+            }
+            if (properties.expected_batch_size == 0U) {
+                properties.expected_batch_size = default_batch_size(properties.expected_cardinality);
+            }
+            if (properties.executor_strategy.empty()) {
+                properties.executor_strategy = "seq";
+            }
+        }
     }
 
     if (properties.preserves_order) {

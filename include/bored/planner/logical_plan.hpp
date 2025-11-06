@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bored/catalog/catalog_ids.hpp"
+#include "bored/planner/scalar_literal.hpp"
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -26,6 +27,18 @@ enum class LogicalOperatorType {
     Delete
 };
 
+struct EqualityPredicate final {
+    std::string column{};
+    ScalarLiteralValue literal{};
+};
+
+struct IndexBinding final {
+    catalog::IndexId index_id{};
+    std::string name{};
+    std::vector<std::string> key_columns{};
+    bool unique = false;
+};
+
 struct LogicalProperties final {
     std::size_t estimated_cardinality = 0U;
     bool preserves_order = false;
@@ -33,6 +46,8 @@ struct LogicalProperties final {
     std::string relation_name{};
     catalog::RelationId relation_id{};
     std::vector<std::string> output_columns{};
+    std::vector<EqualityPredicate> equality_predicates{};
+    std::vector<IndexBinding> available_indexes{};
 };
 
 class LogicalOperator;

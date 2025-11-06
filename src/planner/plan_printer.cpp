@@ -3,6 +3,7 @@
 #include "bored/planner/physical_plan.hpp"
 
 #include <algorithm>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -23,6 +24,8 @@ std::string to_string(PhysicalOperatorType type)
         return "Filter";
     case PhysicalOperatorType::SeqScan:
         return "SeqScan";
+    case PhysicalOperatorType::IndexScan:
+        return "IndexScan";
     case PhysicalOperatorType::NestedLoopJoin:
         return "NestedLoopJoin";
     case PhysicalOperatorType::HashJoin:
@@ -153,6 +156,22 @@ std::string describe(const PhysicalOperatorPtr& node, const ExplainOptions& opti
     }
     if (!props.executor_strategy.empty()) {
         details.push_back("strategy=" + props.executor_strategy);
+    }
+    if (props.index_scan.has_value()) {
+        const auto& index = *props.index_scan;
+        if (index.index_id.is_valid()) {
+            details.push_back("index_id=" + std::to_string(index.index_id.value));
+        }
+        if (!index.index_name.empty()) {
+            details.push_back("index=" + index.index_name);
+        }
+        if (!index.key_columns.empty()) {
+            details.push_back("key_columns=" + join(index.key_columns));
+        }
+        std::ostringstream selectivity_stream;
+        selectivity_stream << std::fixed << std::setprecision(4) << index.estimated_selectivity;
+        details.push_back("selectivity=" + selectivity_stream.str());
+        details.push_back(std::string{"heap_fallback="} + (index.enable_heap_fallback ? "true" : "false"));
     }
     if (props.unique_enforcement.has_value()) {
         const auto& unique = *props.unique_enforcement;
