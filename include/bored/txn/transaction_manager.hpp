@@ -16,6 +16,8 @@
 
 namespace bored::txn {
 
+class TransactionManager;
+
 class TransactionContext final {
 public:
     TransactionContext() = default;
