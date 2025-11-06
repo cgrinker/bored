@@ -40,7 +40,7 @@ namespace {
         return false;
     }
     if (deleting_transaction == reader_transaction) {
-        return false;
+        return true;
     }
     if (deleting_transaction < snapshot.xmin) {
         return true;
