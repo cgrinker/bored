@@ -82,8 +82,8 @@ Latest validation: `ctest --output-on-failure` (471/471) on 2025-11-05 covering 
    1. [x] Implement lock manager integration for key-range locking where needed for uniqueness (establishes next-key primitives for constraint enforcement and SERIALIZABLE plans). _Shell now wires a `KeyRangeLockManager` into unique enforcement so tuples acquire next-key locks; coverage via `ctest -R "KeyRangeLockManager|UniqueEnforceExecutor"`._
    2. [ ] Add multi-version concurrency control (MVCC) visibility rules across executor operators (delivers snapshot isolation semantics across scans, joins, and DML).
       - [x] Regression coverage for sequential scans ensures MVCC visibility (`ctest -R "SequentialScanExecutor"`).
-   - [x] Extend nested loop join pipelines with MVCC visibility regression tests so join inputs honour snapshots (`ctest -R "NestedLoopJoinExecutor"`).
-      - [ ] Expand snapshot enforcement to spool iterators and DML operators, rounding out executor coverage.
+      - [x] Extend nested loop join pipelines with MVCC visibility regression tests so join inputs honour snapshots (`ctest -R "NestedLoopJoinExecutor"`).
+      - [x] Expand snapshot enforcement to spool iterators and DML operators, rounding out executor coverage (`ctest -R "SpoolExecutor|DeleteExecutor|UpdateExecutor"`).
        3. [ ] Provide configurable isolation levels and conflict resolution instrumentation (surfaced user contract and diagnostics once locking + MVCC are in place).
    - Source files to update: src/storage/lock_manager.cpp, src/storage/lock_introspection.cpp, src/executor/mvcc_visibility.cpp, src/txn/transaction_manager.cpp, src/txn/wal_commit_pipeline.cpp, tests/lock_manager_tests.cpp, tests/transaction_manager_tests.cpp, tests/transaction_crash_recovery_integration_tests.cpp
 

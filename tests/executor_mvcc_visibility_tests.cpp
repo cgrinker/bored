@@ -1,6 +1,9 @@
 #include "bored/executor/executor_context.hpp"
+#include "bored/executor/delete_executor.hpp"
 #include "bored/executor/nested_loop_join_executor.hpp"
 #include "bored/executor/seq_scan_executor.hpp"
+#include "bored/executor/spool_executor.hpp"
+#include "bored/executor/update_executor.hpp"
 #include "bored/executor/tuple_format.hpp"
 #include "bored/storage/storage_reader.hpp"
 #include "bored/txn/transaction_types.hpp"
@@ -20,8 +23,11 @@
 
 using bored::catalog::RelationId;
 using bored::executor::ExecutorContext;
+using bored::executor::DeleteExecutor;
 using bored::executor::NestedLoopJoinExecutor;
 using bored::executor::SequentialScanExecutor;
+using bored::executor::SpoolExecutor;
+using bored::executor::UpdateExecutor;
 using bored::executor::TupleBuffer;
 using bored::executor::TupleView;
 using bored::storage::IndexProbeConfig;
@@ -128,6 +134,49 @@ std::string_view column_text(const TupleView& view, std::size_t column_index)
     const auto column = view.column(column_index);
     return std::string_view(reinterpret_cast<const char*>(column.data.data()), column.data.size());
 }
+
+TupleHeader decode_header(const TupleView& view)
+{
+    const auto header_column = view.column(0U);
+    REQUIRE_FALSE(header_column.is_null);
+    REQUIRE(header_column.data.size() == sizeof(TupleHeader));
+
+    TupleHeader header{};
+    std::memcpy(&header, header_column.data.data(), sizeof(header));
+    return header;
+}
+
+class CollectingDeleteTarget final : public DeleteExecutor::Target {
+public:
+    std::error_code delete_tuple(const TupleView& tuple,
+                                 ExecutorContext& context,
+                                 DeleteExecutor::DeleteStats& stats) override
+    {
+        (void)context;
+        stats = {};
+        processed_headers.push_back(decode_header(tuple));
+        return {};
+    }
+
+    std::vector<TupleHeader> processed_headers;
+};
+
+class CollectingUpdateTarget final : public UpdateExecutor::Target {
+public:
+    std::error_code update_tuple(const TupleView& tuple,
+                                 ExecutorContext& context,
+                                 UpdateExecutor::UpdateStats& stats) override
+    {
+        (void)context;
+        stats = {};
+        processed_headers.push_back(decode_header(tuple));
+        payloads.emplace_back(column_text(tuple, 1U));
+        return {};
+    }
+
+    std::vector<TupleHeader> processed_headers;
+    std::vector<std::string> payloads;
+};
 
 ExecutorContext make_context(TransactionId txn_id, Snapshot snapshot)
 {
@@ -270,4 +319,139 @@ TEST_CASE("NestedLoopJoinExecutor respects MVCC visibility from child scans")
     REQUIRE(results.size() == 1U);
     CHECK(results.front().first == "joined");
     CHECK(results.front().second == "joined");
+}
+
+TEST_CASE("SpoolExecutor rematerializes rows per snapshot and preserves MVCC filters")
+{
+    StubStorageReader reader;
+    reader.add_heap_tuple(/*create_txn=*/42U, /*delete_txn=*/0U, "visible", /*page_id=*/5U, /*slot_id=*/1U);
+    reader.add_heap_tuple(/*create_txn=*/120U, /*delete_txn=*/0U, "in_progress", /*page_id=*/5U, /*slot_id=*/2U);
+
+    SequentialScanExecutor::Config scan_config{};
+    scan_config.reader = &reader;
+    scan_config.relation_id = RelationId{15U};
+    scan_config.enable_heap_fallback = true;
+
+    auto scan_child = std::make_unique<SequentialScanExecutor>(scan_config);
+    SpoolExecutor::Config spool_config{};
+    SpoolExecutor spool{std::move(scan_child), spool_config};
+
+    Snapshot first_snapshot{};
+    first_snapshot.xmin = 40U;
+    first_snapshot.xmax = 100U;
+    first_snapshot.in_progress = {120U};
+
+    auto context = make_context(/*txn_id=*/88U, first_snapshot);
+
+    TupleBuffer buffer{};
+    spool.open(context);
+
+    std::vector<std::string> first_pass{};
+    while (spool.next(context, buffer)) {
+        auto view = TupleView::from_buffer(buffer);
+        REQUIRE(view.valid());
+        first_pass.emplace_back(column_text(view, 1U));
+        buffer.reset();
+    }
+
+    spool.close(context);
+
+    REQUIRE(first_pass.size() == 1U);
+    CHECK(first_pass.front() == "visible");
+
+    Snapshot second_snapshot{};
+    second_snapshot.xmin = 40U;
+    second_snapshot.xmax = 200U;
+    second_snapshot.in_progress = {};
+
+    context.set_snapshot(second_snapshot);
+    spool.open(context);
+
+    std::vector<std::string> second_pass{};
+    while (spool.next(context, buffer)) {
+        auto view = TupleView::from_buffer(buffer);
+        REQUIRE(view.valid());
+        second_pass.emplace_back(column_text(view, 1U));
+        buffer.reset();
+    }
+
+    spool.close(context);
+
+    REQUIRE(second_pass.size() == 2U);
+    CHECK(second_pass.at(0U) == "visible");
+    CHECK(second_pass.at(1U) == "in_progress");
+}
+
+TEST_CASE("DeleteExecutor honours MVCC visibility when draining child results")
+{
+    StubStorageReader reader;
+    reader.add_heap_tuple(/*create_txn=*/42U, /*delete_txn=*/0U, "visible", /*page_id=*/6U, /*slot_id=*/1U);
+    reader.add_heap_tuple(/*create_txn=*/120U, /*delete_txn=*/0U, "hidden", /*page_id=*/6U, /*slot_id=*/2U);
+
+    SequentialScanExecutor::Config scan_config{};
+    scan_config.reader = &reader;
+    scan_config.relation_id = RelationId{16U};
+    scan_config.enable_heap_fallback = true;
+
+    auto scan_child = std::make_unique<SequentialScanExecutor>(scan_config);
+
+    CollectingDeleteTarget target;
+    DeleteExecutor::Config delete_config{};
+    delete_config.target = &target;
+
+    DeleteExecutor delete_executor{std::move(scan_child), delete_config};
+
+    Snapshot snapshot{};
+    snapshot.xmin = 40U;
+    snapshot.xmax = 100U;
+    snapshot.in_progress = {120U};
+
+    auto context = make_context(/*txn_id=*/88U, snapshot);
+
+    TupleBuffer buffer{};
+    delete_executor.open(context);
+
+    CHECK_FALSE(delete_executor.next(context, buffer));
+    delete_executor.close(context);
+
+    REQUIRE(target.processed_headers.size() == 1U);
+    CHECK(target.processed_headers.front().created_transaction_id == 42U);
+}
+
+TEST_CASE("UpdateExecutor honours MVCC visibility when draining child results")
+{
+    StubStorageReader reader;
+    reader.add_heap_tuple(/*create_txn=*/42U, /*delete_txn=*/0U, "visible", /*page_id=*/7U, /*slot_id=*/1U);
+    reader.add_heap_tuple(/*create_txn=*/120U, /*delete_txn=*/0U, "hidden", /*page_id=*/7U, /*slot_id=*/2U);
+
+    SequentialScanExecutor::Config scan_config{};
+    scan_config.reader = &reader;
+    scan_config.relation_id = RelationId{17U};
+    scan_config.enable_heap_fallback = true;
+
+    auto scan_child = std::make_unique<SequentialScanExecutor>(scan_config);
+
+    CollectingUpdateTarget target;
+    UpdateExecutor::Config update_config{};
+    update_config.target = &target;
+
+    UpdateExecutor update_executor{std::move(scan_child), update_config};
+
+    Snapshot snapshot{};
+    snapshot.xmin = 40U;
+    snapshot.xmax = 100U;
+    snapshot.in_progress = {120U};
+
+    auto context = make_context(/*txn_id=*/88U, snapshot);
+
+    TupleBuffer buffer{};
+    update_executor.open(context);
+
+    CHECK_FALSE(update_executor.next(context, buffer));
+    update_executor.close(context);
+
+    REQUIRE(target.processed_headers.size() == 1U);
+    CHECK(target.processed_headers.front().created_transaction_id == 42U);
+    REQUIRE(target.payloads.size() == 1U);
+    CHECK(target.payloads.front() == "visible");
 }
