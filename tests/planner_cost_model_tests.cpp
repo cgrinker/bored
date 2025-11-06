@@ -1,10 +1,13 @@
+#include "bored/catalog/catalog_ids.hpp"
 #include "bored/planner/cost_model.hpp"
 #include "bored/planner/logical_plan.hpp"
+#include "bored/planner/scalar_literal.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cstdint>
 
 using bored::planner::CostEstimate;
 using bored::planner::CostModel;
@@ -15,6 +18,10 @@ using bored::planner::LogicalProperties;
 using bored::planner::PlanCost;
 using bored::planner::StatisticsCatalog;
 using bored::planner::TableStatistics;
+using bored::planner::ColumnStatistics;
+using bored::planner::IndexBinding;
+using bored::planner::ScalarLiteralValue;
+using bored::catalog::IndexId;
 using Catch::Approx;
 
 namespace {
@@ -116,4 +123,65 @@ TEST_CASE("Cost model estimates join cost baselined on inputs")
     CHECK(estimate.output_rows == Approx(50.0));
     CHECK(estimate.cost.io == Approx(expected_scan_io + expected_join_io));
     CHECK(estimate.cost.cpu == Approx(expected_scan_cpu + expected_join_cpu));
+}
+
+TEST_CASE("Cost model favors index scan for selective equality predicates")
+{
+    StatisticsCatalog statistics;
+    TableStatistics accounts_stats;
+    accounts_stats.set_row_count(1000.0);
+
+    ColumnStatistics id_stats;
+    id_stats.column_name = "account_id";
+    id_stats.distinct_count = 1000.0;
+    accounts_stats.upsert_column(id_stats);
+
+    statistics.register_table("public.accounts", accounts_stats);
+
+    CostModel model{&statistics};
+
+    LogicalProperties properties{};
+    properties.relation_name = "public.accounts";
+    properties.available_indexes.push_back(IndexBinding{IndexId{1U}, "accounts_idx", {"account_id"}, true});
+    properties.equality_predicates.push_back({"account_id", ScalarLiteralValue{static_cast<std::int64_t>(42)}});
+
+    auto scan = LogicalOperator::make(LogicalOperatorType::TableScan, {}, properties);
+    const auto estimate = model.estimate_plan(scan);
+
+    const double sequential_total_cost = (1000.0 * 0.01) + (1000.0 * 0.001);
+    CHECK(estimate.output_rows == Approx(1.0));
+    CHECK(estimate.cost.total() < sequential_total_cost);
+    CHECK(estimate.recommended_batch_size == 1U);
+}
+
+TEST_CASE("Cost model retains sequential scan when predicate selectivity is low")
+{
+    StatisticsCatalog statistics;
+    TableStatistics accounts_stats;
+    accounts_stats.set_row_count(1000.0);
+
+    ColumnStatistics status_stats;
+    status_stats.column_name = "status";
+    status_stats.distinct_count = 2.0;  // Highly duplicated values.
+    accounts_stats.upsert_column(status_stats);
+
+    statistics.register_table("public.accounts", accounts_stats);
+
+    CostModel model{&statistics};
+
+    LogicalProperties properties{};
+    properties.relation_name = "public.accounts";
+    properties.available_indexes.push_back(IndexBinding{IndexId{2U}, "accounts_status_idx", {"status"}, false});
+    properties.equality_predicates.push_back({"status", ScalarLiteralValue{static_cast<std::int64_t>(1)}});
+
+    auto scan = LogicalOperator::make(LogicalOperatorType::TableScan, {}, properties);
+    const auto estimate = model.estimate_plan(scan);
+
+    const double expected_seq_io = 1000.0 * 0.01;
+    const double expected_seq_cpu = 1000.0 * 0.001;
+
+    CHECK(estimate.cost.io == Approx(expected_seq_io));
+    CHECK(estimate.cost.cpu == Approx(expected_seq_cpu));
+    CHECK(estimate.output_rows == Approx(500.0));
+    CHECK(estimate.recommended_batch_size == 125U);
 }

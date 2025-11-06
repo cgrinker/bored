@@ -4,7 +4,7 @@ This ticket-level report summarizes the relational engine roadmap, capturing wha
 
 _Last updated: 2025-11-05_
 
-Latest validation: `ctest --output-on-failure` (466/466) on 2025-11-05 covering recursive spool selection, multi-statement worktable reuse, and advanced index catalog metadata propagation; `build/bored_benchmarks --samples=10 --json` refreshed FSM refresh, retention pruning, overflow replay, and spool recovery baselines on 2025-11-05.
+Latest validation: `ctest --output-on-failure` (471/471) on 2025-11-05 covering greedy join reorder tracing, recursive spool selection, multi-statement worktable reuse, advanced index catalog metadata propagation, and the new index-costing regression suite; `build/bored_benchmarks --samples=10 --json` refreshed FSM refresh, retention pruning, overflow replay, and spool recovery baselines on 2025-11-05.
 
 ## Current Capabilities
 
@@ -67,19 +67,21 @@ Latest validation: `ctest --output-on-failure` (466/466) on 2025-11-05 covering 
    - Executor & Shell: ✅ Spool executor and bored_shell DML/SELECT pipelines honour recursive cursors, sharing worktable registries across statements with delta propagation covered by `tests/executor_spool_tests.cpp`, `tests/executor_integration_tests.cpp`, and `tests/shell_integration_tests.cpp`.
    - Validation: ✅ Documentation now highlights recursive spool explain output (`docs/spool_operator_guide.md`, `docs/storage.md`), and the full Catch2 suite (`ctest --output-on-failure`, 2025-11-05) passes post-integration.
 
-5. **Advanced Indexing & Optimization (In progress)**
+5. **Advanced Indexing & Optimization (Completed)**
    - [x] Catalog metadata, serialization, and accessor caches now persist index uniqueness flags, covering column lists, and partial predicate text; the DDL command builder maps parsed CREATE INDEX statements (unique flag, covering list, predicate, comparator, fanout) into stageable requests while DDL stage/planner hooks expose the new fields for upcoming planner/executor work.
    - [x] Parser grammar recognises CREATE INDEX with UNIQUE, INCLUDE, WITH (FANOUT/COMPARATOR), and WHERE clauses; bored_shell wiring and planner/executor rule updates must still cost index scans with the richer metadata before the shell surfaces covering/partial options.
-   - [x] bored_shell constraint enforcement parses persisted partial index predicates, evaluates them against row payloads, and skips uniqueness probes when the predicate does not apply, with regression coverage in `tests/shell_backend_tests.cpp` (including end-to-end INSERT scenarios).
-   - [ ] Enhance optimizer to choose index scans based on statistics and predicates; add cost model refinements. _Planner lowering now selects index scans when equality predicates align with catalog statistics; remaining work focuses on cost model refinements and broader predicate support._
-   - [ ] Expand join optimization (multi-join reordering, bushy plans) once statistics available.
-   - Remaining work: **40%** (2 of 5 scoped tasks open).
+     - [x] bored_shell constraint enforcement parses persisted partial index predicates, evaluates them against row payloads, and skips uniqueness probes when the predicate does not apply, with regression coverage in `tests/shell_backend_tests.cpp` (including end-to-end INSERT scenarios).
+     - [x] Enhance optimizer to choose index scans based on statistics and predicates; add cost model refinements. _Cost model now weighs sequential scans against index probes using catalog statistics so selective predicates surface index access paths; `tests/planner_cost_model_tests.cpp` now asserts the selective/non-selective split._
+     - [x] Expand join optimization (multi-join reordering, bushy plans) once statistics available. _Greedy join reorder rule now flattens inner-join trees, leverages catalog statistics when cardinalities are absent, and materialises bushy join alternatives so the memo can choose lower-cost plans for multi-way joins._ Validated via `tests/planner_rule_tests.cpp`, `tests/planner_scaffolding_tests.cpp`, and `ctest --output-on-failure` (471/471) on 2025-11-05.
+       - Remaining work: **0%** (0 of 5 scoped tasks open).
+   - Status note: Milestone 5 is closed as of 2025-11-05; focus shifts to Comprehensive Transactions & Isolation Levels.
    - Source files to update: src/parser/ddl_command_builder.cpp, src/parser/grammar.cpp, src/storage/index_btree_manager.cpp, src/storage/index_retention.cpp, src/planner/cost_model.cpp, src/planner/statistics_catalog.cpp, src/planner/rules/, src/planner/rule.cpp, tests/index_btree_manager_tests.cpp, tests/planner_cost_model_tests.cpp, tests/planner_rule_tests.cpp, tests/ddl_handlers_tests.cpp, tests/catalog_ddl_tests.cpp
 
 6. **Comprehensive Transactions & Isolation Levels (Planned)**
-   - Implement lock manager integration for key-range locking where needed for uniqueness.
-   - Add multi-version concurrency control (MVCC) visibility rules across executor operators.
-   - Provide configurable isolation levels and conflict resolution.
+   - **Kickoff focus (2025-11-05)**:
+     - [ ] Implement lock manager integration for key-range locking where needed for uniqueness.
+     - [ ] Add multi-version concurrency control (MVCC) visibility rules across executor operators.
+     - [ ] Provide configurable isolation levels and conflict resolution instrumentation.
    - Source files to update: src/storage/lock_manager.cpp, src/storage/lock_introspection.cpp, src/executor/mvcc_visibility.cpp, src/txn/transaction_manager.cpp, src/txn/wal_commit_pipeline.cpp, tests/lock_manager_tests.cpp, tests/transaction_manager_tests.cpp, tests/transaction_crash_recovery_integration_tests.cpp
 
 7. **Extended SQL Surface & Tooling (Planned)**

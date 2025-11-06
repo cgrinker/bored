@@ -22,6 +22,8 @@ using bored::planner::RuleContext;
 using bored::planner::RuleEngine;
 using bored::planner::RuleRegistry;
 using bored::planner::RuleTrace;
+using bored::planner::StatisticsCatalog;
+using bored::planner::TableStatistics;
 
 namespace {
 
@@ -59,14 +61,17 @@ LogicalOperatorPtr left_deep_join_of_three()
 {
     LogicalProperties props_a{};
     props_a.output_columns = {"a"};
+    props_a.estimated_cardinality = 100U;
     auto a = LogicalOperator::make(LogicalOperatorType::TableScan, {}, props_a);
 
     LogicalProperties props_b{};
     props_b.output_columns = {"b"};
+    props_b.estimated_cardinality = 50U;
     auto b = LogicalOperator::make(LogicalOperatorType::TableScan, {}, props_b);
 
     LogicalProperties props_c{};
     props_c.output_columns = {"c"};
+    props_c.estimated_cardinality = 10U;
     auto c = LogicalOperator::make(LogicalOperatorType::TableScan, {}, props_c);
 
     LogicalProperties props_ab{};
@@ -268,6 +273,179 @@ TEST_CASE("Join associativity rotates left-deep join")
     REQUIRE(trace.applications.size() == 1U);
     CHECK(trace.applications.front().rule_name == "JoinAssociativity");
     CHECK(trace.applications.front().success);
+}
+
+TEST_CASE("Join greedy reorder reorders joins by estimated cardinality")
+{
+    LogicalProperties large_props{};
+    large_props.output_columns = {"large"};
+    large_props.estimated_cardinality = 1000U;
+    auto large = LogicalOperator::make(LogicalOperatorType::TableScan, {}, large_props);
+
+    LogicalProperties medium_props{};
+    medium_props.output_columns = {"medium"};
+    medium_props.estimated_cardinality = 200U;
+    auto medium = LogicalOperator::make(LogicalOperatorType::TableScan, {}, medium_props);
+
+    LogicalProperties small_props{};
+    small_props.output_columns = {"small"};
+    small_props.estimated_cardinality = 15U;
+    auto small = LogicalOperator::make(LogicalOperatorType::TableScan, {}, small_props);
+
+    LogicalProperties join_left_props{};
+    join_left_props.output_columns = {"large", "medium"};
+    auto left = LogicalOperator::make(
+        LogicalOperatorType::Join,
+        std::vector<LogicalOperatorPtr>{large, medium},
+        join_left_props);
+
+    LogicalProperties join_root_props{};
+    join_root_props.output_columns = {"large", "medium", "small"};
+    auto root = LogicalOperator::make(
+        LogicalOperatorType::Join,
+        std::vector<LogicalOperatorPtr>{left, small},
+        join_root_props);
+
+    RuleRegistry registry;
+    registry.register_rule(bored::planner::make_join_greedy_reorder_rule());
+
+    PlannerContext planner_context{};
+    RuleContext rule_context{&planner_context};
+    RuleEngine engine{&registry};
+
+    std::vector<LogicalOperatorPtr> alternatives;
+    RuleTrace trace{};
+    auto applied = engine.apply_rules(rule_context, root, alternatives, &trace);
+
+    REQUIRE(applied);
+    REQUIRE(trace.applications.size() == 1U);
+    CHECK(trace.applications.front().rule_name == "JoinGreedyReorder");
+    CHECK(trace.applications.front().success);
+    REQUIRE(alternatives.size() == 1U);
+
+    auto reordered = alternatives.front();
+    REQUIRE(reordered);
+    REQUIRE(reordered->children().size() == 2U);
+    auto reordered_left = reordered->children()[0];
+    auto reordered_right = reordered->children()[1];
+    REQUIRE(reordered_left);
+    REQUIRE(reordered_right);
+
+    CHECK(reordered_right == large);
+    REQUIRE(reordered_left->type() == LogicalOperatorType::Join);
+    REQUIRE(reordered_left->children().size() == 2U);
+    CHECK(reordered_left->children()[0] == small);
+    CHECK(reordered_left->children()[1] == medium);
+}
+
+TEST_CASE("Join greedy reorder is no-op when inputs already sorted")
+{
+    LogicalProperties scan_a_props{};
+    scan_a_props.output_columns = {"a"};
+    scan_a_props.estimated_cardinality = 5U;
+    auto scan_a = LogicalOperator::make(LogicalOperatorType::TableScan, {}, scan_a_props);
+
+    LogicalProperties scan_b_props{};
+    scan_b_props.output_columns = {"b"};
+    scan_b_props.estimated_cardinality = 25U;
+    auto scan_b = LogicalOperator::make(LogicalOperatorType::TableScan, {}, scan_b_props);
+
+    LogicalProperties scan_c_props{};
+    scan_c_props.output_columns = {"c"};
+    scan_c_props.estimated_cardinality = 200U;
+    auto scan_c = LogicalOperator::make(LogicalOperatorType::TableScan, {}, scan_c_props);
+
+    LogicalProperties left_props{};
+    left_props.output_columns = {"a", "b"};
+    auto left = LogicalOperator::make(LogicalOperatorType::Join,
+                                      std::vector<LogicalOperatorPtr>{scan_a, scan_b},
+                                      left_props);
+
+    LogicalProperties root_props{};
+    root_props.output_columns = {"a", "b", "c"};
+    auto root = LogicalOperator::make(LogicalOperatorType::Join,
+                                      std::vector<LogicalOperatorPtr>{left, scan_c},
+                                      root_props);
+
+    RuleRegistry registry;
+    registry.register_rule(bored::planner::make_join_greedy_reorder_rule());
+
+    PlannerContext planner_context{};
+    RuleContext rule_context{&planner_context};
+    RuleEngine engine{&registry};
+
+    std::vector<LogicalOperatorPtr> alternatives;
+    RuleTrace trace{};
+    auto applied = engine.apply_rules(rule_context, root, alternatives, &trace);
+
+    CHECK_FALSE(applied);
+    CHECK(alternatives.empty());
+    REQUIRE(trace.applications.size() == 1U);
+    CHECK(trace.applications.front().rule_name == "JoinGreedyReorder");
+    CHECK_FALSE(trace.applications.front().success);
+}
+
+TEST_CASE("Join greedy reorder uses statistics when cardinals absent")
+{
+    StatisticsCatalog statistics;
+
+    TableStatistics stats_large;
+    stats_large.set_row_count(1000.0);
+    statistics.register_table("public.large", stats_large);
+
+    TableStatistics stats_medium;
+    stats_medium.set_row_count(250.0);
+    statistics.register_table("public.medium", stats_medium);
+
+    TableStatistics stats_small;
+    stats_small.set_row_count(12.0);
+    statistics.register_table("public.small", stats_small);
+
+    LogicalProperties large_props{};
+    large_props.relation_name = "public.large";
+    large_props.output_columns = {"large"};
+    auto large = LogicalOperator::make(LogicalOperatorType::TableScan, {}, large_props);
+
+    LogicalProperties medium_props{};
+    medium_props.relation_name = "public.medium";
+    medium_props.output_columns = {"medium"};
+    auto medium = LogicalOperator::make(LogicalOperatorType::TableScan, {}, medium_props);
+
+    LogicalProperties small_props{};
+    small_props.relation_name = "public.small";
+    small_props.output_columns = {"small"};
+    auto small = LogicalOperator::make(LogicalOperatorType::TableScan, {}, small_props);
+
+    LogicalProperties left_props{};
+    left_props.output_columns = {"large", "medium"};
+    auto left = LogicalOperator::make(LogicalOperatorType::Join,
+                                      std::vector<LogicalOperatorPtr>{large, medium},
+                                      left_props);
+
+    LogicalProperties root_props{};
+    root_props.output_columns = {"large", "medium", "small"};
+    auto root = LogicalOperator::make(LogicalOperatorType::Join,
+                                      std::vector<LogicalOperatorPtr>{left, small},
+                                      root_props);
+
+    RuleRegistry registry;
+    registry.register_rule(bored::planner::make_join_greedy_reorder_rule());
+
+    PlannerContextConfig config{};
+    config.statistics = &statistics;
+    PlannerContext planner_context{config};
+    RuleContext rule_context{&planner_context};
+    RuleEngine engine{&registry};
+
+    std::vector<LogicalOperatorPtr> alternatives;
+    RuleTrace trace{};
+    auto applied = engine.apply_rules(rule_context, root, alternatives, &trace);
+
+    REQUIRE(applied);
+    REQUIRE_FALSE(alternatives.empty());
+    auto reordered = alternatives.front();
+    REQUIRE(reordered->children().size() == 2U);
+    CHECK(reordered->children()[1] == large);
 }
 
 TEST_CASE("Memo reuses groups for equivalent expressions")

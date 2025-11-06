@@ -584,6 +584,7 @@ const RuleRegistry& default_rule_registry()
         reg.register_rule(make_constant_folding_rule());
         reg.register_rule(make_join_commutativity_rule());
         reg.register_rule(make_join_associativity_rule());
+        reg.register_rule(make_join_greedy_reorder_rule());
         return reg;
     }();
     return registry;
