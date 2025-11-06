@@ -34,6 +34,7 @@ enum class DdlVerb : std::uint8_t {
     AlterTable,
     CreateIndex,
     DropIndex,
+    CreateView,
     Count
 };
 
@@ -149,6 +150,13 @@ struct DropIndexRequest final {
     bool if_exists = false;
 };
 
+struct CreateViewRequest final {
+    catalog::SchemaId schema_id{};
+    std::string name{};
+    std::string definition{};
+    bool if_not_exists = false;
+};
+
 using DdlCommand = std::variant<CreateDatabaseRequest,
                                 DropDatabaseRequest,
                                 CreateSchemaRequest,
@@ -157,12 +165,14 @@ using DdlCommand = std::variant<CreateDatabaseRequest,
                                 DropTableRequest,
                                 AlterTableRequest,
                                 CreateIndexRequest,
-                                DropIndexRequest>;
+                                DropIndexRequest,
+                                CreateViewRequest>;
 
 using DdlCommandResult = std::variant<std::monostate,
                                       catalog::CreateSchemaResult,
                                       catalog::CreateTableResult,
-                                      catalog::CreateIndexResult>;
+                                      catalog::CreateIndexResult,
+                                      catalog::CreateViewResult>;
 
 enum class DdlDiagnosticSeverity : std::uint8_t {
     Info = 0,
@@ -239,6 +249,11 @@ struct RequestTrait<CreateIndexRequest> {
 template <>
 struct RequestTrait<DropIndexRequest> {
     static constexpr DdlVerb verb = DdlVerb::DropIndex;
+};
+
+template <>
+struct RequestTrait<CreateViewRequest> {
+    static constexpr DdlVerb verb = DdlVerb::CreateView;
 };
 
 }  // namespace detail

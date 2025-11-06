@@ -57,6 +57,12 @@ struct CatalogIndexView final {
     std::string_view predicate{};
 };
 
+struct CatalogViewView final {
+    CatalogTupleDescriptor tuple{};
+    RelationId relation_id{};
+    std::string_view definition{};
+};
+
 struct CatalogConstraintView final {
     CatalogTupleDescriptor tuple{};
     ConstraintId constraint_id{};
@@ -93,6 +99,7 @@ struct CatalogSequenceView final {
                                                    std::string_view comparator,
                                                    std::string_view covering_columns,
                                                    std::string_view predicate) noexcept;
+[[nodiscard]] std::size_t catalog_view_tuple_size(std::string_view definition) noexcept;
 [[nodiscard]] std::size_t catalog_constraint_tuple_size(std::string_view name,
                                                        std::string_view key_columns,
                                                        std::string_view referenced_columns) noexcept;
@@ -103,6 +110,7 @@ struct CatalogSequenceView final {
 [[nodiscard]] std::vector<std::byte> serialize_catalog_table(const CatalogTableDescriptor& descriptor);
 [[nodiscard]] std::vector<std::byte> serialize_catalog_column(const CatalogColumnDescriptor& descriptor);
 [[nodiscard]] std::vector<std::byte> serialize_catalog_index(const CatalogIndexDescriptor& descriptor);
+[[nodiscard]] std::vector<std::byte> serialize_catalog_view(const CatalogViewDescriptor& descriptor);
 [[nodiscard]] std::vector<std::byte> serialize_catalog_constraint(const CatalogConstraintDescriptor& descriptor);
 [[nodiscard]] std::vector<std::byte> serialize_catalog_sequence(const CatalogSequenceDescriptor& descriptor);
 
@@ -111,6 +119,7 @@ struct CatalogSequenceView final {
 [[nodiscard]] std::optional<CatalogTableView> decode_catalog_table(std::span<const std::byte> tuple);
 [[nodiscard]] std::optional<CatalogColumnView> decode_catalog_column(std::span<const std::byte> tuple);
 [[nodiscard]] std::optional<CatalogIndexView> decode_catalog_index(std::span<const std::byte> tuple);
+[[nodiscard]] std::optional<CatalogViewView> decode_catalog_view(std::span<const std::byte> tuple);
 [[nodiscard]] std::optional<CatalogConstraintView> decode_catalog_constraint(std::span<const std::byte> tuple);
 [[nodiscard]] std::optional<CatalogSequenceView> decode_catalog_sequence(std::span<const std::byte> tuple);
 

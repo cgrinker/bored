@@ -17,7 +17,8 @@ struct CatalogTupleDescriptor final {
 
 enum class CatalogTableType : std::uint16_t {
     Heap = 0,
-    Catalog = 1
+    Catalog = 1,
+    View = 2
 };
 
 enum class CatalogIndexType : std::uint16_t {
@@ -98,6 +99,27 @@ struct CatalogTableDescriptor final {
         , table_type{type}
         , root_page_id{root_page}
         , name{name_view}
+    {}
+};
+
+struct CatalogViewDescriptor final {
+    CatalogTupleDescriptor tuple{};
+    RelationId relation_id{};
+    SchemaId schema_id{};
+    std::string_view name{};
+    std::string_view definition{};
+
+    constexpr CatalogViewDescriptor() = default;
+    constexpr CatalogViewDescriptor(const CatalogTupleDescriptor& tuple_descriptor,
+                                    RelationId relation,
+                                    SchemaId schema,
+                                    std::string_view name_view,
+                                    std::string_view definition_view) noexcept
+        : tuple{tuple_descriptor}
+        , relation_id{relation}
+        , schema_id{schema}
+        , name{name_view}
+        , definition{definition_view}
     {}
 };
 

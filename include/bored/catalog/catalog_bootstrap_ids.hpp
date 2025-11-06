@@ -16,6 +16,7 @@ inline constexpr RelationId kCatalogColumnsRelationId{259U};
 inline constexpr RelationId kCatalogIndexesRelationId{260U};
 inline constexpr RelationId kCatalogConstraintsRelationId{261U};
 inline constexpr RelationId kCatalogSequencesRelationId{262U};
+inline constexpr RelationId kCatalogViewsRelationId{263U};
 
 inline constexpr ColumnId kCatalogDatabasesIdColumnId{4096U};
 inline constexpr ColumnId kCatalogDatabasesNameColumnId{4097U};
@@ -63,6 +64,8 @@ inline constexpr ColumnId kCatalogSequencesCacheSizeColumnId{4134U};
 inline constexpr ColumnId kCatalogSequencesCycleFlagColumnId{4135U};
 inline constexpr ColumnId kCatalogSequencesNameColumnId{4136U};
 inline constexpr ColumnId kCatalogSequencesNextValueColumnId{4137U};
+inline constexpr ColumnId kCatalogViewsIdColumnId{4138U};
+inline constexpr ColumnId kCatalogViewsDefinitionColumnId{4139U};
 
 inline constexpr IndexId kCatalogDatabasesNameIndexId{8192U};
 inline constexpr IndexId kCatalogSchemasNameIndexId{8193U};
@@ -79,6 +82,7 @@ inline constexpr std::uint32_t kCatalogColumnsPageId = 4U;
 inline constexpr std::uint32_t kCatalogIndexesPageId = 5U;
 inline constexpr std::uint32_t kCatalogConstraintsPageId = 6U;
 inline constexpr std::uint32_t kCatalogSequencesPageId = 7U;
+inline constexpr std::uint32_t kCatalogViewsPageId = 8U;
 
 inline constexpr std::uint64_t kCatalogBootstrapTxnId = 1U;
 

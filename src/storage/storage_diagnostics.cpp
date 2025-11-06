@@ -11,7 +11,7 @@ namespace ddl = bored::ddl;
 
 constexpr std::array<const char*, static_cast<std::size_t>(ddl::DdlVerb::Count)> kDdlVerbNames = {
     "create_database", "drop_database", "create_schema", "drop_schema", "create_table",
-    "drop_table",     "alter_table",   "create_index",  "drop_index"};
+    "drop_table",     "alter_table",   "create_index",  "drop_index",  "create_view"};
 
 void append_field(std::string& out, const char* name, std::uint64_t value, bool& first)
 {

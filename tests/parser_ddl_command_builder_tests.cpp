@@ -231,6 +231,24 @@ TEST_CASE("build_ddl_commands translates CREATE INDEX from script")
     CHECK(request.max_fanout == 512);
 }
 
+TEST_CASE("build_ddl_commands translates CREATE VIEW")
+{
+    auto config = make_config();
+    const auto script = parse_ddl_script("CREATE VIEW IF NOT EXISTS recent_metrics AS SELECT * FROM metrics;");
+
+    const auto result = build_ddl_commands(script, config);
+
+    REQUIRE(result.diagnostics.empty());
+    REQUIRE(result.commands.size() == 1U);
+    const auto& command = result.commands.front();
+    REQUIRE(std::holds_alternative<bored::ddl::CreateViewRequest>(command));
+    const auto& request = std::get<bored::ddl::CreateViewRequest>(command);
+    CHECK(request.schema_id == *config.default_schema_id);
+    CHECK(request.name == "recent_metrics");
+    CHECK(request.if_not_exists);
+    CHECK(request.definition == "SELECT * FROM metrics");
+}
+
 TEST_CASE("build_ddl_commands maps DROP SCHEMA cascade flag")
 {
     auto config = make_config();

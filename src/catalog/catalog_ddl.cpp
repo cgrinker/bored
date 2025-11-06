@@ -192,4 +192,53 @@ std::error_code stage_create_index(CatalogMutator& mutator,
     return {};
 }
 
+std::error_code stage_create_view(CatalogMutator& mutator,
+                                  CatalogIdentifierAllocator& allocator,
+                                  const CreateViewRequest& request,
+                                  CreateViewResult& result)
+{
+    if (!request.schema_id.is_valid() || !is_valid_name(request.name)) {
+        return invalid_argument();
+    }
+
+    if (request.definition.empty()) {
+        return invalid_argument();
+    }
+
+    if (request.definition.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return std::make_error_code(std::errc::value_too_large);
+    }
+
+    RelationId relation_id = request.relation_id ? *request.relation_id : allocator.allocate_table_id();
+    if (!relation_id.is_valid()) {
+        return invalid_argument();
+    }
+
+    CatalogTupleDescriptor table_tuple = CatalogTupleBuilder::for_insert(mutator.transaction());
+
+    CatalogTableDescriptor table_descriptor{};
+    table_descriptor.tuple = table_tuple;
+    table_descriptor.relation_id = relation_id;
+    table_descriptor.schema_id = request.schema_id;
+    table_descriptor.table_type = CatalogTableType::View;
+    table_descriptor.root_page_id = 0U;
+    table_descriptor.name = request.name;
+
+    auto table_payload = serialize_catalog_table(table_descriptor);
+    mutator.stage_insert(kCatalogTablesRelationId, relation_id.value, table_tuple, std::move(table_payload));
+
+    CatalogTupleDescriptor view_tuple = CatalogTupleBuilder::for_insert(mutator.transaction());
+
+    CatalogViewDescriptor view_descriptor{};
+    view_descriptor.tuple = view_tuple;
+    view_descriptor.relation_id = relation_id;
+    view_descriptor.definition = request.definition;
+
+    auto view_payload = serialize_catalog_view(view_descriptor);
+    mutator.stage_insert(kCatalogViewsRelationId, relation_id.value, view_tuple, std::move(view_payload));
+
+    result.relation_id = relation_id;
+    return {};
+}
+
 }  // namespace bored::catalog

@@ -75,6 +75,17 @@ struct CreateIndexResult final {
     std::string predicate{};
 };
 
+struct CreateViewRequest final {
+    SchemaId schema_id{};
+    std::string name{};
+    std::string definition{};
+    std::optional<RelationId> relation_id{};
+};
+
+struct CreateViewResult final {
+    RelationId relation_id{};
+};
+
 std::error_code stage_create_schema(CatalogMutator& mutator,
                                     CatalogIdentifierAllocator& allocator,
                                     const CreateSchemaRequest& request,
@@ -89,5 +100,10 @@ std::error_code stage_create_index(CatalogMutator& mutator,
                                    CatalogIdentifierAllocator& allocator,
                                    const CreateIndexRequest& request,
                                    CreateIndexResult& result);
+
+std::error_code stage_create_view(CatalogMutator& mutator,
+                                  CatalogIdentifierAllocator& allocator,
+                                  const CreateViewRequest& request,
+                                  CreateViewResult& result);
 
 }  // namespace bored::catalog

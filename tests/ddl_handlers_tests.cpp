@@ -46,6 +46,7 @@ using catalog::CatalogMutationBatch;
 using catalog::CatalogSchemaDescriptor;
 using catalog::CatalogTableDescriptor;
 using catalog::CatalogTupleDescriptor;
+using catalog::CatalogViewDescriptor;
 
 struct StubIdentifierAllocator final : catalog::CatalogIdentifierAllocator {
     catalog::SchemaId allocate_schema_id() override
@@ -228,6 +229,16 @@ std::vector<std::byte> make_index_payload(catalog::IndexId index_id,
     return catalog::serialize_catalog_index(descriptor);
 }
 
+std::vector<std::byte> make_view_payload(catalog::RelationId relation_id,
+                                         std::string_view definition)
+{
+    catalog::CatalogViewDescriptor descriptor{};
+    descriptor.tuple = make_seed_descriptor();
+    descriptor.relation_id = relation_id;
+    descriptor.definition = definition;
+    return catalog::serialize_catalog_view(descriptor);
+}
+
 CatalogSchemaDescriptor decode_schema(const std::vector<std::byte>& payload)
 {
     auto view = catalog::decode_catalog_schema(std::span<const std::byte>(payload.data(), payload.size()));
@@ -341,6 +352,11 @@ struct DispatcherHarness final {
                       make_index_payload(index_id, relation_id, name, root_page_id, max_fanout, comparator));
     }
 
+    void seed_view(catalog::RelationId relation_id, std::string_view definition)
+    {
+        storage_.seed(catalog::kCatalogViewsRelationId, relation_id.value, make_view_payload(relation_id, definition));
+    }
+
     [[nodiscard]] const InMemoryCatalogStorage::Relation& schemas() const
     {
         return storage_.relation(catalog::kCatalogSchemasRelationId);
@@ -359,6 +375,11 @@ struct DispatcherHarness final {
     [[nodiscard]] const InMemoryCatalogStorage::Relation& indexes() const
     {
         return storage_.relation(catalog::kCatalogIndexesRelationId);
+    }
+
+    [[nodiscard]] const InMemoryCatalogStorage::Relation& views() const
+    {
+        return storage_.relation(catalog::kCatalogViewsRelationId);
     }
 
     [[nodiscard]] std::vector<CatalogTableDescriptor> list_tables() const
@@ -387,6 +408,31 @@ struct DispatcherHarness final {
         for (const auto& [_, payload] : indexes()) {
             (void)_;
             result.push_back(decode_index(payload));
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::vector<catalog::CatalogViewDescriptor> list_views() const
+    {
+        std::vector<catalog::CatalogViewDescriptor> result;
+        const auto& table_relation = storage_.relation(catalog::kCatalogTablesRelationId);
+        for (const auto& [row_id, payload] : views()) {
+            auto view_payload = std::span<const std::byte>(payload.data(), payload.size());
+            auto view = catalog::decode_catalog_view(view_payload);
+            REQUIRE(view);
+
+            catalog::CatalogViewDescriptor descriptor{};
+            descriptor.tuple = view->tuple;
+            descriptor.relation_id = view->relation_id;
+            descriptor.definition = view->definition;
+
+            if (auto table_it = table_relation.find(row_id); table_it != table_relation.end()) {
+                auto table_descriptor = decode_table(table_it->second);
+                descriptor.schema_id = table_descriptor.schema_id;
+                descriptor.name = table_descriptor.name;
+            }
+
+            result.push_back(std::move(descriptor));
         }
         return result;
     }
@@ -539,6 +585,36 @@ TEST_CASE("DDL handlers register dirty catalog pages")
         CHECK(std::binary_search(pages.begin(), pages.end(), catalog::kCatalogColumnsPageId));
         CHECK(std::binary_search(pages.begin(), pages.end(), catalog::kCatalogTablesPageId));
     }
+
+    SECTION("Create view marks tables and views pages dirty")
+    {
+        catalog::CatalogCheckpointRegistry registry;
+        DispatcherHarness harness({}, &registry);
+        harness.seed_database("system");
+        const auto schema_id = catalog::SchemaId{43U};
+        harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+
+        CreateViewRequest request{};
+        request.schema_id = schema_id;
+        request.name = "recent_metrics";
+        request.definition = "select id from metrics";
+
+        DdlCommand command = request;
+        REQUIRE(harness.dispatch(command).success);
+
+        std::vector<storage::WalCheckpointDirtyPageEntry> entries;
+        registry.snapshot_into(entries);
+        REQUIRE(entries.size() == 2U);
+
+        std::vector<std::uint32_t> pages;
+        pages.reserve(entries.size());
+        for (const auto& entry : entries) {
+            pages.push_back(entry.page_id);
+        }
+        std::sort(pages.begin(), pages.end());
+        CHECK(std::binary_search(pages.begin(), pages.end(), catalog::kCatalogTablesPageId));
+        CHECK(std::binary_search(pages.begin(), pages.end(), catalog::kCatalogViewsPageId));
+    }
 }
 
 TEST_CASE("Create schema respects IF NOT EXISTS")
@@ -598,6 +674,84 @@ TEST_CASE("Create table handler stages table and columns")
     }
     CHECK(std::find(column_names.begin(), column_names.end(), "id") != column_names.end());
     CHECK(std::find(column_names.begin(), column_names.end(), "name") != column_names.end());
+}
+
+TEST_CASE("Create view handler stages table and definition")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{3U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+
+    CreateViewRequest request{};
+    request.schema_id = schema_id;
+    request.name = "recent_metrics";
+    request.definition = "select id from metrics";
+
+    DdlCommand command = request;
+    const auto response = harness.dispatch(command);
+
+    REQUIRE(response.success);
+
+    const auto tables = harness.list_tables();
+    REQUIRE(tables.size() == 1U);
+    const auto& table_descriptor = tables.front();
+    CHECK(table_descriptor.schema_id == schema_id);
+    CHECK(table_descriptor.name == request.name);
+    CHECK(table_descriptor.table_type == catalog::CatalogTableType::View);
+    CHECK(table_descriptor.root_page_id == 0U);
+
+    const auto views = harness.list_views();
+    REQUIRE(views.size() == 1U);
+    const auto& view_descriptor = views.front();
+    CHECK(view_descriptor.relation_id == table_descriptor.relation_id);
+    CHECK(view_descriptor.definition == request.definition);
+}
+
+TEST_CASE("Create view respects IF NOT EXISTS")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{4U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+
+    CreateViewRequest request{};
+    request.schema_id = schema_id;
+    request.name = "recent_metrics";
+    request.definition = "select id from metrics";
+
+    DdlCommand create = request;
+    REQUIRE(harness.dispatch(create).success);
+
+    request.if_not_exists = true;
+    DdlCommand duplicate = request;
+    const auto response = harness.dispatch(duplicate);
+
+    CHECK(response.success);
+    CHECK(harness.list_views().size() == 1U);
+}
+
+TEST_CASE("Create view fails when relation exists")
+{
+    DispatcherHarness harness;
+    harness.seed_database("system");
+    const catalog::SchemaId schema_id{5U};
+    harness.seed_schema(schema_id, catalog::kSystemDatabaseId, "analytics");
+
+    CreateViewRequest request{};
+    request.schema_id = schema_id;
+    request.name = "recent_metrics";
+    request.definition = "select id from metrics";
+
+    DdlCommand command = request;
+    REQUIRE(harness.dispatch(command).success);
+
+    request.if_not_exists = false;
+    DdlCommand duplicate = request;
+    const auto response = harness.dispatch(duplicate);
+
+    CHECK_FALSE(response.success);
+    CHECK(response.error == make_error_code(DdlErrc::TableAlreadyExists));
 }
 
 TEST_CASE("Drop schema fails when tables exist")

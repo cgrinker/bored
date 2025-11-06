@@ -87,10 +87,14 @@ Latest validation: `ctest --output-on-failure` (471/471) on 2025-11-05 covering 
       3. [x] Provide configurable isolation levels and conflict resolution instrumentation (surfaced user contract and diagnostics once locking + MVCC are in place). _TransactionManager now tracks isolation-level distribution and conflict kinds, bored_shell exposes BEGIN isolation directives plus defaults, and storage/diagnostics surfaces expose the new telemetry with regression coverage in `tests/transaction_manager_tests.cpp` and `tests/storage_diagnostics_tests.cpp`._
    - Source files touched: src/storage/lock_manager.cpp, src/storage/key_range_lock_manager.cpp, src/txn/transaction_manager.cpp, src/shell/shell_backend.cpp, include/bored/txn/transaction_types.hpp, tests/transaction_manager_tests.cpp, tests/storage_diagnostics_tests.cpp, tests/shell_backend_tests.cpp
 
-7. **Extended SQL Surface & Tooling (Planned)**
-   - Broaden parser/executor to cover CTEs, window functions, analytic aggregates, and advanced DDL (constraints, sequences, views).
-   - Enhance shell tooling and diagnostics to expose new capabilities, sequence states, constraint violations, and query plans.
-   - Source files to update: src/parser/grammar.cpp, src/parser/relational_binder.cpp, src/parser/relational_logical_normalization.cpp, src/executor/aggregation_executor.cpp, src/executor/projection_executor.cpp, src/shell/shell_engine.cpp, src/shell/shell_backend.cpp, tests/parser_select_tests.cpp, tests/executor_aggregation_tests.cpp, tests/shell_integration_tests.cpp
+7. **Extended SQL Surface & Tooling (In Progress)**
+   - [x] Catalog now persists view definitions via `CatalogTableType::View`, seeds bootstrap IDs (`catalog_bootstrap_ids.hpp`), and serialises/decodes view tuples (`catalog_encoding.cpp`) so recovery and diagnostics can round-trip CREATE VIEW metadata.
+   - [x] Parser `ddl_command_builder` translates CREATE VIEW statements into trimmed payloads, and Catch2 coverage in `tests/parser_ddl_command_builder_tests.cpp` asserts definition handling (trims trailing semicolons/whitespace) plus IF NOT EXISTS wiring.
+   - [x] DDL dispatcher stages view creation through `stage_create_view`, registers dirty catalog pages, and exposes telemetry via `storage_diagnostics.cpp`; dispatcher harness tests (`tests/ddl_handlers_tests.cpp`) now exercise staging, IF NOT EXISTS semantics, failure paths, and checkpoint dirty-page tracking.
+   - [ ] Extend catalog accessor/introspection layers to list views alongside tables so planner/binder and shell introspection can discover stored definitions.
+   - [ ] Add bored_shell `CREATE VIEW` execution path and metadata commands (e.g., `\rv`) to surface definitions; document workflow in `docs/shell_frontend_integration.md` once available.
+   - [ ] Implement DROP VIEW parsing/dispatch plus recovery validation, and broaden parser/executor roadmap to cover window functions, analytic aggregates, and advanced DDL (constraints, sequences, view dependencies).
+   - Source files to update next: src/catalog/catalog_accessor.cpp, include/bored/catalog/catalog_accessor.hpp, src/catalog/catalog_introspection.cpp, src/shell/shell_backend.cpp, src/shell/shell_engine.cpp, src/parser/grammar.cpp, src/parser/relational_binder.cpp, tests/catalog_accessor_tests.cpp, tests/shell_integration_tests.cpp, docs/storage_shell_recipes.md
 
 8. **Readiness Validation (Planned)**
    - Develop regression suites covering constraint enforcement, sequence allocation, CTE behavior, transaction isolation, and index-aware query plans.

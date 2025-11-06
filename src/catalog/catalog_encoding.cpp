@@ -67,6 +67,13 @@ struct CatalogIndexPrefix final {
 
 struct CatalogConstraintPrefix final {
     CatalogTupleDescriptor tuple{};
+struct CatalogViewPrefix final {
+    CatalogTupleDescriptor tuple{};
+    std::uint64_t relation_id = 0U;
+    std::uint32_t definition_length = 0U;
+    std::uint32_t padding = 0U;
+};
+
     std::uint64_t constraint_id = 0U;
     std::uint64_t relation_id = 0U;
     std::uint64_t backing_index_id = 0U;
@@ -102,6 +109,7 @@ static_assert(sizeof(CatalogSchemaPrefix) == 48U, "CatalogSchemaPrefix expected 
 static_assert(sizeof(CatalogTablePrefix) == 56U, "CatalogTablePrefix expected to be 56 bytes");
 static_assert(sizeof(CatalogColumnPrefix) == 56U, "CatalogColumnPrefix expected to be 56 bytes");
 static_assert(sizeof(CatalogIndexPrefix) == 64U, "CatalogIndexPrefix expected to be 64 bytes");
+static_assert(sizeof(CatalogViewPrefix) == 40U, "CatalogViewPrefix expected to be 40 bytes");
 static_assert(sizeof(CatalogConstraintPrefix) == 72U, "CatalogConstraintPrefix expected to be 72 bytes");
 static_assert(sizeof(CatalogSequencePrefix) == 112U, "CatalogSequencePrefix expected to be 112 bytes");
 
@@ -151,6 +159,11 @@ std::size_t catalog_index_tuple_size(std::string_view name,
                   predicate.size());
 }
 
+std::size_t catalog_view_tuple_size(std::string_view definition) noexcept
+{
+    return align8(sizeof(CatalogViewPrefix) + definition.size());
+}
+
 std::size_t catalog_constraint_tuple_size(std::string_view name,
                                           std::string_view key_columns,
                                           std::string_view referenced_columns) noexcept
@@ -169,6 +182,26 @@ std::vector<std::byte> serialize_catalog_database(const CatalogDatabaseDescripto
     auto* prefix = reinterpret_cast<CatalogDatabasePrefix*>(buffer.data());
     prefix->tuple = descriptor.tuple;
     prefix->database_id = descriptor.database_id.value;
+std::optional<CatalogViewView> decode_catalog_view(std::span<const std::byte> tuple)
+{
+    if (tuple.size() < sizeof(CatalogViewPrefix)) {
+        return std::nullopt;
+    }
+    const auto* prefix = reinterpret_cast<const CatalogViewPrefix*>(tuple.data());
+    const auto prefix_size = sizeof(CatalogViewPrefix);
+    if (tuple.size() < prefix_size + prefix->definition_length) {
+        return std::nullopt;
+    }
+    CatalogViewView view{};
+    view.tuple = prefix->tuple;
+    view.relation_id = RelationId{prefix->relation_id};
+    if (prefix->definition_length > 0U) {
+        const auto* base = reinterpret_cast<const char*>(tuple.data() + prefix_size);
+        view.definition = {base, prefix->definition_length};
+    }
+    return view;
+}
+
     prefix->default_schema_id = descriptor.default_schema_id.value;
     prefix->name_length = static_cast<std::uint16_t>(descriptor.name.size());
     return buffer;
@@ -252,6 +285,16 @@ std::vector<std::byte> serialize_catalog_index(const CatalogIndexDescriptor& des
     if (predicate_length > 0U) {
         std::memcpy(buffer.data() + offset, descriptor.predicate.data(), descriptor.predicate.size());
     }
+    return buffer;
+}
+
+std::vector<std::byte> serialize_catalog_view(const CatalogViewDescriptor& descriptor)
+{
+    auto buffer = serialize_prefixed_tuple(sizeof(CatalogViewPrefix), descriptor.definition);
+    auto* prefix = reinterpret_cast<CatalogViewPrefix*>(buffer.data());
+    prefix->tuple = descriptor.tuple;
+    prefix->relation_id = descriptor.relation_id.value;
+    prefix->definition_length = static_cast<std::uint32_t>(descriptor.definition.size());
     return buffer;
 }
 

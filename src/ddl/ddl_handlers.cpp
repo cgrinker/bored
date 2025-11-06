@@ -646,6 +646,54 @@ DdlCommandResponse handle_create_table(DdlCommandContext& context, const CreateT
     return make_success(std::move(payload));
 }
 
+DdlCommandResponse handle_create_view(DdlCommandContext& context, const CreateViewRequest& request)
+{
+    if (context.mutator == nullptr) {
+        return make_context_failure("ddl create view missing catalog mutator");
+    }
+    if (context.accessor == nullptr) {
+        return make_context_failure("ddl create view missing catalog accessor");
+    }
+
+    if (!request.schema_id.is_valid()) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "target schema id is invalid");
+    }
+
+    if (auto ec = validate_identifier(request.name); ec) {
+        return make_failure(ec, "view name is invalid");
+    }
+
+    if (request.definition.empty()) {
+        return make_failure(make_error_code(DdlErrc::ValidationFailed), "view definition must not be empty");
+    }
+
+    auto schema = context.accessor->schema(request.schema_id);
+    if (!schema) {
+        return make_failure(make_error_code(DdlErrc::SchemaNotFound), "schema not found");
+    }
+
+    auto existing = find_table(*context.accessor, request.schema_id, request.name);
+    if (existing) {
+        if (request.if_not_exists) {
+            return make_success();
+        }
+        return make_failure(make_error_code(DdlErrc::TableAlreadyExists), "relation already exists");
+    }
+
+    catalog::CreateViewRequest stage_request{};
+    stage_request.schema_id = request.schema_id;
+    stage_request.name = request.name;
+    stage_request.definition = request.definition;
+
+    catalog::CreateViewResult stage_result{};
+    if (auto ec = catalog::stage_create_view(*context.mutator, context.allocator, stage_request, stage_result); ec) {
+        return make_failure(map_stage_error(ec), ec.message());
+    }
+
+    DdlCommandResult payload{std::in_place_type<catalog::CreateViewResult>, stage_result};
+    return make_success(std::move(payload));
+}
+
 DdlCommandResponse handle_drop_table(DdlCommandContext& context, const DropTableRequest& request)
 {
     if (context.mutator == nullptr) {
@@ -953,6 +1001,7 @@ void register_catalog_handlers(DdlCommandDispatcher& dispatcher)
     dispatcher.register_handler<AlterTableRequest>(handle_alter_table);
     dispatcher.register_handler<CreateIndexRequest>(handle_create_index);
     dispatcher.register_handler<DropIndexRequest>(handle_drop_index);
+    dispatcher.register_handler<CreateViewRequest>(handle_create_view);
 }
 
 }  // namespace bored::ddl

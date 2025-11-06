@@ -459,6 +459,71 @@ TranslationOutcome translate_create_index(const CreateIndexStatement& ast,
     return outcome;
 }
 
+TranslationOutcome translate_create_view(const CreateViewStatement& ast,
+                                         const ScriptStatement& statement,
+                                         const DdlCommandBuilderConfig& config)
+{
+    TranslationOutcome outcome{};
+
+    const auto database_id = resolve_database_id(config, {}, statement, outcome.diagnostics);
+    if (!database_id) {
+        return outcome;
+    }
+
+    const auto schema_id = resolve_schema_id(config, ast.schema.value, *database_id, statement, outcome.diagnostics);
+    if (!schema_id) {
+        return outcome;
+    }
+
+    if (ast.name.value.empty()) {
+        outcome.diagnostics.push_back(make_diagnostic(ParserSeverity::Error,
+                                                      "CREATE VIEW requires a view name.",
+                                                      statement,
+                                                      {"Provide an identifier after CREATE VIEW."}));
+    }
+
+    std::string definition = ast.definition;
+    auto trim_left = [](std::string& text) {
+        auto it = std::find_if_not(text.begin(), text.end(), [](unsigned char ch) { return std::isspace(ch); });
+        text.erase(text.begin(), it);
+    };
+    auto trim_right = [](std::string& text) {
+        auto it = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char ch) { return std::isspace(ch); });
+        text.erase(it.base(), text.end());
+    };
+
+    trim_left(definition);
+    trim_right(definition);
+    if (!definition.empty() && definition.back() == ';') {
+        definition.pop_back();
+        trim_right(definition);
+    }
+
+    bool has_content = std::any_of(definition.begin(), definition.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    });
+
+    if (!has_content) {
+        outcome.diagnostics.push_back(make_diagnostic(ParserSeverity::Error,
+                                                      "CREATE VIEW definition must not be empty.",
+                                                      statement,
+                                                      {"Provide a SELECT query after AS."}));
+    }
+
+    if (has_error(outcome.diagnostics)) {
+        return outcome;
+    }
+
+    ddl::CreateViewRequest request{};
+    request.schema_id = *schema_id;
+    request.name = ast.name.value;
+    request.definition = std::move(definition);
+    request.if_not_exists = ast.if_not_exists;
+
+    outcome.commands.emplace_back(std::move(request));
+    return outcome;
+}
+
 TranslationOutcome translate_statement(const ScriptStatement& statement, const DdlCommandBuilderConfig& config)
 {
     TranslationOutcome outcome{};
@@ -508,11 +573,7 @@ TranslationOutcome translate_statement(const ScriptStatement& statement, const D
     }
 
     if (std::holds_alternative<CreateViewStatement>(statement.ast)) {
-        outcome.diagnostics.push_back(make_diagnostic(ParserSeverity::Error,
-                                                      "CREATE VIEW translation is not yet supported.",
-                                                      statement,
-                                                      {"Execute the statement via the legacy DDL path or implement view support."}));
-        return outcome;
+        return translate_create_view(std::get<CreateViewStatement>(statement.ast), statement, config);
     }
 
     outcome.diagnostics.push_back(make_diagnostic(ParserSeverity::Error,
