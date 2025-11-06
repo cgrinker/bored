@@ -5,6 +5,7 @@
 
 #include <span>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 namespace bored::executor {
@@ -76,6 +77,21 @@ bool UniqueEnforceExecutor::next(ExecutorContext& context, TupleBuffer& buffer)
             auto [_, inserted] = seen_keys_.insert(key_buffer_);
             if (!inserted) {
                 throw std::runtime_error{violation_message()};
+            }
+
+            if (config_.lock_key_range) {
+                auto ec = config_.lock_key_range(config_.index_id,
+                                                 std::span<const std::byte>(key_buffer_.data(), key_buffer_.size()),
+                                                 context);
+                if (ec) {
+                    std::string message{"Failed to acquire key-range lock"};
+                    if (!config_.constraint_name.empty()) {
+                        message += " for unique constraint '";
+                        message += config_.constraint_name;
+                        message += "'";
+                    }
+                    throw std::system_error{ec, message};
+                }
             }
 
             if (config_.reader != nullptr && config_.index_id.is_valid()) {

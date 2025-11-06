@@ -78,10 +78,10 @@ Latest validation: `ctest --output-on-failure` (471/471) on 2025-11-05 covering 
    - Source files to update: src/parser/ddl_command_builder.cpp, src/parser/grammar.cpp, src/storage/index_btree_manager.cpp, src/storage/index_retention.cpp, src/planner/cost_model.cpp, src/planner/statistics_catalog.cpp, src/planner/rules/, src/planner/rule.cpp, tests/index_btree_manager_tests.cpp, tests/planner_cost_model_tests.cpp, tests/planner_rule_tests.cpp, tests/ddl_handlers_tests.cpp, tests/catalog_ddl_tests.cpp
 
 6. **Comprehensive Transactions & Isolation Levels (Planned)**
-   - **Kickoff focus (2025-11-05)**:
-     - [ ] Implement lock manager integration for key-range locking where needed for uniqueness.
-     - [ ] Add multi-version concurrency control (MVCC) visibility rules across executor operators.
-     - [ ] Provide configurable isolation levels and conflict resolution instrumentation.
+    - **Kickoff focus (2025-11-05)** — execute sequentially to reach PostgreSQL/MySQL parity:
+   1. [x] Implement lock manager integration for key-range locking where needed for uniqueness (establishes next-key primitives for constraint enforcement and SERIALIZABLE plans). _Shell now wires a `KeyRangeLockManager` into unique enforcement so tuples acquire next-key locks; coverage via `ctest -R "KeyRangeLockManager|UniqueEnforceExecutor"`._
+       2. [ ] Add multi-version concurrency control (MVCC) visibility rules across executor operators (delivers snapshot isolation semantics across scans, joins, and DML).
+       3. [ ] Provide configurable isolation levels and conflict resolution instrumentation (surfaced user contract and diagnostics once locking + MVCC are in place).
    - Source files to update: src/storage/lock_manager.cpp, src/storage/lock_introspection.cpp, src/executor/mvcc_visibility.cpp, src/txn/transaction_manager.cpp, src/txn/wal_commit_pipeline.cpp, tests/lock_manager_tests.cpp, tests/transaction_manager_tests.cpp, tests/transaction_crash_recovery_integration_tests.cpp
 
 7. **Extended SQL Surface & Tooling (Planned)**

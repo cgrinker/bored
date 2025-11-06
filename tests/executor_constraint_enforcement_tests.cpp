@@ -8,6 +8,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_exception.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <algorithm>
 #include <array>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <system_error>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -396,6 +398,37 @@ TEST_CASE("UniqueEnforceExecutor ignores non-visible matches")
     REQUIRE(executor.next(context, buffer));
     buffer.reset();
     CHECK_FALSE(executor.next(context, buffer));
+    executor.close(context);
+}
+
+TEST_CASE("UniqueEnforceExecutor reports key lock conflicts")
+{
+    std::vector<RowData> rows{{ColumnData{encode_int64(7), false}}};
+    auto child = std::make_unique<ValuesExecutor>(rows);
+
+    UniqueEnforceExecutor::Config config{};
+    config.index_id = IndexId{55U};
+    config.constraint_name = "users_pkey";
+    config.key_extractor = make_single_column_key_extractor(0U);
+    config.lock_key_range = [](IndexId,
+                               std::span<const std::byte>,
+                               ExecutorContext&) -> std::error_code {
+        return std::make_error_code(std::errc::resource_unavailable_try_again);
+    };
+
+    UniqueEnforceExecutor executor{std::move(child), config};
+
+    auto context = make_context(4000U);
+    TupleBuffer buffer{};
+
+    executor.open(context);
+    try {
+        (void)executor.next(context, buffer);
+        FAIL("Expected system_error due to lock conflict");
+    } catch (const std::system_error& error) {
+        CHECK_THAT(std::string{error.what()},
+                   Catch::Matchers::ContainsSubstring("Failed to acquire key-range lock"));
+    }
     executor.close(context);
 }
 

@@ -2336,6 +2336,7 @@ bored::executor::ExecutorNodePtr ShellBackend::apply_constraint_enforcers(
     bored::executor::ExecutorNodePtr child,
     const ConstraintEnforcementPlan& plan,
     ShellStorageReader* reader,
+    storage::KeyRangeLockManager* key_lock_manager,
     TableData* table,
     bored::executor::ExecutorTelemetry& telemetry,
     std::size_t payload_column,
@@ -2383,6 +2384,17 @@ bored::executor::ExecutorNodePtr ShellBackend::apply_constraint_enforcers(
             unique.column_indexes,
             payload_column,
             unique.predicate);
+        if (key_lock_manager != nullptr && unique.index_id.is_valid()) {
+            config.lock_key_range = [key_lock_manager](catalog::IndexId idx,
+                                                       std::span<const std::byte> key,
+                                                       bored::executor::ExecutorContext& ctx) -> std::error_code {
+                auto* txn = ctx.transaction_context();
+                if (txn == nullptr) {
+                    return {};
+                }
+                return key_lock_manager->acquire(idx, key, txn);
+            };
+        }
         if (row_id_column.has_value()) {
             config.ignore_match = make_row_id_ignore_predicate(*row_id_column);
         }
@@ -3754,13 +3766,14 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
 
     if (constraint_reader &&
         (!constraint_plan.foreign_key_constraints.empty() || !constraint_plan.unique_constraints.empty())) {
-    pipeline = apply_constraint_enforcers(std::move(pipeline),
-                          constraint_plan,
-                          constraint_reader.get(),
-                          table,
-                          insert_telemetry,
-                          0U,
-                          std::nullopt);
+        pipeline = apply_constraint_enforcers(std::move(pipeline),
+                                              constraint_plan,
+                                              constraint_reader.get(),
+                                              &key_range_lock_manager_,
+                                              table,
+                                              insert_telemetry,
+                                              0U,
+                                              std::nullopt);
     }
 
     bored::executor::InsertExecutor::Config insert_config{};
@@ -4203,6 +4216,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
         update_input = apply_constraint_enforcers(std::move(update_input),
                                                   constraint_plan,
                                                   constraint_reader.get(),
+                                                  &key_range_lock_manager_,
                                                   table,
                                                   update_telemetry,
                                                   1U,

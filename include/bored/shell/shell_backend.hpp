@@ -12,6 +12,7 @@
 #include "bored/executor/unique_enforce_executor.hpp"
 #include "bored/ddl/ddl_command.hpp"
 #include "bored/storage/async_io.hpp"
+#include "bored/storage/key_range_lock_manager.hpp"
 #include "bored/storage/storage_telemetry_registry.hpp"
 #include "bored/storage/wal_retention.hpp"
 #include "bored/storage/wal_telemetry_registry.hpp"
@@ -251,6 +252,7 @@ private:
         bored::executor::ExecutorNodePtr child,
         const ConstraintEnforcementPlan& plan,
         ShellStorageReader* reader,
+        storage::KeyRangeLockManager* key_lock_manager,
         TableData* table,
         bored::executor::ExecutorTelemetry& telemetry,
         std::size_t payload_column,
@@ -311,6 +313,7 @@ private:
     std::unordered_map<RelationKey, TableData> table_cache_{};
     std::unordered_map<std::string, RelationKey> table_lookup_{};
     std::optional<SessionTransaction> session_transaction_{};
+    storage::KeyRangeLockManager key_range_lock_manager_{};
 };
 
 }  // namespace bored::shell

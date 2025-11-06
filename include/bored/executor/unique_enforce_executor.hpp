@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <span>
+#include <system_error>
 #include <unordered_set>
 #include <vector>
 
@@ -20,6 +22,9 @@ class UniqueEnforceExecutor final : public ExecutorNode {
 public:
     using KeyExtractor = std::function<bool(const TupleView&, ExecutorContext&, std::vector<std::byte>&, bool&)>;
     using IgnoreMatchPredicate = std::function<bool(const TupleView&, const storage::TableTuple&, ExecutorContext&)>;
+    using KeyLockCallback = std::function<std::error_code(catalog::IndexId,
+                                                         std::span<const std::byte>,
+                                                         ExecutorContext&)>;
 
     struct Config final {
         storage::StorageReader* reader = nullptr;
@@ -31,6 +36,7 @@ public:
         bool allow_null_keys = true;
         KeyExtractor key_extractor{};
         IgnoreMatchPredicate ignore_match{};
+        KeyLockCallback lock_key_range{};
         ExecutorTelemetry* telemetry = nullptr;
         std::string telemetry_identifier{};
     };

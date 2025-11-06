@@ -39,6 +39,7 @@ add_library(${PROJECT_NAME}_lib
     src/storage/wal_payloads.cpp
     src/storage/page_manager.cpp
     src/storage/lock_manager.cpp
+    src/storage/key_range_lock_manager.cpp
     src/storage/free_space_map_persistence.cpp
     src/storage/index_btree_manager.cpp
     src/storage/index_btree_leaf_ops.cpp
@@ -241,6 +242,7 @@ if(BORED_ENABLE_TESTS)
     tests/checkpoint_coordinator_tests.cpp
         tests/checkpoint_scheduler_tests.cpp
         tests/lock_manager_tests.cpp
+    tests/key_range_lock_manager_tests.cpp
         tests/lock_introspection_tests.cpp
         tests/storage_telemetry_tests.cpp
         tests/storage_diagnostics_tests.cpp
