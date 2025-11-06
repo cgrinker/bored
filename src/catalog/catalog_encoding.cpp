@@ -65,8 +65,6 @@ struct CatalogIndexPrefix final {
     std::uint32_t flags = 0U;
 };
 
-struct CatalogConstraintPrefix final {
-    CatalogTupleDescriptor tuple{};
 struct CatalogViewPrefix final {
     CatalogTupleDescriptor tuple{};
     std::uint64_t relation_id = 0U;
@@ -74,6 +72,8 @@ struct CatalogViewPrefix final {
     std::uint32_t padding = 0U;
 };
 
+struct CatalogConstraintPrefix final {
+    CatalogTupleDescriptor tuple{};
     std::uint64_t constraint_id = 0U;
     std::uint64_t relation_id = 0U;
     std::uint64_t backing_index_id = 0U;
@@ -182,26 +182,6 @@ std::vector<std::byte> serialize_catalog_database(const CatalogDatabaseDescripto
     auto* prefix = reinterpret_cast<CatalogDatabasePrefix*>(buffer.data());
     prefix->tuple = descriptor.tuple;
     prefix->database_id = descriptor.database_id.value;
-std::optional<CatalogViewView> decode_catalog_view(std::span<const std::byte> tuple)
-{
-    if (tuple.size() < sizeof(CatalogViewPrefix)) {
-        return std::nullopt;
-    }
-    const auto* prefix = reinterpret_cast<const CatalogViewPrefix*>(tuple.data());
-    const auto prefix_size = sizeof(CatalogViewPrefix);
-    if (tuple.size() < prefix_size + prefix->definition_length) {
-        return std::nullopt;
-    }
-    CatalogViewView view{};
-    view.tuple = prefix->tuple;
-    view.relation_id = RelationId{prefix->relation_id};
-    if (prefix->definition_length > 0U) {
-        const auto* base = reinterpret_cast<const char*>(tuple.data() + prefix_size);
-        view.definition = {base, prefix->definition_length};
-    }
-    return view;
-}
-
     prefix->default_schema_id = descriptor.default_schema_id.value;
     prefix->name_length = static_cast<std::uint16_t>(descriptor.name.size());
     return buffer;
@@ -409,6 +389,26 @@ std::optional<CatalogTableView> decode_catalog_table(std::span<const std::byte> 
     view.table_type = static_cast<CatalogTableType>(prefix->table_type);
     view.root_page_id = prefix->root_page_id;
     view.name = read_name(*prefix, tuple);
+    return view;
+}
+
+std::optional<CatalogViewView> decode_catalog_view(std::span<const std::byte> tuple)
+{
+    if (tuple.size() < sizeof(CatalogViewPrefix)) {
+        return std::nullopt;
+    }
+    const auto* prefix = reinterpret_cast<const CatalogViewPrefix*>(tuple.data());
+    const auto prefix_size = sizeof(CatalogViewPrefix);
+    if (tuple.size() < prefix_size + prefix->definition_length) {
+        return std::nullopt;
+    }
+    CatalogViewView view{};
+    view.tuple = prefix->tuple;
+    view.relation_id = RelationId{prefix->relation_id};
+    if (prefix->definition_length > 0U) {
+        const auto* base = reinterpret_cast<const char*>(tuple.data() + prefix_size);
+        view.definition = {base, prefix->definition_length};
+    }
     return view;
 }
 

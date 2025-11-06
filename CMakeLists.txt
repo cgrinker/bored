@@ -223,6 +223,7 @@ if(BORED_ENABLE_TESTS)
         tests/catalog_mvcc_tests.cpp
         tests/catalog_sequence_allocator_tests.cpp
     tests/catalog_constraint_accessor_tests.cpp
+        tests/catalog_view_accessor_tests.cpp
         tests/catalog_integration_tests.cpp
     tests/transaction_abort_integration_tests.cpp
         tests/transaction_crash_recovery_integration_tests.cpp

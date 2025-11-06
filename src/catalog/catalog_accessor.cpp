@@ -136,6 +136,44 @@ std::vector<CatalogTableDescriptor> CatalogAccessor::tables(SchemaId schema_id) 
     return result;
 }
 
+std::optional<CatalogViewDescriptor> CatalogAccessor::view(RelationId id) const
+{
+    ensure_views_loaded();
+    auto it = view_index_.find(id.value);
+    if (it == view_index_.end()) {
+        return std::nullopt;
+    }
+    const auto& entry = views_[it->second];
+    return CatalogViewDescriptor{entry.tuple, entry.relation_id, entry.schema_id, entry.name, entry.definition};
+}
+
+std::vector<CatalogViewDescriptor> CatalogAccessor::views() const
+{
+    ensure_views_loaded();
+    std::vector<CatalogViewDescriptor> result;
+    result.reserve(views_.size());
+    for (const auto& entry : views_) {
+        result.emplace_back(entry.tuple, entry.relation_id, entry.schema_id, entry.name, entry.definition);
+    }
+    return result;
+}
+
+std::vector<CatalogViewDescriptor> CatalogAccessor::views(SchemaId schema_id) const
+{
+    ensure_views_loaded();
+    std::vector<CatalogViewDescriptor> result;
+    auto it = views_by_schema_.find(schema_id.value);
+    if (it == views_by_schema_.end()) {
+        return result;
+    }
+    result.reserve(it->second.size());
+    for (auto index : it->second) {
+        const auto& entry = views_[index];
+        result.emplace_back(entry.tuple, entry.relation_id, entry.schema_id, entry.name, entry.definition);
+    }
+    return result;
+}
+
 std::vector<CatalogColumnDescriptor> CatalogAccessor::columns(RelationId relation_id) const
 {
     ensure_columns_loaded();
@@ -416,6 +454,7 @@ void CatalogAccessor::reset_cached_state() const
     databases_loaded_ = false;
     schemas_loaded_ = false;
     tables_loaded_ = false;
+    views_loaded_ = false;
     columns_loaded_ = false;
     indexes_loaded_ = false;
     constraints_loaded_ = false;
@@ -553,6 +592,7 @@ void CatalogAccessor::ensure_tables_loaded() const
 
     tables_loaded_ = true;
     tables_epoch_ = current_epoch;
+    views_loaded_ = false;
     indexes_loaded_ = false;
 }
 
@@ -661,6 +701,64 @@ void CatalogAccessor::ensure_indexes_loaded() const
 
     indexes_loaded_ = true;
     indexes_epoch_ = current_epoch;
+}
+
+void CatalogAccessor::ensure_views_loaded() const
+{
+    ensure_snapshot_current();
+
+    auto& cache = CatalogCache::instance();
+    const auto current_epoch = cache.epoch(kCatalogViewsRelationId);
+    if (views_loaded_ && views_epoch_ == current_epoch) {
+        return;
+    }
+
+    ensure_tables_loaded();
+
+    views_.clear();
+    view_index_.clear();
+    views_by_schema_.clear();
+
+    auto relation = cache.materialize(kCatalogViewsRelationId, scanner_);
+    if (relation) {
+        for (const auto& tuple : relation->tuples) {
+            auto tuple_span = std::span<const std::byte>(tuple.payload.data(), tuple.payload.size());
+            auto view = decode_catalog_view(tuple_span);
+            if (!view) {
+                continue;
+            }
+            if (!transaction_->is_visible(view->tuple)) {
+                continue;
+            }
+
+            auto table_it = table_index_.find(view->relation_id.value);
+            if (table_it == table_index_.end()) {
+                continue;
+            }
+            const auto& table_entry = tables_[table_it->second];
+            if (table_entry.table_type != CatalogTableType::View) {
+                continue;
+            }
+
+            ViewEntry entry{};
+            entry.tuple = view->tuple;
+            entry.relation_id = view->relation_id;
+            entry.schema_id = table_entry.schema_id;
+            entry.name = table_entry.name;
+            entry.definition = make_string(view->definition);
+
+            const auto index = views_.size();
+            views_.push_back(std::move(entry));
+            auto& inserted = views_.back();
+            view_index_[inserted.relation_id.value] = index;
+            if (inserted.schema_id.is_valid()) {
+                views_by_schema_[inserted.schema_id.value].push_back(index);
+            }
+        }
+    }
+
+    views_loaded_ = true;
+    views_epoch_ = current_epoch;
 }
 
 void CatalogAccessor::ensure_constraints_loaded() const

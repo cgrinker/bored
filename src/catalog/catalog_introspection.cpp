@@ -130,8 +130,18 @@ CatalogIntrospectionSnapshot collect_catalog_introspection(const CatalogAccessor
             summary.database_name = "<unknown>";
         }
 
-        summary.relation_kind = (table.table_type == CatalogTableType::Catalog) ? CatalogRelationKind::SystemTable
-                                                                               : CatalogRelationKind::Table;
+        switch (table.table_type) {
+        case CatalogTableType::Catalog:
+            summary.relation_kind = CatalogRelationKind::SystemTable;
+            break;
+        case CatalogTableType::View:
+            summary.relation_kind = CatalogRelationKind::View;
+            break;
+        case CatalogTableType::Heap:
+        default:
+            summary.relation_kind = CatalogRelationKind::Table;
+            break;
+        }
 
         relation_lookup.emplace(table.relation_id.value,
                                 RelationMetadata{summary.schema_name, summary.relation_name});
@@ -147,6 +157,35 @@ CatalogIntrospectionSnapshot collect_catalog_introspection(const CatalogAccessor
             return lhs.schema_name < rhs.schema_name;
         }
         return lhs.relation_name < rhs.relation_name;
+    });
+
+    const auto views = accessor.views();
+    snapshot.views.reserve(views.size());
+    for (const auto& view : views) {
+        CatalogViewSummary summary{};
+        summary.view_name.assign(view.name.begin(), view.name.end());
+        summary.definition.assign(view.definition.begin(), view.definition.end());
+
+        const auto schema_it = schema_metadata.find(view.schema_id.value);
+        if (schema_it != schema_metadata.end()) {
+            summary.schema_name = schema_it->second.schema_name;
+            summary.database_name = schema_it->second.database_name;
+        } else {
+            summary.schema_name = "<unknown>";
+            summary.database_name = "<unknown>";
+        }
+
+        snapshot.views.push_back(std::move(summary));
+    }
+
+    std::sort(snapshot.views.begin(), snapshot.views.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.database_name != rhs.database_name) {
+            return lhs.database_name < rhs.database_name;
+        }
+        if (lhs.schema_name != rhs.schema_name) {
+            return lhs.schema_name < rhs.schema_name;
+        }
+        return lhs.view_name < rhs.view_name;
     });
 
     for (const auto& table : tables) {
@@ -282,6 +321,34 @@ std::string catalog_introspection_to_json(const CatalogIntrospectionSnapshot& sn
         append_string_field("comparator", index.comparator);
         append_uint_field("max_fanout", index.max_fanout);
         append_uint_field("root_page_id", index.root_page_id);
+        json.push_back('}');
+    }
+    json.push_back(']');
+
+    append_field_name("views", first_field);
+    json.push_back('[');
+    for (std::size_t i = 0U; i < snapshot.views.size(); ++i) {
+        if (i > 0U) {
+            json.push_back(',');
+        }
+        const auto& view = snapshot.views[i];
+        json.push_back('{');
+        bool first = true;
+        auto append_string_field = [&](const char* name, const std::string& value) {
+            if (!first) {
+                json.push_back(',');
+            }
+            first = false;
+            json.push_back('"');
+            json.append(name);
+            json.append("\":");
+            append_json_string(json, value);
+        };
+
+        append_string_field("database", view.database_name);
+        append_string_field("schema", view.schema_name);
+        append_string_field("name", view.view_name);
+        append_string_field("definition", view.definition);
         json.push_back('}');
     }
     json.push_back(']');

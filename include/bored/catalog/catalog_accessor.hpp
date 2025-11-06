@@ -40,6 +40,10 @@ public:
     [[nodiscard]] std::vector<CatalogTableDescriptor> tables() const;
     [[nodiscard]] std::vector<CatalogTableDescriptor> tables(SchemaId schema_id) const;
 
+    [[nodiscard]] std::optional<CatalogViewDescriptor> view(RelationId id) const;
+    [[nodiscard]] std::vector<CatalogViewDescriptor> views() const;
+    [[nodiscard]] std::vector<CatalogViewDescriptor> views(SchemaId schema_id) const;
+
     [[nodiscard]] std::vector<CatalogColumnDescriptor> columns(RelationId relation_id) const;
     [[nodiscard]] std::optional<CatalogIndexDescriptor> index(IndexId id) const;
     [[nodiscard]] std::vector<CatalogIndexDescriptor> indexes(RelationId relation_id) const;
@@ -81,6 +85,14 @@ private:
         CatalogTableType table_type = CatalogTableType::Catalog;
         std::uint32_t root_page_id = 0U;
         std::string name{};
+    };
+
+    struct ViewEntry final {
+        CatalogTupleDescriptor tuple{};
+        RelationId relation_id{};
+        SchemaId schema_id{};
+        std::string name{};
+        std::string definition{};
     };
 
     struct ColumnEntry final {
@@ -152,6 +164,11 @@ private:
     mutable std::unordered_map<std::uint64_t, std::size_t> table_index_{};
     mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> tables_by_schema_{};
 
+    mutable bool views_loaded_ = false;
+    mutable std::vector<ViewEntry> views_{};
+    mutable std::unordered_map<std::uint64_t, std::size_t> view_index_{};
+    mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> views_by_schema_{};
+
     mutable bool columns_loaded_ = false;
     mutable std::vector<ColumnEntry> columns_{};
     mutable std::unordered_map<std::uint64_t, std::vector<std::size_t>> columns_by_relation_{};
@@ -175,6 +192,7 @@ private:
     mutable std::uint64_t databases_epoch_ = 0U;
     mutable std::uint64_t schemas_epoch_ = 0U;
     mutable std::uint64_t tables_epoch_ = 0U;
+    mutable std::uint64_t views_epoch_ = 0U;
     mutable std::uint64_t columns_epoch_ = 0U;
     mutable std::uint64_t indexes_epoch_ = 0U;
     mutable std::uint64_t constraints_epoch_ = 0U;
@@ -186,6 +204,7 @@ private:
     void ensure_databases_loaded() const;
     void ensure_schemas_loaded() const;
     void ensure_tables_loaded() const;
+    void ensure_views_loaded() const;
     void ensure_columns_loaded() const;
     void ensure_indexes_loaded() const;
     void ensure_constraints_loaded() const;

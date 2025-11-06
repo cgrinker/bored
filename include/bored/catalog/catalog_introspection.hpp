@@ -38,10 +38,18 @@ struct CatalogIndexSummary final {
     std::uint32_t root_page_id = 0U;
 };
 
+struct CatalogViewSummary final {
+    std::string database_name;
+    std::string schema_name;
+    std::string view_name;
+    std::string definition;
+};
+
 struct CatalogIntrospectionSnapshot final {
     std::uint32_t schema_version = kCatalogIntrospectionSchemaVersion;
     std::vector<CatalogRelationSummary> relations;
     std::vector<CatalogIndexSummary> indexes;
+    std::vector<CatalogViewSummary> views;
 };
 
 CatalogIntrospectionSnapshot collect_catalog_introspection(const CatalogAccessor& accessor);

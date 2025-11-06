@@ -27,11 +27,19 @@ TEST_CASE("Catalog introspection JSON encodes relations and indexes")
     index.root_page_id = 456U;
     snapshot.indexes.push_back(index);
 
+    CatalogViewSummary view{};
+    view.database_name = "system";
+    view.schema_name = "public";
+    view.view_name = "metrics_view";
+    view.definition = "SELECT * FROM metrics";
+    snapshot.views.push_back(view);
+
     const auto json = catalog_introspection_to_json(snapshot);
     using Catch::Matchers::ContainsSubstring;
     CHECK_THAT(json, ContainsSubstring("\"relations\""));
     CHECK_THAT(json, ContainsSubstring("metrics"));
     CHECK_THAT(json, ContainsSubstring("\"indexes\""));
+    CHECK_THAT(json, ContainsSubstring("\"views\""));
 }
 
 TEST_CASE("Catalog introspection global sampler yields snapshot")
