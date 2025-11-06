@@ -1,4 +1,5 @@
 #include "bored/executor/executor_context.hpp"
+#include "bored/executor/nested_loop_join_executor.hpp"
 #include "bored/executor/seq_scan_executor.hpp"
 #include "bored/executor/tuple_format.hpp"
 #include "bored/storage/storage_reader.hpp"
@@ -19,6 +20,7 @@
 
 using bored::catalog::RelationId;
 using bored::executor::ExecutorContext;
+using bored::executor::NestedLoopJoinExecutor;
 using bored::executor::SequentialScanExecutor;
 using bored::executor::TupleBuffer;
 using bored::executor::TupleView;
@@ -211,4 +213,61 @@ TEST_CASE("SequentialScanExecutor sees self-inserts regardless of snapshot")
 
     REQUIRE(values.size() == 1U);
     CHECK(values.front() == "self");
+}
+
+TEST_CASE("NestedLoopJoinExecutor respects MVCC visibility from child scans")
+{
+    StubStorageReader outer_reader;
+    outer_reader.add_heap_tuple(/*create_txn=*/42U, /*delete_txn=*/0U, "joined", /*page_id=*/3U, /*slot_id=*/1U);
+    outer_reader.add_heap_tuple(/*create_txn=*/120U, /*delete_txn=*/0U, "joined", /*page_id=*/3U, /*slot_id=*/2U);
+
+    StubStorageReader inner_reader;
+    inner_reader.add_heap_tuple(/*create_txn=*/55U, /*delete_txn=*/0U, "joined", /*page_id=*/4U, /*slot_id=*/1U);
+    inner_reader.add_heap_tuple(/*create_txn=*/220U, /*delete_txn=*/0U, "joined", /*page_id=*/4U, /*slot_id=*/2U);
+
+    SequentialScanExecutor::Config outer_config{};
+    outer_config.reader = &outer_reader;
+    outer_config.relation_id = RelationId{11U};
+    outer_config.enable_heap_fallback = true;
+
+    SequentialScanExecutor::Config inner_config{};
+    inner_config.reader = &inner_reader;
+    inner_config.relation_id = RelationId{12U};
+    inner_config.enable_heap_fallback = true;
+
+    auto outer_scan = std::make_unique<SequentialScanExecutor>(outer_config);
+    auto inner_scan = std::make_unique<SequentialScanExecutor>(inner_config);
+
+    NestedLoopJoinExecutor::Config join_config{};
+    join_config.predicate = [](const TupleView& outer_view, const TupleView& inner_view, ExecutorContext&) {
+        return column_text(outer_view, 1U) == column_text(inner_view, 1U);
+    };
+
+    NestedLoopJoinExecutor join_executor{std::move(outer_scan), std::move(inner_scan), std::move(join_config)};
+
+    Snapshot snapshot{};
+    snapshot.xmin = 30U;
+    snapshot.xmax = 130U;
+    snapshot.in_progress = {120U};
+
+    auto context = make_context(/*txn_id=*/77U, snapshot);
+
+    TupleBuffer buffer{};
+    join_executor.open(context);
+
+    std::vector<std::pair<std::string, std::string>> results;
+    while (join_executor.next(context, buffer)) {
+        auto view = TupleView::from_buffer(buffer);
+        REQUIRE(view.valid());
+        const auto outer_payload = std::string{column_text(view, 1U)};
+        const auto inner_payload = std::string{column_text(view, 3U)};
+        results.emplace_back(outer_payload, inner_payload);
+        buffer.reset();
+    }
+
+    join_executor.close(context);
+
+    REQUIRE(results.size() == 1U);
+    CHECK(results.front().first == "joined");
+    CHECK(results.front().second == "joined");
 }
