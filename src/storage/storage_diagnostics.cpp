@@ -415,6 +415,11 @@ void append_transaction_snapshot(std::string& out, const bored::txn::Transaction
     append_field(out, "last_snapshot_xmin", snapshot.last_snapshot_xmin, first);
     append_field(out, "last_snapshot_xmax", snapshot.last_snapshot_xmax, first);
     append_field(out, "last_snapshot_age", snapshot.last_snapshot_age, first);
+    append_field(out, "snapshot_isolation_active", snapshot.snapshot_isolation_active, first);
+    append_field(out, "read_committed_active", snapshot.read_committed_active, first);
+    append_field(out, "lock_conflicts", snapshot.lock_conflicts, first);
+    append_field(out, "snapshot_conflicts", snapshot.snapshot_conflicts, first);
+    append_field(out, "serialization_failures", snapshot.serialization_failures, first);
     out.push_back('}');
 }
 

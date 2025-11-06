@@ -2610,6 +2610,24 @@ std::string ShellBackend::uppercase(std::string_view text)
     return uppercase_copy(text);
 }
 
+txn::TransactionOptions ShellBackend::make_default_transaction_options() const
+{
+    txn::TransactionOptions options{};
+    options.isolation_level = config_.default_isolation_level;
+    return options;
+}
+
+std::string_view ShellBackend::isolation_level_to_string(txn::IsolationLevel level) noexcept
+{
+    switch (level) {
+    case txn::IsolationLevel::ReadCommitted:
+        return "read committed";
+    case txn::IsolationLevel::Snapshot:
+    default:
+        return "snapshot";
+    }
+}
+
 ShellBackend::ShellBackend()
     : ShellBackend(Config{})
 {
@@ -2771,7 +2789,7 @@ ShellEngine::Config ShellBackend::make_config()
 
 catalog::CatalogIntrospectionSnapshot ShellBackend::collect_catalog_snapshot()
 {
-    txn::TransactionOptions txn_options{};
+    auto txn_options = make_default_transaction_options();
     ShellTransactionGuard txn_guard{txn_manager_, txn_options};
     auto& txn_context = txn_guard.context();
 
@@ -3442,7 +3460,7 @@ CommandMetrics ShellBackend::execute_dml(const std::string& sql)
     }
 
     if (starts_with_ci(normalized, kBeginKeyword)) {
-        return execute_begin();
+        return execute_begin(normalized);
     }
     if (starts_with_ci(normalized, kCommitKeyword)) {
         return execute_commit();
@@ -3469,14 +3487,83 @@ CommandMetrics ShellBackend::execute_dml(const std::string& sql)
                               {"Supported commands: INSERT, UPDATE, DELETE, SELECT."});
 }
 
-CommandMetrics ShellBackend::execute_begin()
+CommandMetrics ShellBackend::execute_begin(std::string_view command)
 {
     if (has_active_transaction()) {
         return make_transaction_error("Transaction already active.",
                                       {"Use COMMIT or ROLLBACK before issuing BEGIN."});
     }
 
-    txn::TransactionOptions txn_options{};
+    auto txn_options = make_default_transaction_options();
+
+    auto trim_token = [](std::string_view token) noexcept {
+        while (!token.empty() && std::isspace(static_cast<unsigned char>(token.front())) != 0) {
+            token.remove_prefix(1U);
+        }
+        while (!token.empty()
+               && (std::isspace(static_cast<unsigned char>(token.back())) != 0 || token.back() == ';')) {
+            token.remove_suffix(1U);
+        }
+        return token;
+    };
+
+    std::vector<std::string_view> tokens;
+    std::string_view remaining = command;
+    while (!remaining.empty()) {
+        while (!remaining.empty() && std::isspace(static_cast<unsigned char>(remaining.front())) != 0) {
+            remaining.remove_prefix(1U);
+        }
+        if (remaining.empty()) {
+            break;
+        }
+        std::size_t length = 0U;
+        while (length < remaining.size() && std::isspace(static_cast<unsigned char>(remaining[length])) == 0) {
+            ++length;
+        }
+        tokens.push_back(remaining.substr(0U, length));
+        remaining.remove_prefix(length);
+    }
+
+    for (std::size_t index = 0U; index < tokens.size(); ++index) {
+        const auto directive = uppercase(trim_token(tokens[index]));
+        if (directive != "ISOLATION") {
+            continue;
+        }
+        if (index + 1U >= tokens.size() || uppercase(trim_token(tokens[index + 1U])) != "LEVEL") {
+            continue;
+        }
+
+        const auto level_index = index + 2U;
+        if (level_index >= tokens.size()) {
+            return make_transaction_error("BEGIN ISOLATION LEVEL requires a value.",
+                                          {"Specify SNAPSHOT or READ COMMITTED."});
+        }
+
+        const auto level_token = uppercase(trim_token(tokens[level_index]));
+        if (level_token == "SNAPSHOT") {
+            txn_options.isolation_level = txn::IsolationLevel::Snapshot;
+        } else if (level_token == "READ") {
+            if (level_index + 1U >= tokens.size()) {
+                return make_transaction_error("READ isolation requires trailing COMMITTED keyword.",
+                                              {"Use READ COMMITTED or SNAPSHOT."});
+            }
+            const auto follower = uppercase(trim_token(tokens[level_index + 1U]));
+            if (follower != "COMMITTED") {
+                return make_transaction_error("Unsupported isolation level after READ keyword.",
+                                              {"Use READ COMMITTED or SNAPSHOT."});
+            }
+            txn_options.isolation_level = txn::IsolationLevel::ReadCommitted;
+        } else if (level_token == "READ_COMMITTED") {
+            txn_options.isolation_level = txn::IsolationLevel::ReadCommitted;
+        } else if (level_token == "READ COMMITTED") {
+            txn_options.isolation_level = txn::IsolationLevel::ReadCommitted;
+        } else {
+            return make_transaction_error("Unsupported isolation level.",
+                                          {"Supported isolation levels: SNAPSHOT, READ COMMITTED."});
+        }
+        break;
+    }
+
     session_transaction_.emplace();
     session_transaction_->context = txn_manager_.begin(txn_options);
     session_transaction_->dirty = false;
@@ -3484,7 +3571,8 @@ CommandMetrics ShellBackend::execute_begin()
 
     CommandMetrics metrics{};
     metrics.success = true;
-    metrics.summary = "Transaction started.";
+    metrics.summary = std::string{"Transaction started (isolation="}
+                         + std::string{isolation_level_to_string(txn_options.isolation_level)} + ')';
     return metrics;
 }
 
@@ -3495,7 +3583,8 @@ CommandMetrics ShellBackend::execute_commit()
     }
 
     if (session_requires_rollback()) {
-        return make_transaction_error("Transaction is aborted; run ROLLBACK before COMMIT.");
+        return make_transaction_error("Transaction is aborted; run ROLLBACK before COMMIT.",
+                                      {"Run ROLLBACK to clear the transaction before retrying."});
     }
 
     try {
@@ -3554,7 +3643,7 @@ CommandMetrics ShellBackend::execute_insert(const std::string& sql)
                                          "Failed to parse INSERT statement.");
     }
 
-    txn::TransactionOptions txn_options{};
+    auto txn_options = make_default_transaction_options();
     TransactionWorkScope txn_scope{*this, txn_manager_, txn_options};
     auto& txn_context = txn_scope.context();
 
@@ -3845,7 +3934,7 @@ CommandMetrics ShellBackend::execute_update(const std::string& sql)
                                          "Failed to parse UPDATE statement.");
     }
 
-    txn::TransactionOptions txn_options{};
+    auto txn_options = make_default_transaction_options();
     TransactionWorkScope txn_scope{*this, txn_manager_, txn_options};
     auto& txn_context = txn_scope.context();
 
@@ -4306,7 +4395,7 @@ CommandMetrics ShellBackend::execute_delete(const std::string& sql)
                                          "Failed to parse DELETE statement.");
     }
 
-    txn::TransactionOptions txn_options{};
+    auto txn_options = make_default_transaction_options();
     TransactionWorkScope txn_scope{*this, txn_manager_, txn_options};
     auto& txn_context = txn_scope.context();
 
@@ -4572,7 +4661,7 @@ CommandMetrics ShellBackend::execute_select(const std::string& sql)
         return make_parser_error_metrics(sql, std::move(parse_result.diagnostics), "Failed to parse SELECT statement.");
     }
 
-    txn::TransactionOptions txn_options{};
+    auto txn_options = make_default_transaction_options();
     txn_options.read_only = true;
     TransactionWorkScope txn_scope{*this, txn_manager_, txn_options};
     auto& txn_context = txn_scope.context();

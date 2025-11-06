@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace bored::txn {
@@ -10,9 +11,21 @@ namespace bored::txn {
 using TransactionId = std::uint64_t;
 using CommitSequence = std::uint64_t;
 
+enum class IsolationLevel : std::uint8_t {
+    Snapshot = 0U,
+    ReadCommitted = 1U
+};
+
+enum class TransactionConflictKind : std::uint8_t {
+    Lock = 0U,
+    Snapshot = 1U,
+    Serialization = 2U
+};
+
 struct TransactionOptions final {
     bool read_only = false;
     bool deferrable = false;
+    IsolationLevel isolation_level = IsolationLevel::Snapshot;
 };
 
 enum class TransactionState {

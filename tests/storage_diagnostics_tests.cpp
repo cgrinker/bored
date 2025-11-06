@@ -223,6 +223,11 @@ txn::TransactionTelemetrySnapshot make_transaction(std::uint64_t seed)
     snapshot.last_snapshot_xmin = seed + 3U;
     snapshot.last_snapshot_xmax = seed + 7U;
     snapshot.last_snapshot_age = (seed + 7U) - (seed + 3U);
+    snapshot.snapshot_isolation_active = seed + 4U;
+    snapshot.read_committed_active = seed + 5U;
+    snapshot.lock_conflicts = seed + 6U;
+    snapshot.snapshot_conflicts = seed + 7U;
+    snapshot.serialization_failures = seed + 8U;
     return snapshot;
 }
 
@@ -382,6 +387,11 @@ TEST_CASE("collect_storage_diagnostics aggregates totals and details")
     REQUIRE(doc.transactions.total.committed_transactions == ((1U + 2U) + (4U + 2U)));
     REQUIRE(doc.transactions.total.last_snapshot_xmin == std::min(1U + 3U, 4U + 3U));
     REQUIRE(doc.transactions.total.last_snapshot_xmax == std::max(1U + 7U, 4U + 7U));
+    REQUIRE(doc.transactions.total.snapshot_isolation_active == ((1U + 4U) + (4U + 4U)));
+    REQUIRE(doc.transactions.total.read_committed_active == ((1U + 5U) + (4U + 5U)));
+    REQUIRE(doc.transactions.total.lock_conflicts == ((1U + 6U) + (4U + 6U)));
+    REQUIRE(doc.transactions.total.snapshot_conflicts == ((1U + 7U) + (4U + 7U)));
+    REQUIRE(doc.transactions.total.serialization_failures == ((1U + 8U) + (4U + 8U)));
     REQUIRE(doc.planner.details.size() == 2U);
     REQUIRE(doc.planner.total.plans_attempted == ((2U + 1U) + (5U + 1U)));
     REQUIRE(doc.planner.total.plans_succeeded == (2U + 5U));

@@ -162,6 +162,11 @@ bored::txn::TransactionTelemetrySnapshot make_mock_transactions()
     snapshot.last_snapshot_xmin = 9'204U;
     snapshot.last_snapshot_xmax = 9'452U;
     snapshot.last_snapshot_age = 8U;
+    snapshot.snapshot_isolation_active = 4U;
+    snapshot.read_committed_active = 1U;
+    snapshot.lock_conflicts = 37U;
+    snapshot.snapshot_conflicts = 9U;
+    snapshot.serialization_failures = 0U;
     return snapshot;
 }
 
@@ -229,6 +234,10 @@ void print_text_summary(const StorageDiagnosticsDocument& document, std::ostream
     out << "  active                : " << transactions.active_transactions << '\n';
     out << "  committed / aborted   : " << transactions.committed_transactions << " / "
         << transactions.aborted_transactions << '\n';
+    out << "  isolation (snapshot/read committed): " << transactions.snapshot_isolation_active
+        << " / " << transactions.read_committed_active << '\n';
+    out << "  conflicts (lock/snapshot/serialization): " << transactions.lock_conflicts << " / "
+        << transactions.snapshot_conflicts << " / " << transactions.serialization_failures << '\n';
     out << "  last snapshot age     : " << transactions.last_snapshot_age << '\n';
 
     const auto& durability = document.durability.total;

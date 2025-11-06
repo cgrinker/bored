@@ -25,10 +25,12 @@ public:
     TransactionState state() const noexcept;
     const TransactionOptions& options() const noexcept;
     std::error_code last_error() const noexcept;
+    std::optional<TransactionConflictKind> last_conflict() const noexcept;
 
     void on_commit(std::function<void()> callback);
     void on_abort(std::function<void()> callback);
     void register_undo(std::function<std::error_code()> callback);
+    void record_conflict(TransactionConflictKind kind) noexcept;
 
     explicit operator bool() const noexcept;
 
@@ -43,6 +45,8 @@ private:
         std::vector<std::function<std::error_code()>> undo_callbacks{};
         std::optional<CommitTicket> commit_ticket{};
         std::error_code last_error{};
+        TransactionManager* manager = nullptr;
+        std::optional<TransactionConflictKind> last_conflict{};
     };
 
     explicit TransactionContext(std::shared_ptr<State> state);
@@ -114,6 +118,7 @@ public:
     CheckpointFence acquire_checkpoint_fence();
     void reset_checkpoint_block_metrics();
     CheckpointBlockMetrics consume_checkpoint_block_metrics();
+    void record_conflict(TransactionConflictKind kind) noexcept;
 
 private:
     using StatePtr = std::shared_ptr<TransactionContext::State>;
@@ -121,7 +126,7 @@ private:
     void record_state_locked(const StatePtr& state);
     void erase_state_locked(TransactionId id);
     void recompute_oldest_locked();
-    std::size_t count_active_locked() const;
+    std::size_t count_active_locked(TransactionTelemetrySnapshot* telemetry) const;
     Snapshot build_snapshot_locked(TransactionId self_id) const;
     CommitSequence oldest_snapshot_lsn_locked(TransactionId exclude_id,
                                               CommitSequence fallback) const;
@@ -148,6 +153,9 @@ private:
     mutable TransactionId external_low_water_mark_ = 0U;
     mutable TransactionId last_allocated_id_ = 0U;
     mutable Telemetry telemetry_{};
+    std::atomic<std::uint64_t> lock_conflicts_{0U};
+    std::atomic<std::uint64_t> snapshot_conflicts_{0U};
+    std::atomic<std::uint64_t> serialization_failures_{0U};
     bool checkpoint_guard_active_ = false;
     mutable std::condition_variable checkpoint_condition_{};
     mutable CheckpointBlockMetrics checkpoint_block_metrics_{};

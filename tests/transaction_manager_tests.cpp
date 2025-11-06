@@ -247,6 +247,11 @@ TEST_CASE("TransactionManager telemetry tracks lifecycle", "[txn]")
     CHECK(telemetry.active_transactions == 0U);
     CHECK(telemetry.committed_transactions == 0U);
     CHECK(telemetry.aborted_transactions == 0U);
+    CHECK(telemetry.snapshot_isolation_active == 0U);
+    CHECK(telemetry.read_committed_active == 0U);
+    CHECK(telemetry.lock_conflicts == 0U);
+    CHECK(telemetry.snapshot_conflicts == 0U);
+    CHECK(telemetry.serialization_failures == 0U);
 
     auto first = manager.begin();
     auto second = manager.begin();
@@ -258,6 +263,8 @@ TEST_CASE("TransactionManager telemetry tracks lifecycle", "[txn]")
     CHECK(active.last_snapshot_xmin == first.id());
     CHECK(active.last_snapshot_xmax == manager.next_transaction_id());
     CHECK(active.last_snapshot_age == active.last_snapshot_xmax - active.last_snapshot_xmin);
+    CHECK(active.snapshot_isolation_active == 2U);
+    CHECK(active.read_committed_active == 0U);
 
     manager.commit(first);
     manager.abort(second);
@@ -268,6 +275,36 @@ TEST_CASE("TransactionManager telemetry tracks lifecycle", "[txn]")
     CHECK(after.committed_transactions == 1U);
     CHECK(after.aborted_transactions == 1U);
     CHECK(after.last_snapshot_xmax >= after.last_snapshot_xmin);
+    CHECK(after.snapshot_isolation_active == 0U);
+    CHECK(after.lock_conflicts == 0U);
+}
+
+TEST_CASE("TransactionManager tracks isolation distribution and conflicts", "[txn]")
+{
+    bored::txn::TransactionIdAllocatorStub allocator{55U};
+    bored::txn::TransactionManager manager{allocator};
+
+    bored::txn::TransactionOptions read_committed{};
+    read_committed.isolation_level = bored::txn::IsolationLevel::ReadCommitted;
+    auto read_committed_ctx = manager.begin(read_committed);
+    auto snapshot_ctx = manager.begin();
+
+    snapshot_ctx.record_conflict(bored::txn::TransactionConflictKind::Lock);
+    read_committed_ctx.record_conflict(bored::txn::TransactionConflictKind::Snapshot);
+
+    auto telemetry = manager.telemetry_snapshot();
+    CHECK(telemetry.active_transactions == 2U);
+    CHECK(telemetry.snapshot_isolation_active == 1U);
+    CHECK(telemetry.read_committed_active == 1U);
+    CHECK(telemetry.lock_conflicts == 1U);
+    CHECK(telemetry.snapshot_conflicts == 1U);
+    CHECK(snapshot_ctx.last_conflict().has_value());
+    CHECK(*snapshot_ctx.last_conflict() == bored::txn::TransactionConflictKind::Lock);
+    CHECK(read_committed_ctx.last_conflict().has_value());
+    CHECK(*read_committed_ctx.last_conflict() == bored::txn::TransactionConflictKind::Snapshot);
+
+    manager.abort(snapshot_ctx);
+    manager.abort(read_committed_ctx);
 }
 
 TEST_CASE("TransactionManager commit drives commit pipeline", "[txn]")

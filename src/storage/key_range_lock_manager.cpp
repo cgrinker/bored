@@ -76,6 +76,7 @@ std::error_code KeyRangeLockManager::acquire(catalog::IndexId index_id,
         } else if (state.owner == owner) {
             ++state.depth;
         } else {
+            txn->record_conflict(txn::TransactionConflictKind::Lock);
             return std::make_error_code(std::errc::resource_unavailable_try_again);
         }
     }

@@ -50,6 +50,9 @@ std::error_code LockManager::acquire(std::uint32_t page_id, PageLatchMode mode)
 std::error_code LockManager::acquire(std::uint32_t page_id, PageLatchMode mode, txn::TransactionContext* txn)
 {
     auto ec = acquire(page_id, mode);
+    if (ec == make_busy_error() && txn != nullptr) {
+        txn->record_conflict(txn::TransactionConflictKind::Lock);
+    }
     if (ec || txn == nullptr) {
         return ec;
     }

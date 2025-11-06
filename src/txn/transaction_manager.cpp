@@ -116,6 +116,11 @@ std::error_code TransactionContext::last_error() const noexcept
     return state_ ? state_->last_error : std::error_code{};
 }
 
+std::optional<TransactionConflictKind> TransactionContext::last_conflict() const noexcept
+{
+    return state_ ? state_->last_conflict : std::optional<TransactionConflictKind>{};
+}
+
 void TransactionContext::on_commit(std::function<void()> callback)
 {
     if (!state_) {
@@ -141,6 +146,17 @@ void TransactionContext::register_undo(std::function<std::error_code()> callback
     }
 
     state_->undo_callbacks.emplace_back(std::move(callback));
+}
+
+void TransactionContext::record_conflict(TransactionConflictKind kind) noexcept
+{
+    if (!state_) {
+        return;
+    }
+    state_->last_conflict = kind;
+    if (state_->manager) {
+        state_->manager->record_conflict(kind);
+    }
 }
 
 TransactionContext::operator bool() const noexcept
@@ -173,6 +189,8 @@ TransactionContext TransactionManager::begin(const TransactionOptions& options)
 {
     auto state = std::make_shared<TransactionContext::State>();
     state->options = options;
+    state->manager = this;
+    state->last_conflict.reset();
 
     {
         std::unique_lock<std::mutex> lock{mutex_};
@@ -368,12 +386,15 @@ TransactionTelemetrySnapshot TransactionManager::telemetry_snapshot() const
 {
     std::scoped_lock lock{mutex_};
     TransactionTelemetrySnapshot snapshot{};
-    snapshot.active_transactions = count_active_locked();
+    snapshot.active_transactions = count_active_locked(&snapshot);
     snapshot.committed_transactions = telemetry_.committed_transactions;
     snapshot.aborted_transactions = telemetry_.aborted_transactions;
     snapshot.last_snapshot_xmin = telemetry_.last_snapshot_xmin;
     snapshot.last_snapshot_xmax = telemetry_.last_snapshot_xmax;
     snapshot.last_snapshot_age = telemetry_.last_snapshot_age;
+    snapshot.lock_conflicts = lock_conflicts_.load(std::memory_order_relaxed);
+    snapshot.snapshot_conflicts = snapshot_conflicts_.load(std::memory_order_relaxed);
+    snapshot.serialization_failures = serialization_failures_.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -391,7 +412,7 @@ TransactionId TransactionManager::next_transaction_id() const noexcept
 std::size_t TransactionManager::active_transaction_count() const
 {
     std::scoped_lock lock{mutex_};
-    return count_active_locked();
+    return count_active_locked(nullptr);
 }
 
 void TransactionManager::advance_low_water_mark(TransactionId txn_id)
@@ -547,18 +568,47 @@ void TransactionManager::recompute_oldest_locked()
     oldest_active_ = candidate;
 }
 
-std::size_t TransactionManager::count_active_locked() const
+std::size_t TransactionManager::count_active_locked(TransactionTelemetrySnapshot* telemetry) const
 {
     std::size_t count = 0U;
     for (auto it = active_.begin(); it != active_.end();) {
-        if (it->second.expired()) {
+        auto shared = it->second.lock();
+        if (!shared) {
             it = active_.erase(it);
             continue;
         }
         ++count;
+        if (telemetry) {
+            switch (shared->options.isolation_level) {
+            case IsolationLevel::ReadCommitted:
+                ++telemetry->read_committed_active;
+                break;
+            case IsolationLevel::Snapshot:
+            default:
+                ++telemetry->snapshot_isolation_active;
+                break;
+            }
+        }
         ++it;
     }
     return count;
+}
+
+void TransactionManager::record_conflict(TransactionConflictKind kind) noexcept
+{
+    switch (kind) {
+    case TransactionConflictKind::Lock:
+        lock_conflicts_.fetch_add(1U, std::memory_order_relaxed);
+        break;
+    case TransactionConflictKind::Snapshot:
+        snapshot_conflicts_.fetch_add(1U, std::memory_order_relaxed);
+        break;
+    case TransactionConflictKind::Serialization:
+        serialization_failures_.fetch_add(1U, std::memory_order_relaxed);
+        break;
+    default:
+        break;
+    }
 }
 
 CommitSequence TransactionManager::oldest_snapshot_lsn_locked(TransactionId exclude_id,

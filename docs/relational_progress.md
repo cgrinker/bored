@@ -2,21 +2,21 @@
 
 This ticket-level report summarizes the relational engine roadmap, capturing what has shipped, what remains, and which code paths we expect to touch next so the team can quickly regain context when switching threads.
 
-_Last updated: 2025-11-05_
+_Last updated: 2025-11-07_
 
-Latest validation: `ctest --output-on-failure` (471/471) on 2025-11-05 covering greedy join reorder tracing, recursive spool selection, multi-statement worktable reuse, advanced index catalog metadata propagation, and the new index-costing regression suite; `build/bored_benchmarks --samples=10 --json` refreshed FSM refresh, retention pruning, overflow replay, and spool recovery baselines on 2025-11-05.
+Latest validation: `ctest --output-on-failure` (471/471) on 2025-11-05 covering greedy join reorder tracing, recursive spool selection, multi-statement worktable reuse, advanced index catalog metadata propagation, and the new index-costing regression suite; `build/bored_benchmarks --samples=10 --json` refreshed FSM refresh, retention pruning, overflow replay, and spool recovery baselines on 2025-11-05; targeted `ctest -R "TransactionManager|ShellBackend"` suites now exercise configurable isolation defaults, BEGIN parsing, telemetry wiring, and conflict counters (added 2025-11-07).
 
 ## Current Capabilities
 
 - **Storage Durability**: WAL writer/reader/replayer pipeline complete with retention, checkpoint scheduling, crash recovery, and page manager integration; overflow WAL descriptors now inherit the owning table page/transaction so recovery emits a single undo span per owner while crash drills validate overflow chain undo paths with cached payloads stripped of stub headers.
 - **Catalog & DDL**: Persistent catalog with fully wired DDL handlers (create/alter/drop) for schemas, tables, and indexes, including restart-safe catalog bootstrap.
 - **Sequence Allocation (foundation)**: Transactional sequence allocator stages `next_value` updates via catalog mutator hooks, dispatcher now wires allocators into DDL handlers, and Catch2 regression coverage remains; planner/executor wiring is still pending.
-- **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell now supports BEGIN/COMMIT/ROLLBACK so INSERT/UPDATE/DELETE/SELECT flows can share session-scoped transactions with executor snapshots; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard now propagates oldest reader LSNs while cross-session isolation and deadlock handling remain on the roadmap.
+- **Transaction Lifecycle (partial)**: Transaction manager handles ID allocation, snapshots, commit metadata emission, and integrates with WAL commit pipeline; bored_shell now supports BEGIN/COMMIT/ROLLBACK so INSERT/UPDATE/DELETE/SELECT flows can share session-scoped transactions with executor snapshots; configurable isolation levels (Snapshot, Read Committed) flow from shell defaults and BEGIN directives into planner/executor pipelines; conflict instrumentation now records lock and snapshot conflicts in transaction telemetry; catalog accessor caches refresh on snapshot changes and planner/executor pipelines share the same transaction snapshot; snapshot-aware retention guard propagates oldest reader LSNs while cross-session deadlock handling remains on the roadmap.
 - **Parser, Binder, and Normalizer**: PEGTL-based SQL parser covering core DDL/DML verbs (including `WITH RECURSIVE` anchor and recursive members); binder resolves identifiers, enforces CTE column/type compatibility, and scopes recursive references; lowering continues to inline non-recursive CTE definitions and now preserves recursive-reference metadata on `LogicalCteScan`, while normalization stages generate logical plans for select/join queries.
 - **Planner & Executor (core path)**: Logical-to-physical planning for scans, projections, filters, joins, insert/update/delete; executor framework supports sequential scans, nested loop and hash joins, basic aggregations, and WAL-aware DML operators. Table scans now evaluate catalog statistics and equality predicates to favor index probes before falling back to heap scans, surfacing index metadata in explain output.
 - **Constraint Enforcement**: Planner lowers unique/foreign key operators and executor now performs index-backed uniqueness checks plus referential integrity probes with MVCC-aware visibility.
 - **Index Infrastructure**: B+Tree page formats, insertion/deletion/update routines, retention hooks, and executor-side probes are implemented; background pruning/retention and telemetry wired up; catalog metadata now records uniqueness flags, covering column lists, and partial predicates ahead of planner/executor integration.
-- **Observability & Tooling**: Storage diagnostics, WAL/retention telemetry, checkpoint metrics, shell integration for disk-backed catalogs and WAL configuration, and CI enforcement of storage benchmark baselines.
+- **Observability & Tooling**: Storage diagnostics, WAL/retention telemetry, checkpoint metrics, shell integration for disk-backed catalogs and WAL configuration, isolation-level distribution and conflict counters in transaction telemetry, and CI enforcement of storage benchmark baselines.
 
 ## Feature Checklist
 
@@ -33,7 +33,7 @@ Latest validation: `ctest --output-on-failure` (471/471) on 2025-11-05 covering 
 1. **Constraint Enforcement**: Finish catalog DDL plumbing for constraint creation/drop and surface richer shell diagnostics for violations now that enforcement is active.
 2. **Sequence/Identity Support**: Wire planner/executor and DDL verbs to consume the transactional sequence allocator so auto-increment columns surface to users.
 3. **CTE Parsing & Execution**: Planner memo now deduplicates non-recursive CTE producers; spool executor is available but needs worktable integration with snapshot-aware iterators and shell wiring.
-4. **Transaction Visibility**: Finish Transaction & Concurrency Milestone 1 to provide consistent snapshots across planner/executor and integrate with retention manager for snapshot retirement.
+4. **Transaction Visibility**: Finish Transaction & Concurrency Milestone 1 to provide consistent snapshots across planner/executor and integrate with retention manager for snapshot retirement, plus deadlock detection and conflict-resolution tooling atop the newly surfaced isolation metrics.
 5. **Optimizer Enhancements**: Broaden rule set, add cost-based join order selection, and integrate catalog statistics for selectivity estimates.
 6. **Index DDL Integration**: Catalog now persists uniqueness flags, covering column lists, and partial predicates; next steps are parser/shell wiring plus planner/executor adoption so predicates and joins pick the new indexes.
 
@@ -77,15 +77,15 @@ Latest validation: `ctest --output-on-failure` (471/471) on 2025-11-05 covering 
    - Status note: Milestone 5 is closed as of 2025-11-05; focus shifts to Comprehensive Transactions & Isolation Levels.
    - Source files to update: src/parser/ddl_command_builder.cpp, src/parser/grammar.cpp, src/storage/index_btree_manager.cpp, src/storage/index_retention.cpp, src/planner/cost_model.cpp, src/planner/statistics_catalog.cpp, src/planner/rules/, src/planner/rule.cpp, tests/index_btree_manager_tests.cpp, tests/planner_cost_model_tests.cpp, tests/planner_rule_tests.cpp, tests/ddl_handlers_tests.cpp, tests/catalog_ddl_tests.cpp
 
-6. **Comprehensive Transactions & Isolation Levels (Planned)**
-    - **Kickoff focus (2025-11-05)** — execute sequentially to reach PostgreSQL/MySQL parity:
+6. **Comprehensive Transactions & Isolation Levels (Completed)**
+   - **Kickoff focus (2025-11-05)** — executed sequentially to reach PostgreSQL/MySQL parity:
    1. [x] Implement lock manager integration for key-range locking where needed for uniqueness (establishes next-key primitives for constraint enforcement and SERIALIZABLE plans). _Shell now wires a `KeyRangeLockManager` into unique enforcement so tuples acquire next-key locks; coverage via `ctest -R "KeyRangeLockManager|UniqueEnforceExecutor"`._
    2. [x] Add multi-version concurrency control (MVCC) visibility rules across executor operators (delivers snapshot isolation semantics across scans, joins, and DML).
-      - [x] Regression coverage for sequential scans ensures MVCC visibility (`ctest -R "SequentialScanExecutor"`).
-      - [x] Extend nested loop join pipelines with MVCC visibility regression tests so join inputs honour snapshots (`ctest -R "NestedLoopJoinExecutor"`).
-      - [x] Expand snapshot enforcement to spool iterators and DML operators, rounding out executor coverage (`ctest -R "SpoolExecutor|DeleteExecutor|UpdateExecutor"`).
-       3. [ ] Provide configurable isolation levels and conflict resolution instrumentation (surfaced user contract and diagnostics once locking + MVCC are in place).
-   - Source files to update: src/storage/lock_manager.cpp, src/storage/lock_introspection.cpp, src/executor/mvcc_visibility.cpp, src/txn/transaction_manager.cpp, src/txn/wal_commit_pipeline.cpp, tests/lock_manager_tests.cpp, tests/transaction_manager_tests.cpp, tests/transaction_crash_recovery_integration_tests.cpp
+     - [x] Regression coverage for sequential scans ensures MVCC visibility (`ctest -R "SequentialScanExecutor"`).
+     - [x] Extend nested loop join pipelines with MVCC visibility regression tests so join inputs honour snapshots (`ctest -R "NestedLoopJoinExecutor"`).
+     - [x] Expand snapshot enforcement to spool iterators and DML operators, rounding out executor coverage (`ctest -R "SpoolExecutor|DeleteExecutor|UpdateExecutor"`).
+      3. [x] Provide configurable isolation levels and conflict resolution instrumentation (surfaced user contract and diagnostics once locking + MVCC are in place). _TransactionManager now tracks isolation-level distribution and conflict kinds, bored_shell exposes BEGIN isolation directives plus defaults, and storage/diagnostics surfaces expose the new telemetry with regression coverage in `tests/transaction_manager_tests.cpp` and `tests/storage_diagnostics_tests.cpp`._
+   - Source files touched: src/storage/lock_manager.cpp, src/storage/key_range_lock_manager.cpp, src/txn/transaction_manager.cpp, src/shell/shell_backend.cpp, include/bored/txn/transaction_types.hpp, tests/transaction_manager_tests.cpp, tests/storage_diagnostics_tests.cpp, tests/shell_backend_tests.cpp
 
 7. **Extended SQL Surface & Tooling (Planned)**
    - Broaden parser/executor to cover CTEs, window functions, analytic aggregates, and advanced DDL (constraints, sequences, views).

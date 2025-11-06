@@ -278,6 +278,11 @@ bored::txn::TransactionTelemetrySnapshot& accumulate(bored::txn::TransactionTele
     }
     target.last_snapshot_xmax = std::max(target.last_snapshot_xmax, source.last_snapshot_xmax);
     target.last_snapshot_age = std::max(target.last_snapshot_age, source.last_snapshot_age);
+    target.snapshot_isolation_active += source.snapshot_isolation_active;
+    target.read_committed_active += source.read_committed_active;
+    target.lock_conflicts += source.lock_conflicts;
+    target.snapshot_conflicts += source.snapshot_conflicts;
+    target.serialization_failures += source.serialization_failures;
     return target;
 }
 

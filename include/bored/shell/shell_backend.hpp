@@ -75,6 +75,7 @@ public:
         std::size_t wal_retention_segments = 0U;
         std::chrono::hours wal_retention_hours{0};
         std::filesystem::path wal_archive_directory{};
+        txn::IsolationLevel default_isolation_level = txn::IsolationLevel::Snapshot;
     };
 
     ShellBackend();
@@ -270,7 +271,7 @@ private:
     CommandMetrics execute_update(const std::string& sql);
     CommandMetrics execute_delete(const std::string& sql);
     CommandMetrics execute_select(const std::string& sql);
-    CommandMetrics execute_begin();
+    CommandMetrics execute_begin(std::string_view command);
     CommandMetrics execute_commit();
     CommandMetrics execute_rollback();
     CommandMetrics make_error_metrics(const std::string& sql,
@@ -293,6 +294,8 @@ private:
 
     [[nodiscard]] static std::string trim(std::string_view text);
     [[nodiscard]] static std::string uppercase(std::string_view text);
+    [[nodiscard]] txn::TransactionOptions make_default_transaction_options() const;
+    [[nodiscard]] static std::string_view isolation_level_to_string(txn::IsolationLevel level) noexcept;
 
     Config config_{};
     txn::TransactionIdAllocatorStub txn_allocator_{1'000U};
